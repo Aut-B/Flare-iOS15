@@ -263,6 +263,7 @@ public extension View {
         }
     }
 
+    @ViewBuilder
     func flarePresentationCompactAdaptationNone() -> some View {
         if #available(iOS 16.4, *) {
             self.presentationCompactAdaptation(.none)
