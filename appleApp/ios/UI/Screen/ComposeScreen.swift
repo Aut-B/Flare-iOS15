@@ -179,7 +179,8 @@ struct ComposeScreen: View {
         .sheet(isPresented: $showDraftSheet) {
             draftSheet
         }
-        .toolbarTitleDisplayMode(.inline)
+        // toolbarTitleDisplayMode 是 iOS 17；iOS 15 用等价的 navigationBarTitleDisplayMode
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 switch onEnum(of: presenter.state.composeStatus) {
