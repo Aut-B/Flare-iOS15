@@ -5,6 +5,7 @@ import LazyPager
 import AVKit
 import UIKit
 import FlareAppleCore
+import NavigationBackport
 
 struct MediaViewerShareContext {
     let statusKey: String?
@@ -39,10 +40,11 @@ struct MediaViewerScreen: View {
     @State private var isPreparingShare = false
     @State private var playbackRate: Float = 1
     @State private var isLandscapeViewing = false
-    @State private var postSheetPresented = false
-    @State private var postSummaryHeight: CGFloat = 120
-    // iOS 15 回退：PresentationDetent 是 iOS 16 API，改用 FlareSheetDetent 记账。
-    @State private var postDetent: FlareSheetDetent = .height(120)
+    /// 「查看这条帖子」的全文 sheet 是否展开（点底部紧凑卡片打开）。
+    /// iOS 15 回退：PresentationDetent 是 iOS 16 API，.sheet 在 iOS 15 只有
+    /// 全屏 large 一档——原来的 detent sheet 会把整张图片盖住，所以折叠态
+    /// 改用 ZStack 内的底部紧凑卡片，只有展开阅读才用全屏 sheet。
+    @State private var postExpanded = false
 
     init(
         medias: [any UiMedia],
@@ -149,7 +151,7 @@ struct MediaViewerScreen: View {
                             config.preloadAmount = 1
                         }
 
-                        if shouldShowBottomOverlay, !postSheetPresented {
+                        if shouldShowBottomOverlay, !showPostCard {
                             bottomOverlay
                                 .offset(
                                     y: MediaViewerDismissGesturePolicy.verticalOffset(
@@ -181,13 +183,19 @@ struct MediaViewerScreen: View {
                     .allowsHitTesting(!isDismissing)
                     .zIndex(3)
             }
-            if postExpanded {
-                Color.black.opacity(0.32)
-                    .ignoresSafeArea()
-                    .onTapGesture { collapsePost() }
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityLabel(Text("media_post_collapse"))
-                    .zIndex(4)
+            if showPostCard, let post {
+                compactPostCard(post)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .offset(
+                        y: MediaViewerDismissGesturePolicy.verticalOffset(
+                            for: .bottomOverlay,
+                            translationY: dismissOffset
+                        )
+                    )
+                    .opacity(opacity)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .allowsHitTesting(!isDismissing)
+                    .zIndex(2)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -195,7 +203,6 @@ struct MediaViewerScreen: View {
         .ugoiraExportStatus()
         .onAppear {
             applyInitialSelectionIfNeeded()
-            postSheetPresented = shouldShowPostSheet
         }
         .backportOnChange(of: mediaSignature) { _, _ in
             applyInitialSelectionIfNeeded()
@@ -213,12 +220,8 @@ struct MediaViewerScreen: View {
                 MediaOrientationController.setLandscape(false)
             }
         }
-        .backportOnChange(of: shouldShowPostSheet) { _, visible in
-            collapsePost()
-            postSheetPresented = visible
-        }
-        .sheet(isPresented: $postSheetPresented) {
-            mediaPostSheet
+        .sheet(isPresented: $postExpanded) {
+            postDetailSheet
         }
         .background(.black.opacity(opacity))
         .background(ClearFullScreenBackground())
@@ -261,7 +264,7 @@ struct MediaViewerScreen: View {
     private var topOverlay: some View {
         HStack(spacing: 8) {
             topOverlayButton(width: 44, action: {
-                if postExpanded { collapsePost() } else { dismiss() }
+                dismiss()
             }) {
                 Image(fontAwesome: .xmark)
             }
@@ -364,76 +367,106 @@ struct MediaViewerScreen: View {
         }
     }
 
-    private var shouldShowPostSheet: Bool {
+    /// 折叠态紧凑帖子卡片的显示条件。点图片切换 showData 时它跟着隐藏/出现，
+    /// 这就是「点击图片就不显示」的开关。
+    private var showPostCard: Bool {
         showPostInMediaViewer && post != nil && showData && !isLandscapeViewing && !isDismissing
     }
 
-    private var postExpanded: Bool {
-        postSheetPresented && postDetent == .large
-    }
+    /// 折叠态紧凑帖子卡片：iOS 15 上 .sheet 只有全屏 large detent，
+    /// 原来的 detent sheet（用户信息 + 互动按钮，约 140pt，在 iOS 15 上更是
+    /// 直接全屏）会把图片挡得严严实实。这里压成一条 ~54pt 的底部卡片：
+    /// 页面指示器/视频控制 + 小头像 + 名称 + 互动按钮，点卡片展开全文。
+    @ViewBuilder
+    private func compactPostCard(_ post: UiTimelineV2.Post) -> some View {
+        VStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 2.5)
+                .fill(.white.opacity(0.35))
+                .frame(width: 36, height: 5)
+                .padding(.top, 6)
+                .padding(.bottom, 8)
 
-    private func collapsePost() {
-        withAnimation {
-            postDetent = .height(postSummaryHeight)
+            if !isLandscapeViewing, medias.count > 1 {
+                LazyPagerIndicator(count: medias.count, page: $selectedIndex)
+            }
+
+            if let selectedMedia, case .video = onEnum(of: selectedMedia) {
+                VideoControlView(
+                    isPlaying: $isPlaying,
+                    currentTime: timeBinding(for: selectedMedia.url),
+                    videoState: videoState,
+                    playbackRate: playbackRate
+                )
+                .id(selectedMedia.url)
+            }
+
+            if let user = post.user {
+                HStack(spacing: 8) {
+                    AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                        .frame(width: 32, height: 32)
+                    VStack(alignment: .leading, spacing: 0) {
+                        RichText(text: user.name)
+                        Text(user.handle.canonical)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .lineLimit(1)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        user.onClicked(ClickContext(launcher: AppleUriLauncher(openUrl: openURL)))
+                    }
+                    Spacer(minLength: 4)
+                    if postActionStyle != .hidden {
+                        StatusActionsView(data: Array(post.actions), useText: false)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 10)
+        .frame(maxWidth: .infinity)
+        .background(Color.black.opacity(0.72))
+        .onTapGesture {
+            postExpanded = true
         }
     }
 
+    /// 展开态：全屏阅读这条帖子（点紧凑卡片打开）。
     @ViewBuilder
-    private var mediaPostSheet: some View {
+    private var postDetailSheet: some View {
         if let post {
-            let content = VStack(spacing: 0) {
-                if postDetent == .large {
-                    ScrollView {
-                        StatusView(
-                            data: post,
-                            isDetail: true,
-                            isClickable: false,
-                            showAttachments: false,
-                            forceHideActions: postActionStyle == .hidden,
-                            showParents: false,
-                            quotes: quotes
-                        )
-                        .padding(.horizontal)
-                        .padding(.bottom)
-                    }
-                    .padding(.top, 24)
-                } else {
-                    VStack(spacing: 8) {
-                        bottomOverlayContent
-                        if let user = post.user {
-                            UserCompatView(data: user, trailing: { EmptyView() }) {
-                                user.onClicked(ClickContext(launcher: AppleUriLauncher(openUrl: openURL)))
+            NBNavigationStack {
+                ScrollView {
+                    StatusView(
+                        data: post,
+                        isDetail: true,
+                        isClickable: false,
+                        showAttachments: false,
+                        forceHideActions: postActionStyle == .hidden,
+                        showParents: false,
+                        quotes: quotes
+                    )
+                    .padding(.horizontal)
+                    .padding(.bottom)
+                }
+                .padding(.top, 24)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button {
+                            postExpanded = false
+                        } label: {
+                            Label {
+                                Text("Close")
+                            } icon: {
+                                Image(systemName: "xmark")
                             }
                         }
-                        if postActionStyle != .hidden {
-                            StatusActionsView(data: Array(post.actions), useText: false)
-                        }
                     }
-                    .padding(.horizontal)
-                    .padding(.top, 24)
-                    .padding(.bottom, 8)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .flareOnGeometry({ proxy in ceil(proxy.size.height) }, action: { height in
-                        guard height > 0, height != postSummaryHeight else { return }
-                        postSummaryHeight = height
-                        if postDetent != .large { postDetent = .height(height) }
-                    })
-                    Spacer(minLength: 0)
                 }
             }
-
-            Group {
-                if #available(iOS 26.0, *) {
-                    content
-                } else {
-                    content.flarePresentationBackgroundMaterial(regular: postDetent == .large)
-                }
-            }
-            .flarePresentationCompactAdaptationNone()
             .flarePresentationDragIndicatorVisible()
+            .flarePresentationCompactAdaptationNone()
             .flarePresentationContentInteractionResizes()
-            // The viewer supplies the expanded scrim so tapping it collapses, rather than dismisses, the sheet.
-            .flarePresentationBackgroundInteractionEnabled()
             .preferredColorScheme(.dark)
         }
     }
