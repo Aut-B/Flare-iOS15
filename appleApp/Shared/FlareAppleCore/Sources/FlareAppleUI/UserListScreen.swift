@@ -4,7 +4,7 @@ import SwiftUI
 
 public struct UserListScreen: View {
     @Environment(\.openURL) private var openURL
-    @State private var presenter: KotlinPresenter<UserListPresenterState>
+    @StateObject private var presenter: KotlinPresenter<UserListPresenterState>
     private let isFollowing: Bool
 
     public init(
