@@ -1,5 +1,6 @@
 import FlareAppleCore
 @preconcurrency import KotlinSharedUI
+import Combine
 import SwiftUI
 
 public struct LocalHistoryContentScreen<AskAiOverlay: View>: View {
