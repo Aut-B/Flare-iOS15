@@ -4,7 +4,7 @@ import FlareAppleCore
 import NavigationBackport
 
 public struct ChannelListScreen<Destination: Hashable>: View {
-    @State private var presenter: KotlinPresenter<MisskeyChannelListPresenterState>
+    @StateObject private var presenter: KotlinPresenter<MisskeyChannelListPresenterState>
     private let accountType: AccountType
     private let timelineDestination: (UiTimelineTabItem) -> Destination
     @State private var selectedTab: MisskeyChannelListPresenterStateType = .following
