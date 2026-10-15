@@ -4,7 +4,7 @@ import FlareAppleCore
 import NavigationBackport
 
 public struct AllFeedScreen<Destination: Hashable>: View {
-    @State private var presenter: KotlinPresenter<BlueskyFeedsWithTabsPresenterState>
+    @StateObject private var presenter: KotlinPresenter<BlueskyFeedsWithTabsPresenterState>
     private let accountType: AccountType
     private let timelineDestination: (UiTimelineTabItem) -> Destination
     
