@@ -4,7 +4,7 @@ import FlareAppleCore
 import FlareAppleUI
 
 struct AgentChatScreen: View {
-    @State private var presenter: KotlinPresenter<GenericChatPresenterState>
+    @StateObject private var presenter: KotlinPresenter<GenericChatPresenterState>
     let onNavigate: (Route) -> Void
 
     var body: some View {
