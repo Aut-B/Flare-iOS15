@@ -8,7 +8,10 @@ public struct SearchScreen: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.timelineAppearance.aiConfig.agent) private var agentEnabled
     private let onAskAi: (String?) -> Void
-    @StateObject private var searchPresenter: KotlinPresenter<SearchState>
+    // iOS 15 回退：@StateObject 的 wrappedValue 只读，无法整体替换 presenter（换查询时要换实例），
+    // 所以用 @State 存，再把 objectWillChange 手动转成一次视图失效。
+    @State private var searchPresenter: KotlinPresenter<SearchState>
+    @State private var searchPresenterTick = 0
     @StateObject private var searchHistoryPresenter: KotlinPresenter<SearchHistoryState>
     @State private var searchText: String
     @State private var committedSearchText: String
@@ -34,6 +37,7 @@ public struct SearchScreen: View {
     public var body: some View {
         #if os(iOS)
         content
+            .onReceive(searchPresenter.objectWillChange) { _ in searchPresenterTick += 1 }
             .askAiSearchOverlay(
                 agentEnabled: agentEnabled,
                 isSearchPresented: isSearchPresented
