@@ -1231,7 +1231,19 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
                 !plan.isRefreshing && !refreshControl.isRefreshing &&
                 pendingEffectiveContentOffsetYAfterSnapshot == nil && mediaAnchor == nil &&
                 !collectionView.hasReadingPosition && allowsScrollAnchorRestoration
-            dataSource.apply(snapshot, animatingDifferences: animate, completion: completion)
+            // iOS 15 回退：diffable 的动画更新在 iPhone 6S 上触发了
+            // 「动画完成块里再次 performBatchUpdates」的断言崩溃——崩溃日志里
+            // 是 UICollectionView _performBatchUpdates 的 completion 中再进
+            // Flare 的更新路径（__UIVIEW_IS_EXECUTING_ANIMATION_COMPLETION_BLOCK__），
+            // 叠加 2GB 内存压力（ktriageinfo: VM - Fault hit memory shortage）。
+            // iOS 15 上强制无动画更新，彻底离开这条崩溃路径；iOS 16+ 保留原行为。
+            let shouldAnimate: Bool
+            if #available(iOS 16.0, *) {
+                shouldAnimate = animate
+            } else {
+                shouldAnimate = false
+            }
+            dataSource.apply(snapshot, animatingDifferences: shouldAnimate, completion: completion)
             restorePendingContentOffsetIfNeeded(finalize: false)
         }
     }
