@@ -5,6 +5,7 @@ import AVFoundation
 
 #if os(iOS)
 import UIKit
+import Perception
 #endif
 
 public struct MediaView: View {
@@ -84,30 +85,45 @@ public struct MediaVideoView: View {
     }
 
     public var body: some View {
+        // iOS 15 回退：@Perceptible 属性必须在 withPerceptionTracking 作用域内读取才会被登记。
+        WithPerceptionTracking {
+
         Color.gray
             .overlay {
-                NetworkImage(data: data.mediaPreviewURL, customHeader: data.customHeaders)
-                    .allowsHitTesting(false)
-                    .opacity(data is UiMediaUgoira && ugoira.image != nil ? 0 : 1)
+                // iOS 15 回退：overlay 的内容闭包是惰性求值的，@Perceptible 的读取
+                // 必须再包一层才会被登记（player / ugoira 是 @Perceptible）。
+                WithPerceptionTracking {
+                    NetworkImage(data: data.mediaPreviewURL, customHeader: data.customHeaders)
+                        .allowsHitTesting(false)
+                        .opacity(data is UiMediaUgoira && ugoira.image != nil ? 0 : 1)
+                }
             }
             .clipped()
             .overlay {
-                if let animation = data as? UiMediaUgoira, ugoira.image != nil {
-                    UgoiraFrameView(media: animation, session: ugoira).allowsHitTesting(false)
-                } else if let avPlayer = player.player {
-                    #if os(macOS)
-                    MacAVPlayerView(player: avPlayer, videoGravity: .resizeAspectFill, showsControls: false,
-                                    canDisplayFrame: player.hasRestoredPosition)
-                        .id(data.url)
-                        .allowsHitTesting(false)
-                    #elseif os(iOS)
-                    InlineAVPlayerView(player: avPlayer, canDisplayFrame: player.hasRestoredPosition)
-                        .id(data.url)
-                        .allowsHitTesting(false)
-                    #endif
+                WithPerceptionTracking {
+                    if let animation = data as? UiMediaUgoira, ugoira.image != nil {
+                        UgoiraFrameView(media: animation, session: ugoira).allowsHitTesting(false)
+                    } else if let avPlayer = player.player {
+                        #if os(macOS)
+                        MacAVPlayerView(player: avPlayer, videoGravity: .resizeAspectFill, showsControls: false,
+                                        canDisplayFrame: player.hasRestoredPosition)
+                            .id(data.url)
+                            .allowsHitTesting(false)
+                        #elseif os(iOS)
+                        InlineAVPlayerView(player: avPlayer, canDisplayFrame: player.hasRestoredPosition)
+                            .id(data.url)
+                            .allowsHitTesting(false)
+                        #endif
+                    }
                 }
             }
-            .overlay(alignment: .bottomLeading) { statusOverlay }
+            .overlay(alignment: .bottomLeading) {
+                // iOS 15 回退：同 overlay 内容闭包惰性求值，statusOverlay 内部读
+                // player.state / player.position，必须包一层才会被登记。
+                WithPerceptionTracking {
+                    statusOverlay
+                }
+            }
             // onGeometryChange + bounds(of: .scrollView) 分别是 iOS 16 / iOS 17 的 API。
             // iOS 15 下退化为「自身 bounds ∩ 全局坐标换算出的可视区」，丢掉横向滚动的那一次裁剪。
             .flareOnGeometry({ proxy in
@@ -155,6 +171,7 @@ public struct MediaVideoView: View {
                 ugoira.detach()
                 if timelinePlayback == nil { fallbackPlayback.setSuspended(true) }
             }
+        }
     }
 
     private func registerPlayer() {
