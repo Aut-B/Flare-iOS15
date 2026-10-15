@@ -5,7 +5,7 @@ import FlareAppleCore
 import KotlinSharedUI
 
 struct IOSTimelineListEnvironment: ViewModifier {
-    @State private var accounts = KotlinPresenter(presenter: AccountsPresenter())
+    @StateObject private var accounts = KotlinPresenter(presenter: AccountsPresenter())
     @State private var resolvedAccountKey = "pending"
 
     private var accountKey: String? {
