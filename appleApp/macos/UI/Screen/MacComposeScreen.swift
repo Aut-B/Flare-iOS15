@@ -13,7 +13,7 @@ struct MacComposeScreen: View {
     let request: MacComposeWindowRequest
     @State private var presenter: KotlinPresenter<ComposeState>
 
-    @State private var viewModel = ComposeContentViewModel()
+    @StateObject private var viewModel = ComposeContentViewModel()
     @State private var sensitive = false
     @State private var mediaItems: [MacComposeMediaItem] = []
     @State private var showFileImporter = false
