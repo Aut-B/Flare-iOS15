@@ -433,11 +433,16 @@ private struct ProfileProgressTabBar: View {
     let progress: ProfileTabSelectionProgress
 
     var body: some View {
+        // iOS 15 回退：@Perceptible 属性必须在 withPerceptionTracking 作用域内读取才会被登记。
+        WithPerceptionTracking {
+
         ProfileTabBar(
             tabs: tabs,
             selectedTab: $selectedTab,
             selectionProgress: progress.pagePosition
         )
+    
+        }
     }
 }
 
