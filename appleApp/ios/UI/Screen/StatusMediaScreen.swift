@@ -123,10 +123,18 @@ enum MediaOrientationController {
             return
         }
 
-        scene.mediaKeyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
         let orientations: UIInterfaceOrientationMask = enabled ? .landscapeRight : .portrait
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientations)) { error in
-            print("Media orientation request failed: \(error)")
+        if #available(iOS 16.0, *) {
+            scene.mediaKeyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientations)) { error in
+                print("Media orientation request failed: \(error)")
+            }
+        } else {
+            // iOS 15 回退：requestGeometryUpdate 是 iOS 16 API。走 UIDevice 的方向 KVC
+            // + attemptRotationToDeviceOrientation，效果等价。
+            let deviceOrientation: UIInterfaceOrientation = enabled ? .landscapeRight : .portrait
+            UIDevice.current.setValue(deviceOrientation.rawValue, forKey: "orientation")
+            UIViewController.attemptRotationToDeviceOrientation()
         }
     }
 }
