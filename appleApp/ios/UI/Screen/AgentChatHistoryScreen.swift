@@ -6,7 +6,7 @@ import SwiftUI
 import NavigationBackport
 
 struct AgentChatHistoryScreen: View {
-    @State private var presenter = KotlinPresenter(presenter: AgentChatHistoryPresenter())
+    @StateObject private var presenter = KotlinPresenter(presenter: AgentChatHistoryPresenter())
 
     var body: some View {
         AgentChatHistoryList(rooms: rooms) { room in
