@@ -18,11 +18,11 @@ struct BackportWebLoginScreen: View {
     }
     
     var body: some View {
-        // iOS 15 回退：viewModel 是 @Perceptible，SwiftUI 不会自动追踪它的属性，
-        // 必须把读取点包进 WithPerceptionTracking，否则 canShowWebView 置 true 时
-        // 视图不会重算，登录网页迟迟不出现。
-        WithPerceptionTracking {
-            NBNavigationStack {
+        NBNavigationStack {
+            // iOS 15 回退：viewModel 是 @Perceptible，NBNavigationStack 的内容闭包
+            // 是惰性求值的，必须把读取点包进 WithPerceptionTracking，否则
+            // canShowWebView 置 true 时视图不会重算，登录网页迟迟不出现。
+            WithPerceptionTracking {
                 if let viewModel, viewModel.canShowWebView {
                     BackportWebView(url: URL(string: url), configuration: viewModel.configuration) { webView in
                         webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
@@ -47,7 +47,9 @@ struct BackportWebLoginScreen: View {
         .task {
             // Initialize after state is installed so view rebuilds don't clear cookies again.
             guard viewModel == nil else { return }
-            viewModel = BackportWebLoginViewModel(onCookie: onCookie, url: url)
+            let model = BackportWebLoginViewModel(onCookie: onCookie, url: url)
+            model.clearStaleCookies()
+            viewModel = model
         }
     }
 }
@@ -71,8 +73,8 @@ final class BackportWebLoginViewModel {
     let url: String
     let onCookie: (String) -> Void
     let delegate: WKDelegate
-    /// 非持久化数据仓库：登录页立即显示，且 cookie 读取必须走同一个实例。
-    let dataStore = WKWebsiteDataStore.nonPersistent()
+    /// 登录页使用的数据仓库，cookie 的写入与读取必须走同一个实例。
+    let dataStore = WKWebsiteDataStore.default()
     @PerceptionIgnored private var observers = [NSKeyValueObservation]()
     init(
         onCookie: @escaping (String) -> Void,
@@ -82,6 +84,7 @@ final class BackportWebLoginViewModel {
         self.url = url
         self.delegate = WKDelegate { [weak self] in
             guard let self else { return }
+            // cookie 必须从登录页实际使用的仓库里取。
             self.dataStore.httpCookieStore.getAllCookies { (cookies) in
                 let cookieString = BackportWebLoginViewModel.cookieHeaderString(from: cookies, for: .init(string: url))
                 onCookie(cookieString)
@@ -93,11 +96,21 @@ final class BackportWebLoginViewModel {
     var configuration: WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-        // iOS 15 回退：改用非持久化数据仓库。原实现要先 fetchDataRecords + removeData
-        // 清空全部网站数据才把 canShowWebView 置 true，这一步是异步的，期间界面停在空白；
-        // 非持久化仓库天然隔离，登录页可以立刻出现，cookie 仍能从 httpCookieStore 取到。
+        // 用默认（持久化）仓库：X/微博的登录流程依赖 sessionStorage 与带凭证的
+        // XHR，非持久化仓库在部分 iOS 15 上会让登录 POST 静默失败，表现为
+        // 「点了下一步一直卡住」。清空旧 cookie 的逻辑见 clearStaleCookies()。
         configuration.websiteDataStore = dataStore
         return configuration
+    }
+    /// 只清理登录域下的旧 cookie，避免上次登录的残留 cookie 让 canResume 直接通过。
+    ///  targeted 删除比上游「清空全部网站数据」快得多，且在页面加载前就发起。
+    func clearStaleCookies() {
+        guard let host = URL(string: url)?.host?.lowercased() else { return }
+        dataStore.httpCookieStore.getAllCookies { [dataStore] cookies in
+            for cookie in cookies where cookie.domain.lowercased().hasSuffix(host) {
+                dataStore.httpCookieStore.delete(cookie)
+            }
+        }
     }
     private static func cookieHeaderString(from cookies: [HTTPCookie], for url: URL?) -> String {
         let host = url?.host?.lowercased()
