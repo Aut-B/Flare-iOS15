@@ -9,8 +9,8 @@ import NavigationBackport
 #endif
 
 public struct LocalFilterSettingsView: View {
-    @State private var presenter = KotlinPresenter(presenter: LocalFilterPresenter())
-    @State private var mxgaPresenter = KotlinPresenter(presenter: MxgaSettingsPresenter())
+    @StateObject private var presenter = KotlinPresenter(presenter: LocalFilterPresenter())
+    @StateObject private var mxgaPresenter = KotlinPresenter(presenter: MxgaSettingsPresenter())
     @State private var selectedFilter: UiKeywordFilter?
     @State private var showingAddFilter = false
 
