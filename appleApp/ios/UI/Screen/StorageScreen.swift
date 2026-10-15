@@ -11,8 +11,8 @@ import NavigationBackport
 
 struct StorageScreen: View {
     private let storagePresenter: StoragePresenter
-    @State private var presenter: KotlinPresenter<StorageState>
-    @State private var exportPresenter = KotlinPresenter(presenter: ExportDataPresenter())
+    @StateObject private var presenter: KotlinPresenter<StorageState>
+    @StateObject private var exportPresenter = KotlinPresenter(presenter: ExportDataPresenter())
     @State private var showDatabaseClearAlert = false
     @State private var showImageClearAlert = false
     @State private var showFileExporter = false
@@ -26,7 +26,7 @@ struct StorageScreen: View {
     init() {
         let storagePresenter = StoragePresenter()
         self.storagePresenter = storagePresenter
-        _presenter = State(wrappedValue: KotlinPresenter(presenter: storagePresenter))
+        _presenter = StateObject(wrappedValue: KotlinPresenter(presenter: storagePresenter))
     }
 
     private var isClearingStorage: Bool {
