@@ -1,17 +1,17 @@
+import Combine
 import FlareAppleCore
 @preconcurrency import KotlinSharedUI
 import SwiftUI
-import Perception
 
-@Perceptible
-public final class ComposePollViewModel {
+// iOS 15 回退：同 ComposeContentViewModel，读取点在惰性闭包里，改用 ObservableObject。
+public final class ComposePollViewModel: ObservableObject {
     public static let minimumChoiceCount = 2
     public static let defaultMaxChoiceCount = 4
 
-    public var enabled = false
-    public var pollType = ComposePollType.single
-    public var choices: [ComposePollChoice] = [ComposePollChoice(), ComposePollChoice()]
-    public var expired = ComposePollExpiration.minutes5
+    @Published public var enabled = false
+    @Published public var pollType = ComposePollType.single
+    @Published public var choices: [ComposePollChoice] = [ComposePollChoice(), ComposePollChoice()]
+    @Published public var expired = ComposePollExpiration.minutes5
     public let allExpirations = ComposePollExpiration.allCases
 
     public init() {}
@@ -78,10 +78,9 @@ public final class ComposePollViewModel {
     }
 }
 
-@Perceptible
-public final class ComposePollChoice: Identifiable {
+public final class ComposePollChoice: Identifiable, ObservableObject {
     public let id = UUID()
-    public var text = ""
+    @Published public var text = ""
 
     public init(text: String = "") {
         self.text = text
@@ -172,7 +171,7 @@ public enum ComposePollExpiration: String, CaseIterable, Hashable, Identifiable 
 }
 
 public struct ComposePollSection: View {
-    @Perception.Bindable private var viewModel: ComposePollViewModel
+    @ObservedObject private var viewModel: ComposePollViewModel
     private let maxChoices: Int
 
     public init(
