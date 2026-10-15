@@ -6,6 +6,7 @@ import FlareAppleCore
 
 #if os(iOS)
 import UIKit
+import Perception
 #endif
 
 public struct VideoControlView: View {
@@ -225,6 +226,9 @@ public struct StatusMediaVideoView: View {
     }
 
     public var body: some View {
+        // iOS 15 回退：@Perceptible 属性必须在 withPerceptionTracking 作用域内读取才会被登记。
+        WithPerceptionTracking {
+
         Group {
             #if os(iOS)
             content
@@ -284,6 +288,8 @@ public struct StatusMediaVideoView: View {
             }
             (presentation ?? fallbackPresentation).release(session)
             if presentation == nil { fallbackPresentation.end() }
+        }
+    
         }
     }
 
