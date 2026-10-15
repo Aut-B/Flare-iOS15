@@ -62,7 +62,6 @@ final class RichTextUIView: UIView, TimelineHeightProviding {
     private var naturalStackSizeCache: [Int: CGSize] = [:]
     private var isBatchUpdating = false
     private var lastStructuralSignature: StructuralSignature?
-    private var traitRegistration: UITraitChangeRegistration?
     private var stackBottomConstraint: NSLayoutConstraint?
     private var collapseAboveLineCount: Int?
     private var needsContentRebuild = false
@@ -133,14 +132,14 @@ final class RichTextUIView: UIView, TimelineHeightProviding {
         setContentHuggingPriority(.required, for: .vertical)
         setContentCompressionResistancePriority(.required, for: .vertical)
         updateHorizontalLayoutPolicy()
-        traitRegistration = registerForTraitChanges([
-            UITraitUserInterfaceStyle.self,
-            UITraitPreferredContentSizeCategory.self,
-            UITraitLegibilityWeight.self,
-            UITraitAccessibilityContrast.self,
-        ]) { (view: RichTextUIView, _) in
-            view.update(force: true)
-        }
+    }
+
+    // iOS 15 回退：registerForTraitChanges/UITraitChangeRegistration 是 iOS 17 API，
+    // 改用 iOS 8 起就有的 traitCollectionDidChange。
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        guard previousTraitCollection != nil else { return }
+        update(force: true)
     }
 
     // MARK: - Rendering
@@ -1505,6 +1504,8 @@ private final class RichTextTextView: UITextView, UITextViewDelegate, RichTextTe
         return lineHeight
     }
 
+    // iOS 15 回退：UITextItem 文本项交互是 iOS 17 才有的 UITextViewDelegate 能力。
+    @available(iOS 17.0, *)
     func textView(_ textView: UITextView, primaryActionFor textItem: UITextItem, defaultAction: UIAction) -> UIAction? {
         guard case .link(let url) = textItem.content else { return defaultAction }
         
@@ -1513,6 +1514,7 @@ private final class RichTextTextView: UITextView, UITextViewDelegate, RichTextTe
         }
     }
     
+    @available(iOS 17.0, *)
     func textView(_ textView: UITextView, menuConfigurationFor textItem: UITextItem, defaultMenu: UIMenu) -> UITextItem.MenuConfiguration? {
         guard case .link(let url) = textItem.content else {
             return UITextItem.MenuConfiguration(
