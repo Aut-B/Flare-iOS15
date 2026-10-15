@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import UIKit
 import Perception
 import FlareAppleUI
 import NavigationBackport
@@ -38,10 +39,36 @@ struct BackportWebLoginScreen: View {
                             // window.open 的拦截在 uiDelegate，URL 策略在 navigationDelegate。
                             webView.uiDelegate = viewModel.delegate
                             webView.navigationDelegate = viewModel.delegate
+                            // 供「重试」按钮 reload 用。
+                            viewModel.webView = webView
                         }
                         if isLoading {
                             ProgressView()
                                 .progressViewStyle(.circular)
+                        }
+                        // 加载失败时给出可见的错误与重试入口，不再是一片纯白。
+                        if let loadError = viewModel.loadError {
+                            VStack(spacing: 12) {
+                                Image(systemName: "exclamationmark.icloud")
+                                    .font(.system(size: 40))
+                                    .foregroundStyle(.secondary)
+                                Text("加载失败")
+                                    .font(.headline)
+                                Text(loadError)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                Button {
+                                    viewModel.loadError = nil
+                                    viewModel.webView?.reload()
+                                } label: {
+                                    Text("重试")
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                            .padding(24)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(Color(.secondarySystemBackground))
                         }
                     }
                     .toolbar {
@@ -57,6 +84,13 @@ struct BackportWebLoginScreen: View {
                             }
                         }
                     }
+                } else if viewModel != nil {
+                    // 清空旧网站数据期间的等待指示，避免又是「一片白」。
+                    VStack {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }
@@ -64,14 +98,26 @@ struct BackportWebLoginScreen: View {
             // Initialize after state is installed so view rebuilds don't clear cookies again.
             guard viewModel == nil else { return }
             let model = BackportWebLoginViewModel(onCookie: onCookie, url: url)
-            model.clearStaleCookies()
             viewModel = model
+            // 与上游行为对齐：先把全部网站数据清空，完成后才显示 WebView。
+            // 之前「按 host 定向异步删 cookie + 立即显示」有两个问题：
+            // ① 域名后缀匹配方向有漏洞（cookie 在 .weibo.cn、登录 URL 在子域时漏删，
+            //    新浪 SSO 域更是完全漏掉），第二个账号登录时旧登录态残留；
+            // ② 删除是异步的，页面加载经常 race 赢删除——读到的还是上一个账号的
+            //    cookie，Kotlin 侧 canResume 直接通过，sheet 一弹出就被关掉，
+            //    表现为「点登录闪一下然后回到登录界面」。
+            model.clearAllWebsiteData {
+                model.canShowWebView = true
+            }
         }
     }
 }
 
 class WKDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     let decidePolicy: () -> Void
+    /// 加载失败时把错误送到界面（ViewModel 初始化完成后赋值）。
+    weak var owner: BackportWebLoginViewModel?
+
     init(decidePolicy: @escaping () -> Void
     ) {
         self.decidePolicy = decidePolicy
@@ -111,11 +157,30 @@ class WKDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
         decidePolicy()
         return .allow
     }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        reportError(error)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        reportError(error)
+    }
+
+    private func reportError(_ error: Error) {
+        let nsError = error as NSError
+        // window.open 拦截是我们主动 cancel 的导航，不算加载失败。
+        if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
+            return
+        }
+        owner?.loadError = error.localizedDescription
+    }
 }
 
 @Perceptible
 final class BackportWebLoginViewModel {
     var canShowWebView = false
+    /// 最近一次加载失败的用户可读信息；nil 表示正常。
+    var loadError: String?
     let url: String
     let onCookie: (String) -> Void
     let delegate: WKDelegate
@@ -124,6 +189,8 @@ final class BackportWebLoginViewModel {
     /// 配置改为 stored 属性：原来是计算属性，body 每求值一次就新建一个
     /// WKWebViewConfiguration，视图重算时 WebView 会按新配置重建、登录态丢失。
     let configuration: WKWebViewConfiguration
+    /// 「重试」用：保存对当前 WebView 的弱引用，不参与 Perception 追踪。
+    @PerceptionIgnored weak var webView: WKWebView?
     @PerceptionIgnored private var observers = [NSKeyValueObservation]()
     init(
         onCookie: @escaping (String) -> Void,
@@ -143,7 +210,7 @@ final class BackportWebLoginViewModel {
         }
         // 用默认（持久化）仓库：X/微博的登录流程依赖 sessionStorage 与带凭证的
         // XHR，非持久化仓库在部分 iOS 15 上会让登录 POST 静默失败，表现为
-        // 「点了下一步一直卡住」。清空旧 cookie 的逻辑见 clearStaleCookies()。
+        // 「点了下一步一直卡住」。
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         // iOS 15 回退：WKPreferences.javaScriptCanOpenWindowsAutomatically 默认 false，
@@ -152,29 +219,33 @@ final class BackportWebLoginViewModel {
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
         configuration.websiteDataStore = dataStore
         self.configuration = configuration
-        // 不再走「清空全部网站数据后再显示」的异步链路，登录页立即可见。
-        self.canShowWebView = true
+        // 全部存储属性就绪后，把失败回调接到自己身上。
+        self.delegate.owner = self
     }
-    /// 只清理登录域下的旧 cookie，避免上次登录的残留 cookie 让 canResume 直接通过。
-    /// targeted 删除比上游「清空全部网站数据」快得多，且在页面加载前就发起。
-    func clearStaleCookies() {
-        guard let host = URL(string: url)?.host?.lowercased() else { return }
-        dataStore.httpCookieStore.getAllCookies { [dataStore] cookies in
-            for cookie in cookies where cookie.domain.lowercased().hasSuffix(host) {
-                dataStore.httpCookieStore.delete(cookie)
-            }
+
+    /// 与上游一致：清空全部网站数据（cookie/localStorage/sessionStorage 等），
+    /// 完成后才让登录页显示 WebView。定向删除既会漏域又有 race，见 screen 内注释。
+    func clearAllWebsiteData(completion: @escaping () -> Void) {
+        let dataStore = WKWebsiteDataStore.default()
+        dataStore.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
+            dataStore.removeData(
+                ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+                for: records,
+                completionHandler: completion
+            )
         }
+    }
+
+    deinit {
+        observers.removeAll()
     }
     private static func cookieHeaderString(from cookies: [HTTPCookie], for url: URL?) -> String {
         let host = url?.host?.lowercased()
         let filtered = cookies.filter { cookie in
-            guard let host = host else { return true }
+            guard let host else { return true }
             let domain = cookie.domain.lowercased()
             return domain == host || (domain.hasPrefix(".") && (domain.hasSuffix(host) || host.hasSuffix(domain)))
         }
         return filtered.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-    }
-    deinit {
-        observers.removeAll()
     }
 }
