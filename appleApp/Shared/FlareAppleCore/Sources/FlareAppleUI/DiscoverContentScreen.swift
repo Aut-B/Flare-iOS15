@@ -1,6 +1,7 @@
 import FlareAppleCore
 import Flow
 @preconcurrency import KotlinSharedUI
+import Combine
 import SwiftUI
 
 public struct DiscoverContentScreen<AskAiOverlay: View>: View {
