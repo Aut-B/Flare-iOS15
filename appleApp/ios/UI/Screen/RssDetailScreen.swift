@@ -172,7 +172,7 @@ private struct RssArticleContentView: View {
                     
                     if document.siteName != nil || document.byline != nil || document.publishDateTime != nil {
                         VStack(alignment: .leading, spacing: 4) {
-                            if let siteName = document.siteName, let host = URL(string: url)?.host() {
+                            if let siteName = document.siteName, let host = URL(string: url)?.host {
                                 HStack(spacing: 4) {
                                     FavTabIcon(host: host)
                                         .frame(width: 16, height: 16)
@@ -307,7 +307,7 @@ struct HtmlWebView: UIViewRepresentable {
             }
             
             if let baseURL = parent.baseURL,
-               targetURL.host() == baseURL.host(),
+               targetURL.host == baseURL.host,
                targetURL.scheme == baseURL.scheme {
                 decisionHandler(.allow)
                 return
