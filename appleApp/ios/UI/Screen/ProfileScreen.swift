@@ -14,7 +14,7 @@ struct ProfileScreen: View {
     let onFollowingClick: (MicroBlogKey) -> Void
     let onFansClick: (MicroBlogKey) -> Void
     let onProfileInsight: (MicroBlogKey) -> Void
-    @State private var presenter: KotlinPresenter<ProfileState>
+    @StateObject private var presenter: KotlinPresenter<ProfileState>
     @State private var selectedTab: Int = 0
     @State private var showToolbarTabPicker = false
     @State private var isProfileHeaderVisible = true
@@ -1721,7 +1721,7 @@ extension ProfileScreen {
 }
 
 struct ProfileWithUserNameAndHostScreen: View {
-    @State private var presenter: KotlinPresenter<UserState>
+    @StateObject private var presenter: KotlinPresenter<UserState>
     let accountType: AccountType
     let onFollowingClick: (MicroBlogKey) -> Void
     let onFansClick: (MicroBlogKey) -> Void
