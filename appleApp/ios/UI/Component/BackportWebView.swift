@@ -14,9 +14,11 @@ public struct BackportWebView: WebViewRepresentable {
     public init(
         url: URL? = nil,
         configuration: WKWebViewConfiguration? = nil,
+        isLoading: Binding<Bool>? = nil,
         webView: @escaping (WKWebView) -> Void = { _ in }) {
         self.url = url
         self.configuration = configuration
+        self.isLoading = isLoading
         self.webView = webView
     }
 
@@ -24,13 +26,18 @@ public struct BackportWebView: WebViewRepresentable {
 
     private let url: URL?
     private let configuration: WKWebViewConfiguration?
+    private let isLoading: Binding<Bool>?
     private let webView: (WKWebView) -> Void
 
     // MARK: - Functions
 
     #if os(iOS)
     public func makeUIView(context: Context) -> WKWebView {
-        makeView()
+        let view = makeView()
+        if let isLoading {
+            context.coordinator.startObserving(view, isLoading: isLoading)
+        }
+        return view
     }
 
     public func updateUIView(_ uiView: WKWebView, context: Context) {}
@@ -42,6 +49,35 @@ public struct BackportWebView: WebViewRepresentable {
     }
 
     public func updateNSView(_ view: WKWebView, context: Context) {}
+    #endif
+
+    #if os(iOS)
+    /// 观察 WKWebView 的 isLoading，把加载状态传给 SwiftUI 侧显示进度指示。
+    /// x.com/Google 的登录页在 iPhone 6S 上首屏可能要十几秒，没有指示时
+    /// 用户看到的就是「一片白屏」。
+    public final class Coordinator {
+        private var observations: [NSKeyValueObservation] = []
+
+        func startObserving(_ view: WKWebView, isLoading: Binding<Bool>) {
+            isLoading.wrappedValue = view.isLoading
+            observations.removeAll()
+            observations.append(
+                view.observe(\.isLoading, options: [.new]) { view, _ in
+                    DispatchQueue.main.async {
+                        isLoading.wrappedValue = view.isLoading
+                    }
+                }
+            )
+        }
+
+        deinit {
+            observations.removeAll()
+        }
+    }
+
+    public func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
     #endif
 }
 
