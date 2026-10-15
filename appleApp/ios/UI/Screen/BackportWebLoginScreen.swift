@@ -82,10 +82,12 @@ final class BackportWebLoginViewModel {
     ) {
         self.onCookie = onCookie
         self.url = url
-        self.delegate = WKDelegate { [weak self] in
-            guard let self else { return }
-            // cookie 必须从登录页实际使用的仓库里取。
-            self.dataStore.httpCookieStore.getAllCookies { (cookies) in
+        self.delegate = WKDelegate {
+            // cookie 必须从登录页实际使用的仓库里取。configuration 用默认（持久化）
+            // 仓库，而 WKWebsiteDataStore.default() 是进程内单例，网页写入的就是它。
+            // 注意：这里不能捕获 self——delegate 还在初始化中，转义闭包捕获 self 会触发
+            // "used before being initialized"。
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { (cookies) in
                 let cookieString = BackportWebLoginViewModel.cookieHeaderString(from: cookies, for: .init(string: url))
                 onCookie(cookieString)
             }
