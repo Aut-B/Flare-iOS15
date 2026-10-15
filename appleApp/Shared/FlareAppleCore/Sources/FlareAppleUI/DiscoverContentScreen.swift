@@ -8,9 +8,9 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
     @State private var listScope = UUID().uuidString
     @Environment(\.openURL) private var openURL
     @Environment(\.timelineAppearance.aiConfig.agent) private var agentEnabled
-    @State private var presenter: KotlinPresenter<DiscoverState>
-    @State private var searchPresenter: KotlinPresenter<SearchState>
-    @State private var searchHistoryPresenter = KotlinPresenter(presenter: SearchHistoryPresenter())
+    @StateObject private var presenter: KotlinPresenter<DiscoverState>
+    @StateObject private var searchPresenter: KotlinPresenter<SearchState>
+    @StateObject private var searchHistoryPresenter = KotlinPresenter(presenter: SearchHistoryPresenter())
     @State private var searchText = ""
     @State private var committedSearchText = ""
     @State private var isSearchPresented = false
