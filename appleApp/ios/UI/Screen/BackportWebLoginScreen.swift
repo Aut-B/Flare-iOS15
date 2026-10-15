@@ -83,18 +83,26 @@ class WKDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// 整个登录流程就断在这里——表现为「点了下一步一直卡住/等不到密码界面」。
     /// 这里把新窗口请求拉回同一个 WebView 加载。
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationResponsePolicy {
-        if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
-            webView.load(URLRequest(url: url))
+        guard navigationAction.targetFrame == nil else { return .allow }
+        let request = navigationAction.request
+        // 只接管 http/https：javascript:/about:blank/data: 等 scheme 拉回主 WebView
+        // 只会静默失败，还会把原导航 cancel 掉，页面就停在原地不动。
+        guard let scheme = request.url?.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
             return .cancel
         }
-        return .allow
+        // 用原始请求加载：登录流程里的 POST 表单（方法、body、header）不能丢，
+        // 只取 url 会把 POST 降级成 GET，登录态直接断。
+        webView.load(request)
+        return .cancel
     }
 
     /// 双保险：即使 decidePolicyFor 没拦住，也禁止系统创建模态子窗口，
     /// 把请求拉回主 WebView。返回 nil 即「不创建新窗口」。
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = navigationAction.request.url {
-            webView.load(URLRequest(url: url))
+        let request = navigationAction.request
+        if let scheme = request.url?.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+            webView.load(request)
         }
         return nil
     }
