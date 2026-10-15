@@ -7,8 +7,8 @@ import NavigationBackport
 struct SecondaryTabsScreen: View {
     @Environment(\.dismiss) private var dismiss
     let onTabSelected: (Route) -> Void
-    @State private var presenter = KotlinPresenter(presenter: SecondaryTabsPresenter())
-    @State private var aiAgentEnabledPresenter = KotlinPresenter(presenter: AiAgentEnabledPresenter())
+    @StateObject private var presenter = KotlinPresenter(presenter: SecondaryTabsPresenter())
+    @StateObject private var aiAgentEnabledPresenter = KotlinPresenter(presenter: AiAgentEnabledPresenter())
     var body: some View {
         Group {
             if #available(iOS 18.0, *) {
