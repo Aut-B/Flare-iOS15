@@ -3,7 +3,7 @@ import KotlinSharedUI
 import FlareAppleCore
 
 public struct ArticleScreen: View {
-    @State private var presenter: KotlinPresenter<ArticlePresenterState>
+    @StateObject private var presenter: KotlinPresenter<ArticlePresenterState>
     @Environment(\.openURL) private var openURL
 
     private let accountType: AccountType
