@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import KotlinSharedUI
 import FlareAppleCore
@@ -45,8 +46,8 @@ struct ComposeScreen: View {
     @FocusState private var keyboardFocused: Bool
     @FocusState private var cwKeyboardFocused: Bool
     @StateObject private var presenter: KotlinPresenter<ComposeState>
-    @State private var viewModel = ComposeContentViewModel()
-    @State private var mediaViewModel = MediaViewModel()
+    @StateObject private var viewModel = ComposeContentViewModel()
+    @StateObject private var mediaViewModel = MediaViewModel()
     @State private var uiTextView: UITextView?
     @State private var pendingCursor: Int?
     @State private var initialTextApplied = false
@@ -57,6 +58,7 @@ struct ComposeScreen: View {
     @State private var showAccountPicker = false
 
     var body: some View {
+
         VStack(
             spacing: 8
         ) {
@@ -246,6 +248,7 @@ struct ComposeScreen: View {
                 .disabled(!presenter.state.canSend || mediaViewModel.items.contains { !$0.isReady })
             }
         }
+    
     }
 
     private var composeActionBar: some View {
@@ -631,14 +634,14 @@ struct ComposeScreen: View {
 
 }
 
-@Perceptible
-class MediaViewModel {
-    var selectedItems: [BackportPhotosPickerItem] = []
-    var items: [MediaItem] = []
-    var sensitive = false
-    var maxSize = 4
-    var enableAltText = true
-    var altTextMaxLength = 500
+// iOS 15 回退：读取点分散在惰性闭包里，改用 Combine 的 ObservableObject。
+class MediaViewModel: ObservableObject {
+    @Published var selectedItems: [BackportPhotosPickerItem] = []
+    @Published var items: [MediaItem] = []
+    @Published var sensitive = false
+    @Published var maxSize = 4
+    @Published var enableAltText = true
+    @Published var altTextMaxLength = 500
     func update() {
         if selectedItems.count > maxSize {
             selectedItems = Array(selectedItems.suffix(maxSize))
@@ -665,19 +668,18 @@ class MediaViewModel {
     }
 }
 
-@Perceptible
-class MediaItem: Equatable, Identifiable {
+class MediaItem: Equatable, Identifiable, ObservableObject {
     static func == (lhs: MediaItem, rhs: MediaItem) -> Bool {
         lhs.id == rhs.id
     }
     let item: BackportPhotosPickerItem?
-    var image: UIImage?
-    var data: Data?
-    var file: ComposeMediaFile?
-    var mimeType: String?
-    var loadError: String?
+    @Published var image: UIImage?
+    @Published var data: Data?
+    @Published var file: ComposeMediaFile?
+    @Published var mimeType: String?
+    @Published var loadError: String?
     var isReady: Bool { file != nil || data != nil }
-    var altText: String = ""
+    @Published var altText: String = ""
     let id: String
     var fileName: String
     var type: FileType = .other
@@ -808,11 +810,12 @@ private extension Array where Element == UiProfile {
 }
 
 struct ComposeMediaItemView: View {
-    let item: MediaItem
-    var mediaViewModel: MediaViewModel
+    @ObservedObject var item: MediaItem
+    @ObservedObject var mediaViewModel: MediaViewModel
     @State private var showAltTextEditor = false
 
     var body: some View {
+
         Group {
             if let image = item.image {
                 Image(uiImage: image).resizable().scaledToFill()
@@ -872,6 +875,7 @@ struct ComposeMediaItemView: View {
             AltTextEditSheet(item: item, maxLength: mediaViewModel.altTextMaxLength)
         }
         .accessibilityLabel(Text(verbatim: mediaDescription))
+    
     }
 
     private var mediaDescription: String {
