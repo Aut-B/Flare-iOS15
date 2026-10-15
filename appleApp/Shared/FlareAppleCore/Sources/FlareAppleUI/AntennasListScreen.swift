@@ -6,7 +6,7 @@ import NavigationBackport
 public struct AntennasListScreen<Destination: Hashable>: View {
     private let accountType: AccountType
     private let timelineDestination: (UiTimelineTabItem) -> Destination
-    @State private var presenter: KotlinPresenter<MisskeyAntennasListWithTabsPresenterState>
+    @StateObject private var presenter: KotlinPresenter<MisskeyAntennasListWithTabsPresenterState>
 
     public init(
         accountType: AccountType,
