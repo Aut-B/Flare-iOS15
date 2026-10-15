@@ -20,7 +20,7 @@ private enum ServiceSelectionAnimation {
 
 struct ServiceSelectionScreen: View {
     let toHome: () -> Void
-    @State private var presenter: KotlinPresenter<ServiceSelectState>
+    @StateObject private var presenter: KotlinPresenter<ServiceSelectState>
     @State private var instanceInput = ""
     @State private var selectedMethods: [String: LoginMethodType] = [:]
 
@@ -281,7 +281,7 @@ struct ReloginScreen: View {
     let toHome: () -> Void
     @Environment(\.dismiss) private var dismiss
 
-    @State private var presenter: KotlinPresenter<ReloginState>
+    @StateObject private var presenter: KotlinPresenter<ReloginState>
     @State private var selectedMethod: LoginMethodType?
 
     init(target: ReloginTarget, toHome: @escaping () -> Void) {
@@ -373,7 +373,7 @@ struct ReloginScreen: View {
 }
 
 private struct LoginFlowView: View {
-    @State private var presenter: KotlinPresenter<LoginFlowPresenterState>
+    @StateObject private var presenter: KotlinPresenter<LoginFlowPresenterState>
     @State private var qrContent: String?
     @State private var webCookieUrl: String?
 
@@ -538,13 +538,23 @@ private final class FlareWebAuthSession: NSObject, ASWebAuthenticationPresentati
             }
             box.session = session
             session.presentationContextProvider = box
-            session.start()
+            // 不用 ephemeral：与 Safari 共享 cookie 容器，x.com 这类对匿名容器敏感的
+            // 登录流程才不会在中间步骤卡住。
+            session.prefersEphemeralWebBrowserSession = false
+            // ASWebAuthenticationSession 必须在主线程启动，否则 present 出来的网页
+            // 事件链不完整（页面能显示、点了没反应）。
+            DispatchQueue.main.async {
+                if !session.start() {
+                    box.finish(.failure(URLError(.cannotLoadFromNetwork)))
+                }
+            }
         }
     }
 
     private func finish(_ result: Result<URL, Error>) {
         let continuation = self.continuation
         self.continuation = nil
+        // 断掉 session→闭包→box→session 的引用环，让本对象可以释放。
         session = nil
         switch result {
         case let .success(url):
@@ -555,10 +565,20 @@ private final class FlareWebAuthSession: NSObject, ASWebAuthenticationPresentati
     }
 
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .flatMap { $0.windows }
-            .first { $0.isKeyWindow } ?? ASPresentationAnchor()
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        // 前台 scene 的 keyWindow 优先；拿不到时退到该 scene 的任意窗口。
+        if let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first {
+            if let window = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first {
+                return window
+            }
+        }
+        // 最后兜底：造一个可见窗口。绝不能再返回空 UIWindow()——
+        // 那会把登录网页 present 到脱离层级的窗口上，触摸事件全部丢失，
+        // 表现就是「页面出来了，点下一步没反应」。
+        let fallbackWindow = UIWindow(frame: UIScreen.main.bounds)
+        fallbackWindow.rootViewController = UIViewController()
+        fallbackWindow.makeKeyAndVisible()
+        return fallbackWindow
     }
 }
 
