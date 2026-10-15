@@ -141,7 +141,12 @@ struct MediaViewerScreen: View {
                             }
                         }
                         .settings { config in
-                            config.preloadAmount = 99
+                            // iOS 15 回退：99 会让 LazyPager 预载全部媒体页，在
+                            // iPhone 6S（2GB）上直接触发内存压力（崩溃日志
+                            // ktriageinfo 连续 5 次 "VM - Fault hit memory shortage"），
+                            // 且瀑布流/分页在内存不足时做批量更新会抛断言。
+                            // 1 页预载足够连续滑动，内存占用回归正常水平。
+                            config.preloadAmount = 1
                         }
 
                         if shouldShowBottomOverlay, !postSheetPresented {
