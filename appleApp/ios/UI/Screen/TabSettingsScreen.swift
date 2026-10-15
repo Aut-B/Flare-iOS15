@@ -4,7 +4,7 @@ import KotlinSharedUI
 import FlareAppleCore
 import NavigationBackport
 struct TabSettingsScreen: View {
-    @State private var presenter = KotlinPresenter(presenter: HomeTabSettingsPresenter())
+    @StateObject private var presenter = KotlinPresenter(presenter: HomeTabSettingsPresenter())
     @Environment(\.dismiss) private var dismiss
     @State private var enableMixedTimeline: Bool = false
     @State private var tabItems: [UiTimelineTabItem] = []
@@ -261,7 +261,7 @@ struct EditTabSheet: View {
     let onConfirm: (UiTimelineTabItem) -> Void
     let tabItem: UiTimelineTabItem
     let titleAndIconOnly: Bool
-    @State private var presenter: KotlinPresenter<EditTabPresenterState>
+    @StateObject private var presenter: KotlinPresenter<EditTabPresenterState>
     @State private var text: String
     @State private var enabled: Bool
     @State private var filterConfig: TimelineFilterConfig
@@ -364,7 +364,7 @@ struct EditTabSheet: View {
 
 struct AddTabSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var presenter: KotlinPresenter<AllTabsPresenterState>
+    @StateObject private var presenter: KotlinPresenter<AllTabsPresenterState>
     let selectedTabs: [UiTimelineTabItem]
     let onDelete: (UiTimelineTabItem) -> Void
     let onAdd: (UiTimelineTabItem) -> Void
