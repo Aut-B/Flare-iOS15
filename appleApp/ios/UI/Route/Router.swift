@@ -13,7 +13,7 @@ struct Router<Root: View>: View {
     @State private var sheet: Route? = nil
     @State private var cover: Route? = nil
     @State private var alertRoute: Route? = nil
-    @State private var deepLinkPresenter: KotlinPresenter<DeepLinkPresenterState>
+    @StateObject private var deepLinkPresenter: KotlinPresenter<DeepLinkPresenterState>
     @State private var deepLinkHandler: DeepLinkHandler
     
     init(@ViewBuilder root: @escaping (@escaping (Route) -> Void) -> Root) {
