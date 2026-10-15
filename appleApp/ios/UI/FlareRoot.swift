@@ -15,10 +15,10 @@ extension Notification.Name {
 struct FlareRoot: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.globalAppearance) private var globalAppearance
-    @State private var homeTabsPresenter = KotlinPresenter(presenter: HomeTabsPresenter())
-    @State private var notificationBadgePresenter = KotlinPresenter(presenter: AllNotificationBadgePresenter())
-    @State private var secondaryTabsPresenter = KotlinPresenter(presenter: SecondaryTabsPresenter())
-    @State private var aiAgentEnabledPresenter = KotlinPresenter(presenter: AiAgentEnabledPresenter())
+    @StateObject private var homeTabsPresenter = KotlinPresenter(presenter: HomeTabsPresenter())
+    @StateObject private var notificationBadgePresenter = KotlinPresenter(presenter: AllNotificationBadgePresenter())
+    @StateObject private var secondaryTabsPresenter = KotlinPresenter(presenter: SecondaryTabsPresenter())
+    @StateObject private var aiAgentEnabledPresenter = KotlinPresenter(presenter: AiAgentEnabledPresenter())
     @State private var inAppNotification = SwiftInAppNotification.shared
     @State var selectedTab: String?
     @State private var reloginRoute: Route?
@@ -138,8 +138,8 @@ private extension View {
 struct BackportFlareRoot: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.globalAppearance) private var globalAppearance
-    @State private var homeTabsPresenter = KotlinPresenter(presenter: HomeTabsPresenter())
-    @State private var notificationBadgePresenter = KotlinPresenter(presenter: AllNotificationBadgePresenter())
+    @StateObject private var homeTabsPresenter = KotlinPresenter(presenter: HomeTabsPresenter())
+    @StateObject private var notificationBadgePresenter = KotlinPresenter(presenter: AllNotificationBadgePresenter())
     @State private var inAppNotification = SwiftInAppNotification.shared
     @State var selectedTab: String?
     @State private var reloginRoute: Route?
@@ -156,7 +156,13 @@ struct BackportFlareRoot: View {
                         Label {
                             Text(homeTabTitle(tab))
                         } icon: {
+                            // iOS 15 回退：tabItem 的图标直接吃图片固有尺寸，而各 FontAwesome
+                            // 字形在 3300×2200 画布里的留白不一致，会出现大小不一、高低不齐。
+                            // 统一按方形画布缩放，保证三个 tab 的图标尺寸与基线一致。
                             Image(fontAwesome: homeTabIcon(tab))
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 22, height: 22)
                         }
                         .adaptiveLabelStyle(globalAppearance.showBottomBarLabels)
                     }
