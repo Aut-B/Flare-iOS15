@@ -9,7 +9,7 @@ public struct VVOStatusScreen: View {
     #endif
 
     private let statusKey: MicroBlogKey
-    @State private var presenter: KotlinPresenter<VVOStatusDetailState>
+    @StateObject private var presenter: KotlinPresenter<VVOStatusDetailState>
     @State private var selectedType: VVOStatusDetailType = .comment
 
     public init(accountType: AccountType, statusKey: MicroBlogKey) {
@@ -118,7 +118,7 @@ public struct VVOStatusScreen: View {
 
 public struct VVOCommentScreen: View {
     private let statusKey: MicroBlogKey
-    @State private var presenter: KotlinPresenter<VVOCommentState>
+    @StateObject private var presenter: KotlinPresenter<VVOCommentState>
 
     public init(accountType: AccountType, statusKey: MicroBlogKey) {
         self.statusKey = statusKey
