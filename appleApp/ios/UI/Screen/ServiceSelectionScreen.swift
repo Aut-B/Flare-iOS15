@@ -373,8 +373,6 @@ struct ReloginScreen: View {
 }
 
 private struct LoginFlowView: View {
-    @Environment(\.webAuthenticationSession) private var webAuthenticationSession
-
     @State private var presenter: KotlinPresenter<LoginFlowPresenterState>
     @State private var qrContent: String?
     @State private var webCookieUrl: String?
@@ -505,7 +503,9 @@ private struct LoginFlowView: View {
             return
         }
         do {
-            let response = try await webAuthenticationSession.authenticate(
+            // iOS 15 回退：SwiftUI 的 webAuthenticationSession 环境值是 iOS 16.4 API，
+            // 这里改用 iOS 12 起就有的 ASWebAuthenticationSession。
+            let response = try await FlareWebAuthSession.authenticate(
                 using: authURL,
                 callbackURLScheme: authURL.isPixivOAuthUrl ? "pixiv" : APPSCHEMA
             )
@@ -517,6 +517,48 @@ private struct LoginFlowView: View {
                 error: error.isCanceledWebAuthentication ? nil : error.localizedDescription
             )
         }
+    }
+}
+
+/// iOS 15 可用的 Web 登录会话封装，接口对齐 SwiftUI 的 `webAuthenticationSession`。
+private final class FlareWebAuthSession: NSObject, ASWebAuthenticationPresentationContextProviding {
+    private var session: ASWebAuthenticationSession?
+    private var continuation: CheckedContinuation<URL, Error>?
+
+    static func authenticate(using url: URL, callbackURLScheme: String?) async throws -> URL {
+        let box = FlareWebAuthSession()
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+            box.continuation = continuation
+            let session = ASWebAuthenticationSession(url: url, callbackURLScheme: callbackURLScheme) { callbackURL, error in
+                if let callbackURL {
+                    box.finish(.success(callbackURL))
+                } else {
+                    box.finish(.failure(error ?? URLError(.badURL)))
+                }
+            }
+            box.session = session
+            session.presentationContextProvider = box
+            session.start()
+        }
+    }
+
+    private func finish(_ result: Result<URL, Error>) {
+        let continuation = self.continuation
+        self.continuation = nil
+        session = nil
+        switch result {
+        case let .success(url):
+            continuation?.resume(returning: url)
+        case let .failure(error):
+            continuation?.resume(throwing: error)
+        }
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow } ?? ASPresentationAnchor()
     }
 }
 
