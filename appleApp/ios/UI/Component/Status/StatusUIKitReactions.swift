@@ -216,7 +216,6 @@ private final class ReactionChipView: UIControl, ManualLayoutMeasurable, Timelin
     private let nameLabel = UILabel()
     private let countLabel = UILabel()
     private let imageView = AnimatedImageView()
-    private var traitRegistration: UITraitChangeRegistration?
     private var showsImage = false
     private var isMyReaction = false
     private var imageURL: URL?
@@ -249,11 +248,16 @@ private final class ReactionChipView: UIControl, ManualLayoutMeasurable, Timelin
         countLabel.isUserInteractionEnabled = false
         addSubview(countLabel)
 
-        traitRegistration = registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: ReactionChipView, _) in
-            view.updateColors()
-        }
         isAccessibilityElement = true
         addTarget(self, action: #selector(handleTap), for: .touchUpInside)
+    }
+
+    // iOS 15 回退：registerForTraitChanges/UITraitChangeRegistration 是 iOS 17 API，
+    // 改用 iOS 8 起就有的 traitCollectionDidChange。
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        guard previousTraitCollection != nil else { return }
+        updateColors()
     }
 
     required init?(coder: NSCoder) {
