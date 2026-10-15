@@ -7,7 +7,7 @@ import NavigationBackport
 
 struct EditListScreen: View {
     @Environment(\.dismiss) var dismiss
-    @State private var presenter: KotlinPresenter<ListEditPresenterState>
+    @StateObject private var presenter: KotlinPresenter<ListEditPresenterState>
     private let accountType: AccountType
     private let listId: String
     @State private var title: String = ""
