@@ -6,7 +6,7 @@ import NavigationBackport
 import UniformTypeIdentifiers
 
 struct RssScreen: View {
-    @State private var presenter = KotlinPresenter(presenter: RssListWithTabsPresenter())
+    @StateObject private var presenter = KotlinPresenter(presenter: RssListWithTabsPresenter())
     @State private var showAddSheet = false
     @State private var selectedEditItem: UiRssSource? = nil
     @State private var importOpmlUrl: URL? = nil
