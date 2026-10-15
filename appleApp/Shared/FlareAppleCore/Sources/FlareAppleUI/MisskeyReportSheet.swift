@@ -4,7 +4,7 @@ import FlareAppleCore
 
 public struct MisskeyReportSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var presenter: KotlinPresenter<MisskeyReportState>
+    @StateObject private var presenter: KotlinPresenter<MisskeyReportState>
     @State private var reason: String = ""
     
     public var body: some View {
