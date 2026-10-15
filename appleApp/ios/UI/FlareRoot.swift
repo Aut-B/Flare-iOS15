@@ -156,13 +156,13 @@ struct BackportFlareRoot: View {
                         Label {
                             Text(homeTabTitle(tab))
                         } icon: {
-                            // iOS 15 回退：tabItem 的图标直接吃图片固有尺寸，而各 FontAwesome
-                            // 字形在 3300×2200 画布里的留白不一致，会出现大小不一、高低不齐。
-                            // 统一按方形画布缩放，保证三个 tab 的图标尺寸与基线一致。
-                            Image(fontAwesome: homeTabIcon(tab))
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 22, height: 22)
+                            // iOS 15 回退：FontAwesome 资源是同为 3300×2200 画布的
+                            // symbolset，但各字形留白不一致，tabItem 直接吃固有尺寸
+                            // → 大小不一、高低不齐；给个别图标补 .resizable() 后
+                            // 甚至整幅渲染失败（通知 tab 的铃铛直接消失，用户看不到
+                            // 消息入口）。改用 iOS 13 起就有的 SF Symbols：tabItem
+                            // 会自动统一尺寸与基线，与系统 tab bar 完全一致。
+                            Image(systemName: homeTabSystemIcon(tab))
                         }
                         .adaptiveLabelStyle(globalAppearance.showBottomBarLabels)
                     }
@@ -271,6 +271,22 @@ private func homeTabIcon(_ tab: HomeTabsPresenterStateHomeTabs) -> FontAwesomeIc
         return .magnifyingGlass
     case .home:
         return .house
+    }
+}
+
+/// iOS 15 回退：底部 tab 栏专用图标（SF Symbols）。
+/// FontAwesome symbolset 在 iOS 15 的 tabItem 里按固有尺寸渲染，各字形留白不一致
+/// 会大小不一、高低不齐；个别图标补 .resizable() 后甚至整幅渲染失败
+/// （通知 tab 的铃铛直接消失）。SF Symbols 由 tabItem 自动统一尺寸与基线。
+/// 这三个符号 iOS 13 起就有，iPhone 6S（iOS 15）原生支持。
+private func homeTabSystemIcon(_ tab: HomeTabsPresenterStateHomeTabs) -> String {
+    switch tab {
+    case .notifications:
+        return "bell.fill"
+    case .discover:
+        return "magnifyingglass"
+    case .home:
+        return "house.fill"
     }
 }
 
