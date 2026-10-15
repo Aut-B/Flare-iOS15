@@ -4,7 +4,7 @@ import FlareAppleCore
 import NavigationBackport
 
 public struct AllListScreen<Destination: Hashable>: View {
-    @State private var presenter: KotlinPresenter<AllListWithTabsPresenterState>
+    @StateObject private var presenter: KotlinPresenter<AllListWithTabsPresenterState>
     private let accountType: AccountType
     private let timelineDestination: (UiTimelineTabItem) -> Destination
     private let createListContent: (() -> AnyView)?
