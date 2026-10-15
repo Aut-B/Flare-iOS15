@@ -50,8 +50,12 @@ struct NetworkStatusModifier: ViewModifier {
     @State private var monitor = NetworkMonitor()
 
     func body(content: Content) -> some View {
-        content
-            .environment(\.networkKind, monitor.kind)
+        // iOS 15 回退：monitor 是 @Perceptible，SwiftUI 不会自动追踪，
+        // 必须把读取点包进 WithPerceptionTracking，网络类型变化才会下发到 environment。
+        WithPerceptionTracking {
+            content
+                .environment(\.networkKind, monitor.kind)
+        }
     }
 }
 
