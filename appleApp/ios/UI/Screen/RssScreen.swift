@@ -3,6 +3,7 @@ import FlareAppleUI
 import KotlinSharedUI
 import SwiftUI
 import NavigationBackport
+import UniformTypeIdentifiers
 
 struct RssScreen: View {
     @State private var presenter = KotlinPresenter(presenter: RssListWithTabsPresenter())
@@ -65,6 +66,9 @@ struct RssScreen: View {
                             }
                         ),
                         document: OPMLFile(initialText: exportedOPMLContent ?? ""),
+                        // iOS 15 回退：显式指定 contentType，走 iOS 14 起就有的重载，
+                        // 避免编译器选中 iOS 17 的 contentTypes 版本。
+                        contentType: .opml,
                         defaultFilename: "flare_export.opml"
                     ) { _ in
                         exportedOPMLContent = nil
