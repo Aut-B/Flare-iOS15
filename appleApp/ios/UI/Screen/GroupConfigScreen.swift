@@ -19,7 +19,7 @@ struct GroupConfigScreen: View {
     @State private var showAddTabSheet = false
     @State private var showFilterSheet = false
     @State private var editItem: UiTimelineTabItem? = nil
-    @State private var presenter: KotlinPresenter<GroupConfigPresenterState>
+    @StateObject private var presenter: KotlinPresenter<GroupConfigPresenterState>
 
     init(
         item: UiGroupTimelineTabItem? = nil,
@@ -27,7 +27,7 @@ struct GroupConfigScreen: View {
     ) {
         self.item = item
         self.onConfirm = onConfirm
-        _presenter = State(
+        _presenter = StateObject(
             wrappedValue: KotlinPresenter(
                 presenter: GroupConfigPresenter()
             )
