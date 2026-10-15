@@ -15,7 +15,7 @@ public struct EditRssSheet: View {
         "https://rsshub.pseudoyu.com"
     ]
 
-    @State private var presenter: KotlinPresenter<EditRssSourcePresenterState>
+    @StateObject private var presenter: KotlinPresenter<EditRssSourcePresenterState>
     @State private var url: String
     @State private var title: String = ""
     @State private var rssHubHost: String = ""
@@ -33,7 +33,7 @@ public struct EditRssSheet: View {
         self.id = id
         self.onImportOPML = onImportOPML
         let kotlinId = id.map { KotlinInt(value: Int32($0)) }
-        _presenter = State(wrappedValue: KotlinPresenter(presenter: EditRssSourcePresenter(id: kotlinId)))
+        _presenter = StateObject(wrappedValue: KotlinPresenter(presenter: EditRssSourcePresenter(id: kotlinId)))
         self.url = initialUrl ?? ""
         self.displayMode = initialDisplayMode ?? .fullContent
     }
