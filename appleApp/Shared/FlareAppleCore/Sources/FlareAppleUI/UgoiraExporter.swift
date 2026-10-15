@@ -202,26 +202,30 @@ private struct UgoiraExportStatus: ViewModifier {
     @State private var exporter = UgoiraExporter.shared
     func body(content: Content) -> some View {
         content.overlay(alignment: .bottom) {
-            if let progress = exporter.progress {
-                VStack(spacing: 8) {
-                    if exporter.needsSmaller {
-                        Text("ugoira_resolution_unsupported", bundle: FlareAppleUILocalization.bundle)
-                        Button {
-                            exporter.chooseSmaller(true)
-                        } label: {
-                            Text("ugoira_export_smaller", bundle: FlareAppleUILocalization.bundle)
+            // iOS 15 回退：overlay 内容闭包是惰性求值的，exporter 是 @Perceptible，
+            // 必须把读取点包进 WithPerceptionTracking，导出进度/失败提示才会刷新。
+            WithPerceptionTracking {
+                if let progress = exporter.progress {
+                    VStack(spacing: 8) {
+                        if exporter.needsSmaller {
+                            Text("ugoira_resolution_unsupported", bundle: FlareAppleUILocalization.bundle)
+                            Button {
+                                exporter.chooseSmaller(true)
+                            } label: {
+                                Text("ugoira_export_smaller", bundle: FlareAppleUILocalization.bundle)
+                            }
+                        } else {
+                            ProgressView(value: progress)
+                            Text(verbatim: FlareAppleUILocalization.string("ugoira_export_progress", arguments: [Int(progress * 100)]))
                         }
-                    } else {
-                        ProgressView(value: progress)
-                        Text(verbatim: FlareAppleUILocalization.string("ugoira_export_progress", arguments: [Int(progress * 100)]))
-                    }
-                    Button("Cancel", role: .cancel) { exporter.cancel() }
-                }.padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding().frame(maxWidth: 360)
-            } else if exporter.failed {
-                HStack {
-                    Text("ugoira_export_failed", bundle: FlareAppleUILocalization.bundle)
-                    Button("Dismiss") { exporter.dismissError() }
-                }.padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding()
+                        Button("Cancel", role: .cancel) { exporter.cancel() }
+                    }.padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding().frame(maxWidth: 360)
+                } else if exporter.failed {
+                    HStack {
+                        Text("ugoira_export_failed", bundle: FlareAppleUILocalization.bundle)
+                        Button("Dismiss") { exporter.dismissError() }
+                    }.padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)).padding()
+                }
             }
         }
     }
