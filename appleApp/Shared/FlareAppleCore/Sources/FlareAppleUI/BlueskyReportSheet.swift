@@ -4,7 +4,7 @@ import FlareAppleCore
 
 public struct BlueskyReportSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var presenter: KotlinPresenter<BlueskyReportStatusState>
+    @StateObject private var presenter: KotlinPresenter<BlueskyReportStatusState>
     @State private var selecedtReason: BlueskyReportStatusStateReportReason? = nil
     
     public var body: some View {
