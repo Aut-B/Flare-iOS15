@@ -8,8 +8,8 @@ public struct SearchScreen: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.timelineAppearance.aiConfig.agent) private var agentEnabled
     private let onAskAi: (String?) -> Void
-    @State private var searchPresenter: KotlinPresenter<SearchState>
-    @State private var searchHistoryPresenter: KotlinPresenter<SearchHistoryState>
+    @StateObject private var searchPresenter: KotlinPresenter<SearchState>
+    @StateObject private var searchHistoryPresenter: KotlinPresenter<SearchHistoryState>
     @State private var searchText: String
     @State private var committedSearchText: String
     @State private var isSearchPresented = false
