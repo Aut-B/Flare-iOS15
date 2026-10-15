@@ -5,7 +5,7 @@ import FlareAppleUI
 import NavigationBackport
 
 struct AccountManagementScreen: View {
-    @State private var presenter = KotlinPresenter(presenter: AccountManagementPresenter())
+    @StateObject private var presenter = KotlinPresenter(presenter: AccountManagementPresenter())
     @State private var tabItems: [AccountsStateAccountItem] = []
     @State private var pendingLogoutAccountKey: MicroBlogKey? = nil
     @State private var pendingLogoutAccountName: String? = nil
