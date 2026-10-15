@@ -6,7 +6,7 @@ import NavigationBackport
 
 struct DMListScreen: View {
     let accountType: AccountType
-    @State private var presenter: KotlinPresenter<DMListState>
+    @StateObject private var presenter: KotlinPresenter<DMListState>
     var body: some View {
         List {
             PagingView(data: presenter.state.items) { item in
@@ -81,7 +81,7 @@ extension DMListScreen {
 }
 
 struct UserDMConversationScreen: View {
-    @State private var presenter: KotlinPresenter<UserDMConversationPresenterState>
+    @StateObject private var presenter: KotlinPresenter<UserDMConversationPresenterState>
     private let accountType: AccountType
     
     init(accountType: AccountType, userKey: MicroBlogKey) {
@@ -105,7 +105,7 @@ struct UserDMConversationScreen: View {
 struct DMConversationScreen: View {
     @State private var inputText: String = ""
     @Environment(\.openURL) private var openURL
-    @State private var presenter: KotlinPresenter<DMConversationState>
+    @StateObject private var presenter: KotlinPresenter<DMConversationState>
     var body: some View {
         DMConversationMessagesView(
             data: presenter.state.items,
