@@ -720,7 +720,7 @@ public struct MacStatusShareSheet: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @Environment(\.timelineAppearance) private var timelineAppearance
-    @State private var presenter: KotlinPresenter<StatusState>
+    @StateObject private var presenter: KotlinPresenter<StatusState>
     @State private var theme: ColorScheme?
     @State private var previewStyle: MacStatusSharePreviewStyle = .card
     @State private var screenshotURL: URL?
