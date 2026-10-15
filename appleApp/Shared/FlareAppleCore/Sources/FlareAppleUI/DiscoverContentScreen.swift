@@ -9,7 +9,10 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.timelineAppearance.aiConfig.agent) private var agentEnabled
     @StateObject private var presenter: KotlinPresenter<DiscoverState>
-    @StateObject private var searchPresenter: KotlinPresenter<SearchState>
+    // iOS 15 回退：@StateObject 的 wrappedValue 只读，无法整体替换 presenter（换查询时要换实例），
+    // 所以用 @State 存，再把 objectWillChange 手动转成一次视图失效。
+    @State private var searchPresenter: KotlinPresenter<SearchState>
+    @State private var searchPresenterTick = 0
     @StateObject private var searchHistoryPresenter = KotlinPresenter(presenter: SearchHistoryPresenter())
     @State private var searchText = ""
     @State private var committedSearchText = ""
@@ -35,6 +38,7 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
 
     public var body: some View {
         scrollingContent
+        .onReceive(searchPresenter.objectWillChange) { _ in searchPresenterTick += 1 }
         .modifier(DiscoverListStyle())
         .refreshable {
             if searchPresenter.state.searching {
