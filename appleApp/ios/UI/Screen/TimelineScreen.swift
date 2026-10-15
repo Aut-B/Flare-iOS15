@@ -13,7 +13,7 @@ struct TimelineScreen: View {
     @Environment(\.timelineAppearance) private var timelineAppearance
     @Environment(\.appSettings) private var appSettings
     @Environment(\.scenePhase) private var scenePhase
-    @State var presenter: KotlinPresenter<TimelineItemPresenterState>
+    @StateObject var presenter: KotlinPresenter<TimelineItemPresenterState>
     @State private var isAtTop = true
     @State private var isTabRefreshInFlight = false
     init(
