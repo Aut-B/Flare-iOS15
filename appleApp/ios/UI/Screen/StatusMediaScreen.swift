@@ -17,7 +17,7 @@ struct StatusMediaScreen: View {
     let preview: String?
     let initialMediaAspectRatio: CGFloat?
     let initialMediaIsImage: Bool
-    @State private var presenter: KotlinPresenter<StatusState>
+    @StateObject private var presenter: KotlinPresenter<StatusState>
     @State private var medias: [any UiMedia] = []
 
     var body: some View {
