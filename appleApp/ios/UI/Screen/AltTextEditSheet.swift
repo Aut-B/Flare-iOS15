@@ -7,7 +7,7 @@ import FlareAppleCore
 
 struct AltTextEditSheet: View {
     @Environment(\.dismiss) var dismiss
-    @Perception.Bindable var item: MediaItem
+    @ObservedObject var item: MediaItem
     let maxLength: Int
     
     var body: some View {
