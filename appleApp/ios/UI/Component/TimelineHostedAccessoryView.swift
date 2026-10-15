@@ -8,8 +8,12 @@ final class TimelineHostedAccessoryView: UIView {
 
     init() {
         super.init(frame: .zero)
-        host.safeAreaRegions = []
-        host.sizingOptions = [.intrinsicContentSize]
+        // iOS 15 回退：safeAreaRegions 是 iOS 16.4 API，sizingOptions 是 iOS 16 API；
+        // 两者都只影响安全区与自动尺寸，iOS 15 下靠手动测量高度（layoutSubviews）。
+        if #available(iOS 16.4, *) {
+            host.safeAreaRegions = []
+            host.sizingOptions = [.intrinsicContentSize]
+        }
         host.view.backgroundColor = .clear
         host.view.translatesAutoresizingMaskIntoConstraints = false
         addSubview(host.view)
