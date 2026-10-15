@@ -298,9 +298,7 @@ struct ComposeScreen: View {
                     mediaViewModel.update()
                 }),
                 maxSelectionCount: mediaViewModel.maxSize,
-                matching: .any(of: [.images, .videos, .livePhotos]),
-                // Preserve original GIFs and videos; destination validation rejects unsupported formats.
-                preferredItemEncoding: .current
+                matching: .any(of: [.images, .videos, .livePhotos])
             ) {
                 Image(fontAwesome: .image)
             }
