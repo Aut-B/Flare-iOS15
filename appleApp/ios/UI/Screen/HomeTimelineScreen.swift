@@ -17,11 +17,11 @@ struct HomeTimelineScreen: View {
     @Environment(\.openURL) private var openURL
     @State private var selectedTabId: String?
     @Namespace private var selectedTabIndicatorNamespace
-    @State private var presenter: KotlinPresenter<HomeTimelineWithTabsPresenterState>
-    @State private var activeAccountPresenter = KotlinPresenter(presenter: ActiveAccountPresenter())
-    @State private var loggedInPresenter = KotlinPresenter(presenter: LoggedInPresenter())
-    @State private var canComposePresenter = KotlinPresenter(presenter: CanComposePresenter())
-    @State private var changeLogPresenter: KotlinPresenter<ChangeLogPresenterState>
+    @StateObject private var presenter: KotlinPresenter<HomeTimelineWithTabsPresenterState>
+    @StateObject private var activeAccountPresenter = KotlinPresenter(presenter: ActiveAccountPresenter())
+    @StateObject private var loggedInPresenter = KotlinPresenter(presenter: LoggedInPresenter())
+    @StateObject private var canComposePresenter = KotlinPresenter(presenter: CanComposePresenter())
+    @StateObject private var changeLogPresenter: KotlinPresenter<ChangeLogPresenterState>
     @State private var changeLogAccessoryHost = ChangeLogAccessoryHost()
     private let currentVersion: String
 
