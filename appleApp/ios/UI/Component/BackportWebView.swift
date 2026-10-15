@@ -103,7 +103,7 @@ private extension BackportWebView {
 
     func makeWebView() -> WKWebView {
         #if os(iOS)
-        let view: WKWebView
+        let view: BackportWebViewContainer
         if let configuration = self.configuration {
             view = BackportWebViewContainer(frame: .zero, configuration: configuration)
         } else {
