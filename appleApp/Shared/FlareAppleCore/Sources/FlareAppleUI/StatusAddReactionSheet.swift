@@ -5,7 +5,7 @@ import FlareAppleCore
 public struct StatusAddReactionSheet: View {
     private let accountType: AccountType
     @Environment(\.dismiss) private var dismiss
-    @State private var presenter: KotlinPresenter<AddReactionState>
+    @StateObject private var presenter: KotlinPresenter<AddReactionState>
 
     public var body: some View {
         StateView(state: presenter.state.emojis) { emojiData in
