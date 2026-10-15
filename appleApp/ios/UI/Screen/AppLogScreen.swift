@@ -2,6 +2,7 @@ import SwiftUI
 import KotlinSharedUI
 import FlareAppleCore
 import FlareAppleUI
+import UniformTypeIdentifiers
 
 struct AppLogScreen: View {
     @State private var presenter = KotlinPresenter(presenter: DevModePresenter())
@@ -54,6 +55,9 @@ struct AppLogScreen: View {
                 }
             ),
             document: TextDocument(text: exportedLogContent ?? ""),
+            // iOS 15 回退：显式指定 contentType，走 iOS 14 起就有的重载，
+            // 避免编译器选中 iOS 17 的 contentTypes 版本。
+            contentType: .plainText,
             defaultFilename: "flare_log.txt"
         ) { result in
             exportedLogContent = nil
