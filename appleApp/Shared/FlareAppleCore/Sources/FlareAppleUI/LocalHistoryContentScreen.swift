@@ -4,9 +4,9 @@ import SwiftUI
 
 public struct LocalHistoryContentScreen<AskAiOverlay: View>: View {
     @Environment(\.timelineListRenderer) private var listRenderer
-    @State private var searchPresenter = KotlinPresenter(presenter: LocalCacheSearchPresenter())
+    @StateObject private var searchPresenter = KotlinPresenter(presenter: LocalCacheSearchPresenter())
     @Environment(\.timelineAppearance.aiConfig.agent) private var agentEnabled
-    @State private var presenter = KotlinPresenter(presenter: LocalCacheSearchPresenter())
+    @StateObject private var presenter = KotlinPresenter(presenter: LocalCacheSearchPresenter())
     @State private var searchText = ""
     @State private var committedQuery = ""
     @State private var isSearchPresented = false
