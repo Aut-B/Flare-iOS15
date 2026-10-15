@@ -41,6 +41,8 @@ struct MediaViewerScreen: View {
     @State private var isLandscapeViewing = false
     @State private var postSheetPresented = false
     @State private var postSummaryHeight: CGFloat = 120
+    // iOS 15 回退：PresentationDetent 是 iOS 16 API，改用 FlareSheetDetent 记账。
+    @State private var postDetent: FlareSheetDetent = .height(120)
 
     init(
         medias: [any UiMedia],
@@ -215,7 +217,7 @@ struct MediaViewerScreen: View {
         }
         .background(.black.opacity(opacity))
         .background(ClearFullScreenBackground())
-        .toolbar(.hidden, for: .navigationBar)
+        .flareNavigationBarHidden()
     }
 
     @ViewBuilder
@@ -533,7 +535,10 @@ struct MediaViewerScreen: View {
         withAnimation(.linear(duration: 0.2)) {
             dismissOffset = direction * containerHeight
             opacity = 0
-        } completion: {
+        }
+        // iOS 15 回退：withAnimation(_:completionCriteria:_:completion:) 是 iOS 17 API，
+        // 这里按动画时长延迟收尾，效果一致。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
