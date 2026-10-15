@@ -1441,8 +1441,16 @@ private final class RichTextTextView: UITextView, UITextViewDelegate, RichTextTe
     }
 
     override var selectedTextRange: UITextRange? {
-        get { selectionEnabled ? super.selectedTextRange : nil }
-        set { super.selectedTextRange = selectionEnabled ? newValue : nil }
+        // iOS 15 回退：getter 不能劫持成 nil。UITextView 在 setAttributedText /
+        // 布局 / 滚动定位过程中会读回 selectedTextRange 并当成非 nil range 使用，
+        // 拿到 nil 再按 range 操作会抛 NSRangeException——长文详情页（「查看全文」
+        // 展开、点进阅读）正是触发路径密集的场景，表现为一点就闪退。
+        // setter 只拦「禁止选择时试图设置选择区」；清空（nil）与正常模式一律放行。
+        get { super.selectedTextRange }
+        set {
+            guard selectionEnabled || newValue == nil else { return }
+            super.selectedTextRange = newValue
+        }
     }
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
