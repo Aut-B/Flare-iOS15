@@ -1,16 +1,20 @@
+import Combine
 import Foundation
 @preconcurrency import KotlinSharedUI
 import SwiftUI
-import Perception
 
-@Perceptible
-public final class ComposeContentViewModel {
-    public var text: String
-    public var contentWarning: String
-    public var enableContentWarning: Bool
-    public var showEmoji: Bool
+// iOS 15 回退：@Perceptible 的读取点散落在 ComposeScreen 的各类惰性闭包里
+// （ScrollView / overlay / toolbar / sheet），逐个包 WithPerceptionTracking 不可靠。
+// 改成 Combine 的 ObservableObject 后，任何属性变化都会让持有者整体重算，
+// 与 iOS 17 上 @Observable 的自动追踪等效。
+public final class ComposeContentViewModel: ObservableObject {
+    @Published public var text: String
+    @Published public var contentWarning: String
+    @Published public var enableContentWarning: Bool
+    @Published public var showEmoji: Bool
     public var pollViewModel: ComposePollViewModel
-    public var languages: [String]
+    @Published public var languages: [String]
+    private var cancellables = Set<AnyCancellable>()
 
     public init(
         text: String = "",
@@ -26,6 +30,13 @@ public final class ComposeContentViewModel {
         self.showEmoji = showEmoji
         self.pollViewModel = pollViewModel
         self.languages = languages ?? Self.defaultLanguages
+        // pollViewModel 自己是 ObservableObject，ComposeScreen 只持有本对象，
+        // 必须把它的变化转发上来，否则「开启投票」后面板不出现。
+        pollViewModel.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
     }
 
     public static var defaultLanguages: [String] {
