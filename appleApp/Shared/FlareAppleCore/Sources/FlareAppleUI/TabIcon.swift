@@ -99,7 +99,7 @@ public struct MaterialTabIcon: View {
 
 public struct AvatarTabIcon: View {
 
-    @State private var presenter: KotlinPresenter<UserState>
+    @StateObject private var presenter: KotlinPresenter<UserState>
 
     public init(userKey: MicroBlogKey, accountType: AccountType) {
         self._presenter = .init(wrappedValue: .init(presenter: UserPresenter(accountType: accountType, userKey: userKey)))
@@ -118,7 +118,7 @@ public struct AvatarTabIcon: View {
 }
 
 public struct FavTabIcon: View {
-    @State private var presenter: KotlinPresenter<UiState<NSString>>
+    @StateObject private var presenter: KotlinPresenter<UiState<NSString>>
 
     public init(host: String) {
         self._presenter = .init(wrappedValue: .init(presenter: FavIconPresenter(host: host)))
