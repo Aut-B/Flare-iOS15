@@ -8,9 +8,12 @@ import Perception
 @Perceptible @MainActor
 public final class UgoiraPlaybackSession {
     public private(set) var image: CGImage?
-    public var progress: Double { Double(presenter?.state.progress ?? 0) }
-    public var failed: Bool { presenter?.state.failed ?? false }
-    public var isActive: Bool { presenter != nil }
+    // iOS 15 回退：@Perceptible 只追踪存储属性，计算属性（原先直接读 Kotlin
+    // presenter 的 state）的变化不会通知任何视图。这里镜像成存储属性，
+    // 由 presenter 的订阅负责更新，进度/失败态/激活态才能驱动 UI。
+    public private(set) var progress: Double = 0
+    public private(set) var failed = false
+    public private(set) var isActive = false
     public var onFrame: ((CGImage) -> Void)?
     private var task: Task<Void, Never>?
     private var presenter: KotlinPresenter<UgoiraPresenterState>?
@@ -30,8 +33,11 @@ public final class UgoiraPlaybackSession {
         position = MediaPlaybackMemory.shared.position(for: media.url)
         let presenter = KotlinPresenter(presenter: UgoiraPresenter(media: media))
         self.presenter = presenter
+        isActive = true
         subscription = presenter.statePublisher.sink { [weak self] state in
             guard let self else { return }
+            self.progress = Double(state.progress)
+            self.failed = state.failed
             guard let animation = state.animation, !state.failed else {
                 task?.cancel()
                 task = nil
@@ -96,6 +102,7 @@ public final class UgoiraPlaybackSession {
     public func retry() {
         guard failed else { return }
         image = nil
+        failed = false
         presenter?.state.retry()
     }
 
@@ -113,6 +120,9 @@ public final class UgoiraPlaybackSession {
         subscription = nil
         presenter = nil
         image = nil
+        isActive = false
+        progress = 0
+        failed = false
     }
 }
 
@@ -164,6 +174,9 @@ public struct UgoiraPlayer: View {
     }
 
     public var body: some View {
+        // iOS 15 回退：@Perceptible 属性必须在 withPerceptionTracking 作用域内读取才会被登记。
+        WithPerceptionTracking {
+
         ZStack(alignment: .bottomLeading) {
             UgoiraFrameView(media: media, session: session, contentMode: contentMode)
             UgoiraStatusOverlay(session: session)
@@ -183,6 +196,8 @@ public struct UgoiraPlayer: View {
             (presentation ?? fallbackPresentation).releaseFrames(owner: session)
             if presentation == nil { fallbackPresentation.end() }
         }
+    
+        }
     }
     private func updatePlayback() {
         if active {
@@ -198,6 +213,9 @@ struct UgoiraStatusOverlay: View {
     let session: UgoiraPlaybackSession
 
     var body: some View {
+        // iOS 15 回退：@Perceptible 属性必须在 withPerceptionTracking 作用域内读取才会被登记。
+        WithPerceptionTracking {
+
         if session.failed {
             Button(action: session.retry) {
                 Image(systemName: "arrow.clockwise").mediaVideoBadgeStyle()
@@ -225,6 +243,8 @@ struct UgoiraStatusOverlay: View {
                     .allowsHitTesting(false)
             }
         }
+    
+        }
     }
 }
 
@@ -233,6 +253,9 @@ struct UgoiraFrameView: View {
     let session: UgoiraPlaybackSession
     var contentMode: ContentMode = .fill
     var body: some View {
+        // iOS 15 回退：@Perceptible 属性必须在 withPerceptionTracking 作用域内读取才会被登记。
+        WithPerceptionTracking {
+
         Color.clear.overlay {
             if let image = session.image {
                 Image(decorative: image, scale: 1).resizable().aspectRatio(contentMode: contentMode)
@@ -240,6 +263,8 @@ struct UgoiraFrameView: View {
                 NetworkImage(data: media.previewUrl, customHeader: media.customHeaders, contentMode: contentMode)
             }
         }.clipped().accessibilityLabel(media.accessibleDescription)
+    
+        }
     }
 }
 
