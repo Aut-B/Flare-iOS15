@@ -81,22 +81,55 @@ public struct BackportWebView: WebViewRepresentable {
     #endif
 }
 
+#if os(iOS)
+/// iOS 15 专用容器：等 WebView 真正进入窗口层级后再发起加载。
+/// makeUIView 里立即 load 时视图还没附着（初始 frame 为 0），x.com 这类
+/// 重 JS 页面会以空视口启动、渲染成一片白屏；上游 iOS 26 版是在 WebView 的
+/// onAppear 里加载的，这里把时机对齐——didMoveToWindow 时窗口非空即加载。
+final class BackportWebViewContainer: WKWebView {
+    var pendingRequest: URLRequest?
+    private var hasStartedLoad = false
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard !hasStartedLoad, window != nil, let request = pendingRequest else { return }
+        hasStartedLoad = true
+        load(request)
+    }
+}
+#endif
+
 private extension BackportWebView {
 
     func makeWebView() -> WKWebView {
+        #if os(iOS)
+        let view: WKWebView
+        if let configuration = self.configuration {
+            view = BackportWebViewContainer(frame: .zero, configuration: configuration)
+        } else {
+            view = BackportWebViewContainer(frame: .zero)
+        }
+        if let url {
+            view.pendingRequest = URLRequest(url: url)
+        }
+        return view
+        #else
         guard let configuration = self.configuration else { return WKWebView() }
         return WKWebView(frame: .zero, configuration: configuration)
+        #endif
     }
 
     func makeView() -> WKWebView {
         let view = makeWebView()
         webView(view)
+        #if os(macOS)
         tryLoad(url, into: view)
+        #endif
         return view
     }
 
     func tryLoad(_ url: URL?, into view: WKWebView) {
-        guard let url = url else { return }
+        guard let url else { return }
         view.load(URLRequest(url: url))
     }
 }
