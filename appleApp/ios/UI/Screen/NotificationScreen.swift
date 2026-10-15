@@ -7,7 +7,7 @@ import FlareAppleCore
 
 struct NotificationScreen: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @State private var presenter: KotlinPresenter<AllNotificationPresenterState> = .init(presenter: AllNotificationPresenter())
+    @StateObject private var presenter: KotlinPresenter<AllNotificationPresenterState> = .init(presenter: AllNotificationPresenter())
     @State private var selectedAccountStableKey: String?
     @State private var selectedFilter: NotificationFilter?
     @State private var filterSegmentsHeight: CGFloat = 0
