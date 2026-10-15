@@ -291,6 +291,29 @@ public extension View {
     }
 }
 
+// MARK: - iOS 16+ 的 PresentationDetent 记账类型
+
+/// PresentationDetent 本身是 iOS 16 API，不能用在 iOS 15 的 @State 存储属性上。
+/// 这里只做「大／指定高度」两态记账，供界面分支判断使用。
+public enum FlareSheetDetent: Equatable, Sendable {
+    case large
+    case height(CGFloat)
+}
+
+// MARK: - iOS 16+ 的 toolbar(_:for:)
+
+public extension View {
+    /// `toolbar(.hidden, for: .navigationBar)` 的 iOS 13+ 等效写法。
+    @ViewBuilder
+    func flareNavigationBarHidden(_ hidden: Bool = true) -> some View {
+        if #available(iOS 16.0, *) {
+            self.toolbar(hidden ? .hidden : .automatic, for: .navigationBar)
+        } else {
+            self.navigationBarHidden(hidden)
+        }
+    }
+}
+
 // MARK: - SwiftUI-Flow 的 HFlow（1.7.0 内部用了 Layout 协议，实际最低 iOS 16）
 
 /// iOS 15 可用的横向流式排布：用自适应列宽的 LazyVGrid 近似 HFlow。
