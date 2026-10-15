@@ -1,3 +1,4 @@
+import Combine
 import Perception
 import FlareAppleCore
 import KotlinSharedUI
@@ -5,38 +6,54 @@ import SwiftUI
 import NavigationBackport
 
 public struct TranslationConfigSettingsView: View {
-    @State private var state = TranslationConfigSettingsState()
+    @StateObject private var state = TranslationConfigSettingsState()
 
     public init() {}
 
     public var body: some View {
+
         List {
             TranslationConfigSettingsSectionsContent(state: state)
         }
         .translationConfigSettingsSheets(state: state)
+    
     }
 }
 
 public struct TranslationConfigSettingsSections: View {
-    @State private var state = TranslationConfigSettingsState()
+    @StateObject private var state = TranslationConfigSettingsState()
 
     public init() {}
 
     public var body: some View {
+
         TranslationConfigSettingsSectionsContent(state: state)
             .translationConfigSettingsSheets(state: state)
+    
     }
 }
 
-@Perceptible
-private final class TranslationConfigSettingsState {
+// iOS 15 回退：同 AiConfigSettingsState——内部持有 KotlinPresenter（Combine 的
+// ObservableObject），@Perceptible 的注册表按 (对象, keyPath) 登记，收不到嵌套
+// presenter 的变化，必须自己转发 objectWillChange。
+private final class TranslationConfigSettingsState: ObservableObject {
     let presenter = KotlinPresenter(presenter: AiConfigPresenter())
     let aiTranslationTestPresenter = KotlinPresenter(presenter: AiTranslationTestPresenter())
-    var editingField: TranslationConfigEditableField?
-    var editingText = ""
-    var showExcludedLanguagesPicker = false
-    var pendingExcludedLanguages: Set<String> = []
-    var excludedLanguagesQuery = ""
+    @Published var editingField: TranslationConfigEditableField?
+    @Published var editingText = ""
+    @Published var showExcludedLanguagesPicker = false
+    @Published var pendingExcludedLanguages: Set<String> = []
+    @Published var excludedLanguagesQuery = ""
+    private var cancellables = Set<AnyCancellable>()
+
+    init() {
+        presenter.objectWillChange
+            .merge(with: aiTranslationTestPresenter.objectWillChange)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+    }
 
     func beginEditing(field: TranslationConfigEditableField, value: String) {
         editingText = value
@@ -127,9 +144,10 @@ private final class TranslationConfigSettingsState {
 }
 
 private struct TranslationConfigSettingsSectionsContent: View {
-    let state: TranslationConfigSettingsState
+    @ObservedObject var state: TranslationConfigSettingsState
 
     var body: some View {
+
         Section {
             Picker(
                 selection: Binding(
@@ -202,6 +220,7 @@ private struct TranslationConfigSettingsSectionsContent: View {
         }
         .animation(.easeInOut(duration: 0.2), value: state.presenter.state.translateProvider.name)
         .animation(.easeInOut(duration: 0.2), value: state.presenter.state.preTranslate)
+    
     }
 
     @ViewBuilder
@@ -309,10 +328,11 @@ private struct TranslationConfigSettingsSectionsContent: View {
 }
 
 private struct TranslationConfigEditSheet: View {
-    @Perception.Bindable var state: TranslationConfigSettingsState
+    @ObservedObject var state: TranslationConfigSettingsState
     let field: TranslationConfigEditableField
 
     var body: some View {
+
         NBNavigationStack {
             Form {
                 Section {
@@ -341,13 +361,15 @@ private struct TranslationConfigEditSheet: View {
                 }
             }
         }
+    
     }
 }
 
 private struct TranslationExcludedLanguagesSheet: View {
-    @Perception.Bindable var state: TranslationConfigSettingsState
+    @ObservedObject var state: TranslationConfigSettingsState
 
     var body: some View {
+
         NBNavigationStack {
             languageList
             #if os(iOS)
@@ -377,6 +399,7 @@ private struct TranslationExcludedLanguagesSheet: View {
                 }
             }
         }
+    
     }
 
     @ViewBuilder
@@ -426,11 +449,19 @@ private struct TranslationExcludedLanguagesSheet: View {
 
 private extension View {
     func translationConfigSettingsSheets(state: TranslationConfigSettingsState) -> some View {
-        @Perception.Bindable var state = state
-        return sheet(item: $state.editingField) { field in
+        // iOS 15 回退：state 是 ObservableObject，不能用 @Perception.Bindable，手写 Binding。
+        let fieldBinding = Binding<TranslationConfigEditableField?>(
+            get: { state.editingField },
+            set: { state.editingField = $0 }
+        )
+        let pickerBinding = Binding<Bool>(
+            get: { state.showExcludedLanguagesPicker },
+            set: { state.showExcludedLanguagesPicker = $0 }
+        )
+        return sheet(item: fieldBinding) { field in
             TranslationConfigEditSheet(state: state, field: field)
         }
-        .sheet(isPresented: $state.showExcludedLanguagesPicker) {
+        .sheet(isPresented: pickerBinding) {
             TranslationExcludedLanguagesSheet(state: state)
         }
     }
