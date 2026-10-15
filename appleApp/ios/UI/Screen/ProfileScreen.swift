@@ -58,8 +58,10 @@ struct ProfileScreen: View {
                                 }
                             } label: {
                                 Text(profileTabTitle(for: tab))
-                                    .foregroundStyle(selectedTab == index ? Color.accentColor : .primary)
+                                    // iOS 15 回退：View 级 .fontWeight 是 iOS 16 API，
+                                    // 先用 Text 自带的 .fontWeight（iOS 13 起可用）。
                                     .fontWeight(selectedTab == index ? .bold : .regular)
+                                    .foregroundStyle(selectedTab == index ? Color.accentColor : .primary)
                             }
                         }
                     }
@@ -368,16 +370,25 @@ private struct ProfileTimelineUIKitLoadingPlaceholder: View {
         isMultipleColumn: Bool
     ) -> some View {
         ForEach(0..<placeholderCount, id: \.self) { index in
-            TimelineUIKitPlaceholderCard(
-                index: index,
-                totalCount: placeholderCount,
-                isPlainTimelineDisplayMode: isPlainTimelineDisplayMode,
-                isMultipleColumn: isMultipleColumn
-            )
+            if #available(iOS 16.0, *) {
+                TimelineUIKitPlaceholderCard(
+                    index: index,
+                    totalCount: placeholderCount,
+                    isPlainTimelineDisplayMode: isPlainTimelineDisplayMode,
+                    isMultipleColumn: isMultipleColumn
+                )
+            } else {
+                // iOS 15 回退：用纯 SwiftUI 的骨架块替代 UIKit 占位卡。
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.secondary.opacity(0.15))
+                    .frame(height: 132)
+            }
         }
     }
 }
 
+// iOS 15 回退：UIViewRepresentable.sizeThatFits(_:uiView:context:) 是 iOS 16 API。
+@available(iOS 16.0, *)
 private struct TimelineUIKitPlaceholderCard: UIViewRepresentable {
     let index: Int
     let totalCount: Int
