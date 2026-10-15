@@ -3,7 +3,7 @@ import FlareAppleCore
 import SwiftUI
 
 public struct EmojiPopup: View {
-    @State private var presenter: KotlinPresenter<EmojiHistoryPresenterState>
+    @StateObject private var presenter: KotlinPresenter<EmojiHistoryPresenterState>
     @State private var filterText = ""
 
     private let data: EmojiData
