@@ -18,21 +18,26 @@ struct BackportWebLoginScreen: View {
     }
     
     var body: some View {
-        NBNavigationStack {
-            if let viewModel, viewModel.canShowWebView {
-                BackportWebView(url: URL(string: url), configuration: viewModel.configuration) { webView in
-                    webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
-                    webView.navigationDelegate = viewModel.delegate
-                }
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button {
-                            dismiss()
-                        } label: {
-                            Label {
-                                Text("Cancel")
-                            } icon: {
-                                Image(systemName: "xmark")
+        // iOS 15 回退：viewModel 是 @Perceptible，SwiftUI 不会自动追踪它的属性，
+        // 必须把读取点包进 WithPerceptionTracking，否则 canShowWebView 置 true 时
+        // 视图不会重算，登录网页迟迟不出现。
+        WithPerceptionTracking {
+            NBNavigationStack {
+                if let viewModel, viewModel.canShowWebView {
+                    BackportWebView(url: URL(string: url), configuration: viewModel.configuration) { webView in
+                        webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
+                        webView.navigationDelegate = viewModel.delegate
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button {
+                                dismiss()
+                            } label: {
+                                Label {
+                                    Text("Cancel")
+                                } icon: {
+                                    Image(systemName: "xmark")
+                                }
                             }
                         }
                     }
@@ -66,6 +71,8 @@ final class BackportWebLoginViewModel {
     let url: String
     let onCookie: (String) -> Void
     let delegate: WKDelegate
+    /// 非持久化数据仓库：登录页立即显示，且 cookie 读取必须走同一个实例。
+    let dataStore = WKWebsiteDataStore.nonPersistent()
     @PerceptionIgnored private var observers = [NSKeyValueObservation]()
     init(
         onCookie: @escaping (String) -> Void,
@@ -73,30 +80,24 @@ final class BackportWebLoginViewModel {
     ) {
         self.onCookie = onCookie
         self.url = url
-        self.delegate = WKDelegate {
-            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { (cookies) in
+        self.delegate = WKDelegate { [weak self] in
+            guard let self else { return }
+            self.dataStore.httpCookieStore.getAllCookies { (cookies) in
                 let cookieString = BackportWebLoginViewModel.cookieHeaderString(from: cookies, for: .init(string: url))
                 onCookie(cookieString)
             }
         }
-        clearCookie()
+        // 不再走「清空全部网站数据后再显示」的异步链路，登录页立即可见。
+        self.canShowWebView = true
     }
     var configuration: WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        // iOS 15 回退：改用非持久化数据仓库。原实现要先 fetchDataRecords + removeData
+        // 清空全部网站数据才把 canShowWebView 置 true，这一步是异步的，期间界面停在空白；
+        // 非持久化仓库天然隔离，登录页可以立刻出现，cookie 仍能从 httpCookieStore 取到。
+        configuration.websiteDataStore = dataStore
         return configuration
-    }
-    func clearCookie() {
-        let dataStore = WKWebsiteDataStore.default()
-        dataStore.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
-            dataStore.removeData(
-                ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
-                for: records,
-                completionHandler: {
-                    self.canShowWebView = true
-                }
-            )
-        }
     }
     private static func cookieHeaderString(from cookies: [HTTPCookie], for url: URL?) -> String {
         let host = url?.host?.lowercased()
