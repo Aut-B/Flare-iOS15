@@ -1,3 +1,4 @@
+import Combine
 import Perception
 import FlareAppleCore
 import Foundation
@@ -6,34 +7,52 @@ import SwiftUI
 import NavigationBackport
 
 public struct AiConfigSettingsView: View {
-    @State private var state = AiConfigSettingsState()
+    @StateObject private var state = AiConfigSettingsState()
 
     public init() {}
 
     public var body: some View {
+
         List {
             AiConfigSettingsSectionsContent(state: state)
         }
         .aiConfigSettingsSheets(state: state)
+    
     }
 }
 
 public struct AiConfigSettingsSections: View {
-    @State private var state = AiConfigSettingsState()
+    @StateObject private var state = AiConfigSettingsState()
 
     public init() {}
 
     public var body: some View {
+
         AiConfigSettingsSectionsContent(state: state)
             .aiConfigSettingsSheets(state: state)
+    
     }
 }
 
-@Perceptible
-private final class AiConfigSettingsState {
+// iOS 15 回退：内部持有 KotlinPresenter（Combine 的 ObservableObject）。
+// 原来的 @Perceptible 收不到它的 objectWillChange——Perception 的注册表是按
+// (对象, keyPath) 登记的，嵌套对象的属性读取根本不进入本对象的注册表，
+// 于是 Kotlin 推来的新 state 永远触发不了重算。改成 ObservableObject 后，
+// 由这里把 presenter 的变化手动转发出去，与直接 @StateObject 持有一个
+// KotlinPresenter 的效果一致。
+private final class AiConfigSettingsState: ObservableObject {
     let presenter = KotlinPresenter(presenter: AiConfigPresenter())
-    var editingField: AiConfigEditableField?
-    var editingText = ""
+    @Published var editingField: AiConfigEditableField?
+    @Published var editingText = ""
+    private var cancellables = Set<AnyCancellable>()
+
+    init() {
+        presenter.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+    }
 
     func beginEditing(field: AiConfigEditableField, value: String) {
         editingText = value
@@ -57,9 +76,10 @@ private final class AiConfigSettingsState {
 }
 
 private struct AiConfigSettingsSectionsContent: View {
-    let state: AiConfigSettingsState
+    @ObservedObject var state: AiConfigSettingsState
 
     var body: some View {
+
         Group {
             Section {
                 Picker(
@@ -183,6 +203,7 @@ private struct AiConfigSettingsSectionsContent: View {
         .animation(.easeInOut(duration: 0.2), value: state.presenter.state.aiType == .openAi)
         .animation(.easeInOut(duration: 0.2), value: shouldShowAiAgentToggle)
         .animation(.easeInOut(duration: 0.2), value: state.presenter.state.aiTldr)
+    
     }
 
     private func editButton(field: AiConfigEditableField, value: String) -> some View {
@@ -280,10 +301,11 @@ private struct AiConfigSettingsSectionsContent: View {
 }
 
 private struct AiConfigEditSheet: View {
-    @Perception.Bindable var state: AiConfigSettingsState
+    @ObservedObject var state: AiConfigSettingsState
     let field: AiConfigEditableField
 
     var body: some View {
+
         NBNavigationStack {
             Form {
                 Section {
@@ -344,6 +366,7 @@ private struct AiConfigEditSheet: View {
                 }
             }
         }
+    
     }
 
     private var serverSuggestions: [String] {
@@ -362,8 +385,13 @@ private struct AiConfigEditSheet: View {
 
 private extension View {
     func aiConfigSettingsSheets(state: AiConfigSettingsState) -> some View {
-        @Perception.Bindable var state = state
-        return sheet(item: $state.editingField) { field in
+        // iOS 15 回退：state 是 ObservableObject，不能用 @Perception.Bindable，
+        // 手写 Binding 驱动 sheet(item:)。
+        let fieldBinding = Binding<AiConfigEditableField?>(
+            get: { state.editingField },
+            set: { state.editingField = $0 }
+        )
+        return sheet(item: fieldBinding) { field in
             AiConfigEditSheet(state: state, field: field)
         }
     }
