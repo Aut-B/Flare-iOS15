@@ -383,7 +383,14 @@ final class FeedUIView: UIView, ManualLayoutMeasurable, TimelineHeightProviding 
     }
 
     private func imageOptions(customHeaders: [String: String]?) -> KingfisherOptionsInfo {
-        var options: KingfisherOptionsInfo = [.transition(.fade(0.25)), .cacheOriginalImage, .backgroundDecode]
+        // 老设备(iOS 15 / A9)滚动卡顿的主要来源之一：大图在主线程缩放与内存压力。
+        // 降采样到 800pt 以内(保持比例)，解码/绘制开销与缓存体积都大幅下降；
+        // 去掉 .cacheOriginalImage，缓存只保留降后图，避免原图常驻内存。
+        var options: KingfisherOptionsInfo = [
+            .transition(.fade(0.25)),
+            .backgroundDecode,
+            .downsampling(CGSize(width: 800, height: 800)),
+        ]
         if let customHeaders, !customHeaders.isEmpty {
             options.append(.requestModifier(AnyModifier { request in
                 var request = request
