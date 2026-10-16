@@ -107,6 +107,10 @@ struct TabSettingsScreen: View {
         }
         .navigationTitle("tab_settings_title")
         .toolbar {
+            // iOS 15：同账号管理页——.onMove 需要编辑模式，缺 EditButton 拖不动。
+            ToolbarItem(placement: .navigationBarLeading) {
+                EditButton()
+            }
             ToolbarItem(placement: .cancellationAction) {
                 Button {
                     dismiss()
