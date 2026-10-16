@@ -4,6 +4,7 @@ import FlareAppleUI
 import AuthenticationServices
 import Foundation
 import WebKit
+import UIKit
 import FlareAppleCore
 
 private enum ServiceSelectionAnimation {
@@ -177,14 +178,19 @@ struct ServiceSelectionScreen: View {
                     .transition(ServiceSelectionAnimation.inline)
                 }
 
-                LoginFlowView {
-                    state.createLoginHandler(
-                        platformId: node.platformId,
-                        host: node.host,
-                        methodType: selectedMethod,
-                        redirectUri: nil,
-                    )
-                }
+                LoginFlowView(
+                    handler: {
+                        state.createLoginHandler(
+                            platformId: node.platformId,
+                            host: node.host,
+                            methodType: selectedMethod,
+                            redirectUri: nil,
+                        )
+                    },
+                    isTwitter: node.host.lowercased().contains("twitter")
+                        || node.host.lowercased().contains("x.com")
+                        || node.platformId.lowercased().contains("twitter")
+                )
                     .id("\(key)-\(selectedMethod)")
                     .transition(ServiceSelectionAnimation.panel)
 
@@ -361,9 +367,13 @@ struct ReloginScreen: View {
                     .pickerStyle(.segmented)
                 }
 
-                LoginFlowView {
-                    state.createLoginHandler(methodType: selectedMethod)
-                }
+                LoginFlowView(
+                    handler: {
+                        state.createLoginHandler(methodType: selectedMethod)
+                    },
+                    isTwitter: target.accountKey.host.lowercased().contains("twitter")
+                        || target.accountKey.host.lowercased().contains("x.com")
+                )
                     .id("\(target.accountKey)-\(selectedMethod)")
 
                 LoginAgreementView(urlString: state.agreementUrl())
@@ -376,9 +386,17 @@ private struct LoginFlowView: View {
     @StateObject private var presenter: KotlinPresenter<LoginFlowPresenterState>
     @State private var qrContent: String?
     @State private var webCookieUrl: String?
+    /// X（twitter/x.com）在 iOS 15 的 WebView 上无法走完登录（缺 FedCM 等现代
+    /// Web 身份 API，系统 Safari 同样卡住）。这里提供「粘贴会话 Cookie」的替代入口：
+    /// 用户在 Reynard 或桌面浏览器登录 x.com，导出 Cookie 后粘贴进来，直接喂给既有
+    /// 的 `canResume` / `resume`，等价于 WebView 自动抓到的 cookie。
+    @State private var pasteCookie = ""
+    @State private var pasteError: String?
+    let isTwitter: Bool
 
-    init(handler: @escaping () -> LoginMethodHandler) {
+    init(handler: @escaping () -> LoginMethodHandler, isTwitter: Bool = false) {
         self._presenter = .init(wrappedValue: .init(presenter: LoginFlowPresenter(handler: handler())))
+        self.isTwitter = isTwitter
     }
 
     var body: some View {
@@ -418,6 +436,62 @@ private struct LoginFlowView: View {
 
             LoginErrorText(message: presenter.state.flowState.error)
                 .transition(ServiceSelectionAnimation.inline)
+
+            if isTwitter {
+                Divider()
+                VStack(spacing: 10) {
+                    Text("iOS 15 的 WebView 无法完成 X 网页登录。请在 Reynard 或桌面浏览器登录 x.com，复制会话 Cookie（含 auth_token 与 ct0）后，点下方「从剪贴板读取并登录」即可。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    TextField("粘贴 X 会话 Cookie（形如 auth_token=...; ct0=...）", text: $pasteCookie)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        let cookie = pasteCookie.trimmingCharacters(in: .whitespacesAndNewlines)
+                        pasteError = nil
+                        guard !cookie.isEmpty else {
+                            pasteError = "请先粘贴 Cookie 字符串。"
+                            return
+                        }
+                        if presenter.state.canResume(value: cookie) {
+                            presenter.state.resume(value: cookie)
+                        } else {
+                            pasteError = "Cookie 无效：请确认包含 auth_token 与 ct0，且未过期。"
+                        }
+                    } label: {
+                        Text("用 Cookie 登录 X")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
+                    Button {
+                        let cookie = (UIPasteboard.general.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        pasteError = nil
+                        guard !cookie.isEmpty else {
+                            pasteError = "剪贴板为空，请先在 Reynard/桌面复制 Cookie。"
+                            return
+                        }
+                        pasteCookie = cookie
+                        if presenter.state.canResume(value: cookie) {
+                            presenter.state.resume(value: cookie)
+                        } else {
+                            pasteError = "剪贴板内容不是有效 Cookie：请确认包含 auth_token 与 ct0，且未过期。"
+                        }
+                    } label: {
+                        Text("从剪贴板读取并登录")
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
+                    if let pasteError {
+                        Text(pasteError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .transition(ServiceSelectionAnimation.inline)
+            }
         }
         .animation(ServiceSelectionAnimation.standard, value: flowAnimationKey)
         .task {
