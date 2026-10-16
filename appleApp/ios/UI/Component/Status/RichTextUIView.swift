@@ -788,9 +788,15 @@ final class RichTextUIView: UIView, TimelineHeightProviding {
     }
 
     private func baseAttributes(font: UIFont? = nil, color: UIColor? = nil) -> [NSAttributedString.Key: Any] {
-        [
+        // 段内行距：系统字体默认 lineHeight 偏紧，长文（如 Misskey/stelpolva.moe 的
+        // 多行贴文）换行后文字上下贴得过近。加 3pt 行距在测量与渲染两端共用同一份
+        // attributed string，不会造成高度错位；短贴几乎无感。
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = 3
+        return [
             .font: font ?? preferredFont(forTextStyle: baseTextStyle),
             .foregroundColor: color ?? baseTextColor,
+            .paragraphStyle: paragraphStyle,
         ]
     }
 
