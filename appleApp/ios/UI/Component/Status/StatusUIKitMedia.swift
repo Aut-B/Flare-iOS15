@@ -326,7 +326,7 @@ final class MediaUIView: UIView {
         // 老设备(iOS 15 / A9)滚动卡顿主要来源：主贴大图原尺寸解码与绘制。
         // 降采样到 800pt 内(保持比例)，显著降低滚动时主线程缩放与内存压力；
         // 是否缓存原图仍由 cacheOriginalImage 控制(供点开查看大图)。
-        var options: KingfisherOptionsInfo = [.transition(.fade(0.25)), .backgroundDecode, .downsampling(CGSize(width: 800, height: 800))]
+        var options: KingfisherOptionsInfo = [.transition(.fade(0.25)), .backgroundDecode, .processor(DownsamplingImageProcessor(size: CGSize(width: 800, height: 800)))]
         if cacheOriginalImage {
             options.append(.cacheOriginalImage)
         }
