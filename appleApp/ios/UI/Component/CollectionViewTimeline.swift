@@ -691,8 +691,20 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
     private func scheduleHeightCorrectionFlush() {
         guard !isHeightCorrectionFlushScheduled else { return }
         isHeightCorrectionFlushScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            self?.flushPendingHeightCorrections()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            // 滚动(拖拽/惯性减速)期间不整表重排：避免每次异步内容(毛象 emoji 内联图、文字延迟
+            // 测量、图片加载)落定都触发 invalidateLayout 重排整条瀑布流——这是老设备(iOS 15 / A9)
+            // 滑动卡顿的主因。cell 自身内容仍通过 setNeedsLayout 即时渲染，仅集合视图项坐标
+            // 延到滚停后校正，观感无碍、流畅度大幅提升。
+            let scrolling = (self.collectionView?.isDragging ?? false) ||
+                (self.collectionView?.isDecelerating ?? false)
+            guard !scrolling else {
+                self.isHeightCorrectionFlushScheduled = false
+                self.scheduleHeightCorrectionFlush()
+                return
+            }
+            self.flushPendingHeightCorrections()
         }
     }
 
