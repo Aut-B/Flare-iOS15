@@ -254,12 +254,26 @@ final class DMConversationMessagesController: UIViewController, UICollectionView
         snapshot.appendSections([ItemID.section])
         snapshot.appendItems(ids, toSection: ItemID.section)
 
-        dataSource.apply(snapshot, animatingDifferences: didApplyInitialData) { [weak self] in
-            guard let self else { return }
-            if wasNearBottom {
-                self.scrollToBottom(animated: false)
-            } else if let positionSnapshot {
-                self.chatLayout.restoreContentOffset(with: positionSnapshot)
+        // iOS 15 回退：diffable 动画更新在内存压力下会触发 UICollectionView
+        // performBatchUpdates 在动画完成块内重入的断言（长文/长会话阅读闪退），
+        // iOS 16 以下一律无动画。
+        if #available(iOS 16.0, *) {
+            dataSource.apply(snapshot, animatingDifferences: didApplyInitialData) { [weak self] in
+                guard let self else { return }
+                if wasNearBottom {
+                    self.scrollToBottom(animated: false)
+                } else if let positionSnapshot {
+                    self.chatLayout.restoreContentOffset(with: positionSnapshot)
+                }
+            }
+        } else {
+            dataSource.apply(snapshot, animatingDifferences: false) { [weak self] in
+                guard let self else { return }
+                if wasNearBottom {
+                    self.scrollToBottom(animated: false)
+                } else if let positionSnapshot {
+                    self.chatLayout.restoreContentOffset(with: positionSnapshot)
+                }
             }
         }
     }
