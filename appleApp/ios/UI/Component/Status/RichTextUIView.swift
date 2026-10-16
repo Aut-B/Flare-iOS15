@@ -1721,7 +1721,7 @@ private final class RichTextBlockImageView: UIView, RichTextFittingPreparing {
 
     func loadImage() {
         guard let imageURL = URL(string: url) else { return }
-        imageView.kf.setImage(with: imageURL, options: [.backgroundDecode]) { [weak self] result in
+        imageView.kf.setImage(with: imageURL, options: [.backgroundDecode, .downsampling(CGSize(width: 800, height: 800))]) { [weak self] result in
             guard let self else { return }
             if case .success(let value) = result {
                 self.updateAspectRatio(for: value.image)
