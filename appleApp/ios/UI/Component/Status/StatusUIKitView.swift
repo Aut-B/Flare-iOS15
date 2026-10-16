@@ -1297,7 +1297,11 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                     context.invalidateItems(at: [indexPath])
                     collectionView.collectionViewLayout.invalidateLayout(with: context)
                 }
-                collectionView.performBatchUpdates(nil)
+                // iOS 15 回退：早年这里用 performBatchUpdates(nil) 强制立即重排，但在
+                // 展开/收起动画的 completion 里再次进入 performBatchUpdates 会触发
+                // UICollectionView 重入断言崩溃（崩溃栈：_performBatchUpdates 的
+                // completion 中再进一次）。invalidateLayout(with:) 已足以让瀑布流布局
+                // 重新查询单元高度，移除这个冗余且危险的空批次更新。
                 return
             }
             responder = current.next
