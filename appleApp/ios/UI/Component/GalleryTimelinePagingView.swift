@@ -624,7 +624,13 @@ final class UIGalleryTimelineController: UIViewController, UICollectionViewDeleg
                 CATransaction.commit()
             }
         } else {
-            dataSource.apply(snapshot, animatingDifferences: shouldAnimate)
+            // iOS 15 回退：动画更新 + 内存压力会触发 UICollectionView
+            // performBatchUpdates 重入断言（画廊/长文阅读闪退），iOS 16 以下无动画。
+            if #available(iOS 16.0, *) {
+                dataSource.apply(snapshot, animatingDifferences: shouldAnimate)
+            } else {
+                dataSource.apply(snapshot, animatingDifferences: false)
+            }
         }
         lastAppliedSignature = newSignature
         lastRenderHashMap = newRenderHashMap
@@ -688,7 +694,12 @@ final class UIGalleryTimelineController: UIViewController, UICollectionViewDeleg
             !refreshControl.isRefreshing &&
             !collectionView.isDragging &&
             !collectionView.isDecelerating
-        dataSource.apply(snapshot, animatingDifferences: shouldAnimate)
+        // iOS 15 回退：同上，动画更新在 iPhone 6S 内存压力下会崩，一律无动画。
+        if #available(iOS 16.0, *) {
+            dataSource.apply(snapshot, animatingDifferences: shouldAnimate)
+        } else {
+            dataSource.apply(snapshot, animatingDifferences: false)
+        }
     }
 
     private func footerItemIDs(for success: PagingStateSuccess<UiTimelineV2>) -> [String] {
