@@ -365,7 +365,7 @@ class WKDelegate: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         log("开始加载: \(webView.url?.absoluteString ?? "nil")")
     }
 
-    func webView(_ webView: WKWebView, didFinishNavigation navigation: WKNavigation!) {
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         log("加载完成: \(webView.url?.absoluteString ?? "nil")")
     }
 
