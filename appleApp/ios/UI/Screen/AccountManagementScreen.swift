@@ -72,6 +72,11 @@ struct AccountManagementScreen: View {
         }
         .navigationTitle("account_management_title")
         .toolbar {
+            // iOS 15：SwiftUI List 的拖动排序只在编辑模式下可用，
+            // 没有 EditButton 时 .onMove 永远不会被触发（拖不动）。
+            ToolbarItem(placement: .navigationBarLeading) {
+                EditButton()
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 NBNavigationLink(value: Route.serviceSelect) {
                     Label {
