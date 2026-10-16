@@ -288,7 +288,9 @@ final class StatusTranslateUIView: UIView, TimelineHeightProviding {
                 } else {
                     collectionView.collectionViewLayout.invalidateLayout()
                 }
-                collectionView.performBatchUpdates(nil)
+                // iOS 15 回退：移除冗余的 performBatchUpdates(nil)。动画 completion 里
+                // 再进 performBatchUpdates 会触发 UICollectionView 重入断言崩溃；
+                // invalidateLayout 已让布局重新查询单元高度。
                 return
             }
             responder = current.next
