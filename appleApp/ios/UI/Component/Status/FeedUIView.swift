@@ -389,7 +389,7 @@ final class FeedUIView: UIView, ManualLayoutMeasurable, TimelineHeightProviding 
         var options: KingfisherOptionsInfo = [
             .transition(.fade(0.25)),
             .backgroundDecode,
-            .downsampling(CGSize(width: 800, height: 800)),
+            .processor(DownsamplingImageProcessor(size: CGSize(width: 800, height: 800))),
         ]
         if let customHeaders, !customHeaders.isEmpty {
             options.append(.requestModifier(AnyModifier { request in
