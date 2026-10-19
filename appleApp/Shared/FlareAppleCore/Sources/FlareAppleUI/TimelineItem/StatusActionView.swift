@@ -180,20 +180,19 @@ public struct StatusActionView: View {
                     }
                 } label: {
                     Group {
-                        if isStretched {
-                            StatusActionStretchedLabel(
-                                icon: group.displayItem.icon,
-                                text: showNumbers ? group.displayItem.count.map { Text($0.humanized) } : nil,
-                                fontSize: fontSize
-                            )
-                        } else if let text = group.displayItem.count?.humanized, showNumbers, !text.isEmpty {
-                            Label {
-                                Text(text)
-                                    .lineLimit(1)
-                                    .frame(minWidth: isFixedWidth ? fontSize * 2.5 : nil, alignment: .leading)
-                            } icon: {
-                                StatusActionIcon(icon: group.displayItem.icon)
-                            }
+                            if isStretched {
+                                StatusActionStretchedLabel(
+                                    icon: group.displayItem.icon,
+                                    text: showNumbers ? group.displayItem.count.map { Text($0.humanized) } : nil,
+                                    fontSize: fontSize
+                                )
+                            } else if let text = group.displayItem.count?.humanized, showNumbers, !text.isEmpty {
+                                Label {
+                                    Text(text)
+                                        .lineLimit(1)
+                                } icon: {
+                                    StatusActionIcon(icon: group.displayItem.icon)
+                                }
                         } else {
                             StatusActionIcon(icon: group.displayItem.icon)
                                 .frame(minWidth: StatusActionHitArea.labelContentHeight(fontSize: fontSize))
@@ -339,7 +338,7 @@ public struct StatusActionItemView: View {
                 StatusActionStretchedLabel(icon: data.icon, text: resolvedText, fontSize: fontSize)
             } else if let text = resolvedText {
                 Label {
-                    text.frame(minWidth: isFixedWidth ? fontSize * 2.5 : nil, alignment: .leading)
+                    text
                 } icon: {
                     StatusActionIcon(icon: data.icon)
                 }
