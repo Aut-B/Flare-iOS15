@@ -174,6 +174,13 @@ struct MediaViewerScreen: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea()
+            // 关键修复：让这个全屏覆盖层在 iOS 15 上也可靠地透传触摸。
+            // 上游仅靠 point(inside:) 返回 false，但 iOS 15 的 SwiftUI 宿主视图不尊重该覆写，
+            // 导致整屏触摸被覆盖层截走——横滑翻页 / 捏合缩放 / 点按隐藏底栏全部失效，
+            // 而下滑关闭仍可工作（关闭手势挂在 UIWindow 上、独立收触摸）。
+            // .allowsHitTesting(false) 由 SwiftUI 跨版本可靠地关闭底层宿主视图的命中，
+            // 触摸遂透传给下方 LazyPager；窗口级关闭手势不受影响。
+            .allowsHitTesting(false)
 
             if showData {
                 topOverlay
@@ -411,11 +418,11 @@ struct MediaViewerScreen: View {
                             .foregroundStyle(.secondary)
                     }
                     .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                     .onTapGesture {
                         user.onClicked(ClickContext(launcher: AppleUriLauncher(openUrl: openURL)))
                     }
-                    Spacer(minLength: 4)
                     if postActionStyle != .hidden {
                         StatusActionsView(data: Array(post.actions), useText: false)
                     }
@@ -761,12 +768,6 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
     func makeUIView(context: Context) -> MediaViewerDismissGestureHostView {
         let view = MediaViewerDismissGestureHostView()
         view.backgroundColor = .clear
-        // 关键修复：让这个覆盖全屏的宿主视图彻底不参与命中测试，把触摸透传给
-        // 下方的 LazyPager 内容手势（横滑翻页 / 捏合缩放 / 点按隐藏底栏）。
-        // iOS 15 上 SwiftUI 为 representable 生成的宿主视图不会自动尊重
-        // point(inside:) 返回 false，必须显式关掉 isUserInteractionEnabled，
-        // 否则整屏触摸被它截走，内容手势全部失效（关闭手势挂在 UIWindow 上、不受影响）。
-        view.isUserInteractionEnabled = false
         view.onWindowChanged = { [weak coordinator = context.coordinator, weak view] in
             coordinator?.installGesture(from: view)
         }
@@ -934,7 +935,7 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
     ) -> Bool {
         // 与查看器内部手势（PagerView 翻页、捏合、点按、ZoomableView 纵向 pan）同时识别。
         // 窗口级关闭手势仅通过 shouldBegin（严格竖向）约束自身，不抢占内容手势。
-        // 覆盖视图已彻底透传触摸（isUserInteractionEnabled=false + hitTest:nil），
+        // 覆盖视图已通过 SwiftUI .allowsHitTesting(false) 彻底透传触摸，
         // 因此内容手势可正常接收触摸并工作。
         true
     }
@@ -976,15 +977,13 @@ private final class MediaViewerDismissGestureHostView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        // 关掉 SwiftUI 为 representable 生成的宿主视图的交互，确保整屏触摸透传
-        // 给下方的 LazyPager 内容手势（横滑 / 捏合 / 点按）。
-        superview?.isUserInteractionEnabled = false
         onWindowChanged?()
     }
 
-    // 彻底从命中测试里移除本视图及其子视图，任何触摸都透传给下层内容。
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        nil
+    // iOS 16/17 上 SwiftUI 会尊重此覆写让覆盖层透传触摸；iOS 15 的可靠透传
+    // 由 SwiftUI 侧的 .allowsHitTesting(false) 保证（见 body 中对该宿主的使用）。
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        false
     }
 }
 
