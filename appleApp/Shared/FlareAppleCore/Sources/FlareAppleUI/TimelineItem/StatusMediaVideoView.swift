@@ -54,16 +54,16 @@ public struct VideoControlView: View {
         // 0.5 / 1 / 1.5 / 2 之间循环，解决「无法调倍速」的问题。
         Button {
             let rates: [Float] = [0.5, 1, 1.5, 2]
-            let current = playbackRate.wrappedValue
+            let current = playbackRate
             if let idx = rates.firstIndex(of: current) {
-                playbackRate.wrappedValue = rates[(idx + 1) % rates.count]
+                playbackRate = rates[(idx + 1) % rates.count]
             } else {
-                playbackRate.wrappedValue = 1
+                playbackRate = 1
             }
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "goforward")
-                Text(verbatim: "\(formatRate(playbackRate.wrappedValue))x")
+                Text(verbatim: "\(formatRate(playbackRate))x")
             }
             .font(.caption.weight(.semibold))
             .monospacedDigit()
