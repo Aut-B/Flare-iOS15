@@ -308,7 +308,7 @@ final class StatusActionsUIView: UIView, ManualLayoutMeasurable, TimelineHeightP
             tintColor: item.color?.uiColor ?? .secondaryLabel,
             font: actionFont,
             iconSize: actionIconSize,
-            minimumTextWidth: isFixedWidth && showNumbers && item.count != nil ? fontSize * 2.5 : nil,
+            minimumTextWidth: nil,
             minimumIconOnlySize: nil,
             usesExpandedHitArea: !useText,
             accessibilityLabel: item.text?.resolvedString
@@ -342,7 +342,7 @@ final class StatusActionsUIView: UIView, ManualLayoutMeasurable, TimelineHeightP
             tintColor: group.displayItem.color?.uiColor ?? .secondaryLabel,
             font: actionFont,
             iconSize: actionIconSize,
-            minimumTextWidth: isFixedWidth && showNumbers && group.displayItem.count != nil ? fontSize * 2.5 : nil,
+            minimumTextWidth: nil,
             minimumIconOnlySize: title == nil ? fontSize + 2 : nil,
             usesExpandedHitArea: !useText,
             accessibilityLabel: group.displayItem.text?.resolvedString
