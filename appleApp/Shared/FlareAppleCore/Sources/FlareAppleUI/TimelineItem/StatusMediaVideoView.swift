@@ -13,7 +13,7 @@ public struct VideoControlView: View {
     @Binding private var isPlaying: Bool
     @Binding private var currentTime: CMTime
     private let videoState: VideoState
-    private let playbackRate: Float
+    @Binding private var playbackRate: Float
     @State private var sliderValue: Double = 0
     @State private var isSeeking = false
     @State private var wasPlayingBeforeSeek = false
@@ -30,12 +30,12 @@ public struct VideoControlView: View {
         isPlaying: Binding<Bool>,
         currentTime: Binding<CMTime>,
         videoState: VideoState,
-        playbackRate: Float
+        playbackRate: Binding<Float>
     ) {
         self._isPlaying = isPlaying
         self._currentTime = currentTime
         self.videoState = videoState
-        self.playbackRate = playbackRate
+        self._playbackRate = playbackRate
     }
 
     public var body: some View {
@@ -49,19 +49,31 @@ public struct VideoControlView: View {
     @ViewBuilder
     private var controlContent: some View {
         VStack(spacing: 8) {
-            if playbackRate > 1 {
-                HStack(spacing: 6) {
-                    Image(systemName: "forward.fill")
-                    Text(verbatim: "\(formatRate(playbackRate))x")
-                }
-                .font(.caption.weight(.semibold))
-                .monospacedDigit()
-                .foregroundStyle(.white)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(.black.opacity(0.65), in: .capsule)
-                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+        // iOS 15 回退：新增「点按切倍速」——从首页点开的视频在查看器里看不到
+        // 调节入口（此前仅在 >1x 才显示且不可点）。改为始终显示、点按在
+        // 0.5 / 1 / 1.5 / 2 之间循环，解决「无法调倍速」的问题。
+        Button {
+            let rates: [Float] = [0.5, 1, 1.5, 2]
+            let current = playbackRate.wrappedValue
+            if let idx = rates.firstIndex(of: current) {
+                playbackRate.wrappedValue = rates[(idx + 1) % rates.count]
+            } else {
+                playbackRate.wrappedValue = 1
             }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "goforward")
+                Text(verbatim: "\(formatRate(playbackRate.wrappedValue))x")
+            }
+            .font(.caption.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.black.opacity(0.65), in: .capsule)
+        }
+        .buttonStyle(.plain)
+        .transition(.opacity.combined(with: .scale(scale: 0.96)))
 
             HStack {
                 Button {
