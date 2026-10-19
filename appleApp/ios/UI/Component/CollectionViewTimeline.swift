@@ -301,7 +301,6 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
     }
 
     private var collectionView: TimelineCollectionView!
-    private var scrollToTopObserver: NSObjectProtocol?
     private var dataSource: UICollectionViewDiffableDataSource<Int, String>!
     private var refreshControl = UIRefreshControl()
     private var isUserRefreshing = false
@@ -400,13 +399,16 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
         updateBackgroundColors()
         updateProfileMediaColumnCount()
         applyCurrentSnapshot()
-        scrollToTopObserver = NotificationCenter.default.addObserver(
-            forName: .tabDoubleTapped,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.scrollToTop(animated: true)
-        }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleTabDoubleTapped),
+            name: .tabDoubleTapped,
+            object: nil
+        )
+    }
+
+    @objc private func handleTabDoubleTapped() {
+        scrollToTop(animated: true)
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -474,9 +476,6 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
     }
 
     deinit {
-        if let scrollToTopObserver {
-            NotificationCenter.default.removeObserver(scrollToTopObserver)
-        }
         postRefreshPoolCleanupTask?.cancel()
         deferredPoolCleanupTask?.cancel()
     }
