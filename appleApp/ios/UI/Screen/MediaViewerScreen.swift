@@ -359,7 +359,7 @@ struct MediaViewerScreen: View {
                     isPlaying: $isPlaying,
                     currentTime: timeBinding(for: selectedMedia.url),
                     videoState: videoState,
-                    playbackRate: playbackRate
+                    playbackRate: $playbackRate
                 )
                 .id(selectedMedia.url)
             }
@@ -395,7 +395,7 @@ struct MediaViewerScreen: View {
                     isPlaying: $isPlaying,
                     currentTime: timeBinding(for: selectedMedia.url),
                     videoState: videoState,
-                    playbackRate: playbackRate
+                    playbackRate: $playbackRate
                 )
                 .id(selectedMedia.url)
             }
