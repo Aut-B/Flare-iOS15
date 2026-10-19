@@ -231,7 +231,10 @@ private struct TabBarDoubleTapModifier: ViewModifier {
     let action: () -> Void
 
     func body(content: Content) -> some View {
-        content.introspect(.tabView, on: .iOS(.v17)) { tabBarController in
+        // iOS 15 回退：原本只 introspect iOS 17，导致 6S(iOS15.8.8) 上
+        // 双击 tab 手势永不安装 → 首页 tab 双击刷新/回顶全部失效。
+        // 放宽到 iOS 15~18（SwiftUIIntrospect 在这些版本都能拿到 UITabBarController）。
+        content.introspect(.tabView, on: .iOS(.v15, .v16, .v17, .v18)) { tabBarController in
             target.install(on: tabBarController.tabBar, action: action)
         }
     }
