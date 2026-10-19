@@ -728,7 +728,17 @@ final class RichTextUIView: UIView, TimelineHeightProviding {
         for urlString in renderedInlineImageURLs where inlineImages[urlString] == nil && !loadingInlineImageURLs.contains(urlString) {
             guard let url = URL(string: urlString) else { continue }
             loadingInlineImageURLs.insert(urlString)
-            KingfisherManager.shared.retrieveImage(with: url) { [weak self] result in
+            // iOS 15 / 6S 回退：内联表情(stelpolva 等)原图常较大，A9 主线程全尺寸解码
+            // 是首页/毛象时间线卡顿与表情加载慢的主源之一。降采样到 ~64px 再缓存，
+            // 绘制时只缩到字号高度，解码与内存压力大幅下降，首屏表情加载明显变快。
+            let inlineEmojiDownsampleSize = CGSize(width: 64, height: 64)
+            KingfisherManager.shared.retrieveImage(
+                with: url,
+                options: [
+                    .backgroundDecode,
+                    .processor(DownsamplingImageProcessor(size: inlineEmojiDownsampleSize)),
+                ]
+            ) { [weak self] result in
                 Task { @MainActor [weak self] in
                     guard let self, self.renderGeneration == generation else { return }
                     self.loadingInlineImageURLs.remove(urlString)
