@@ -824,6 +824,11 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
             let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
             recognizer.maximumNumberOfTouches = 1
             recognizer.cancelsTouchesInView = false
+            // iOS 15 回退：默认 delaysTouchesEnded=true 会让窗口级手势在判定期间
+            // 扣留"抬起"事件，导致下方 PagerView/ZoomableView 的捏合与点按识别器
+            // 收不到完整触摸序列而失效。显式关掉，让缩放与点按正常触发。
+            recognizer.delaysTouchesBegan = false
+            recognizer.delaysTouchesEnded = false
             recognizer.delegate = self
             window.addGestureRecognizer(recognizer)
 
@@ -917,17 +922,28 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
             return true
         }
 
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
-        ) -> Bool {
-            guard gestureRecognizer === panRecognizer else { return false }
-            let velocityY = panRecognizer?.velocity(in: sourceView).y ?? 0
-            return MediaViewerDismissGesturePolicy.shouldTakePriority(
-                over: otherGestureRecognizer,
-                velocityY: velocityY
-            )
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        guard gestureRecognizer === panRecognizer else { return false }
+        // iOS 15 回退：原本对所有滚动视图的平移都返回 true（要求对方先失败），
+        // 会让横向分页的 PagerView 在"等待窗口手势失败"期间无法开始平移、卡死翻页。
+        // 仅对横向 PagerView（contentSize 明显比高大）放行，竖向关闭的协调仍保留：
+        // 其余情况沿用原来的 shouldTakePriority 逻辑，不影响下拉关闭。
+        guard let scrollView = otherGestureRecognizer.view as? UIScrollView,
+              otherGestureRecognizer === scrollView.panGestureRecognizer else {
+            return false
         }
+        if scrollView.contentSize.width > scrollView.contentSize.height * 1.5 {
+            return false
+        }
+        let velocityY = panRecognizer?.velocity(in: sourceView).y ?? 0
+        return MediaViewerDismissGesturePolicy.shouldTakePriority(
+            over: otherGestureRecognizer,
+            velocityY: velocityY
+        )
+    }
 
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
