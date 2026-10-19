@@ -301,6 +301,7 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
     }
 
     private var collectionView: TimelineCollectionView!
+    private var scrollToTopObserver: NSObjectProtocol?
     private var dataSource: UICollectionViewDiffableDataSource<Int, String>!
     private var refreshControl = UIRefreshControl()
     private var isUserRefreshing = false
@@ -399,6 +400,13 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
         updateBackgroundColors()
         updateProfileMediaColumnCount()
         applyCurrentSnapshot()
+        scrollToTopObserver = NotificationCenter.default.addObserver(
+            forName: .tabDoubleTapped,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.scrollToTop(animated: true)
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -466,6 +474,9 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
     }
 
     deinit {
+        if let scrollToTopObserver {
+            NotificationCenter.default.removeObserver(scrollToTopObserver)
+        }
         postRefreshPoolCleanupTask?.cancel()
         deferredPoolCleanupTask?.cancel()
     }
@@ -796,6 +807,19 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
             }
         }
         updateMinimumScrollableBottomInset()
+    }
+
+    // iOS 15 回退：底部 tab 双击手势（.tabDoubleTapped，见 FlareRoot）在 iOS 15 上
+    // 原本因 introspect 仅限 iOS17 而失效；放宽版本后手势恢复。这里让时间线在收到
+    // 该通知时滚回顶部（仅在当前可见的时间线上执行，避免误滚后台 tab）。
+    private func scrollToTop(animated: Bool) {
+        guard let collectionView, view.window != nil else { return }
+        collectionView.beginProgrammaticScrolling()
+        let topOffset = -collectionView.restingAdjustedTopInset
+        collectionView.setContentOffset(
+            CGPoint(x: collectionView.contentOffset.x, y: topOffset),
+            animated: animated
+        )
     }
 
     private func updateMinimumScrollableBottomInset() {
