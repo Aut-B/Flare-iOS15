@@ -761,6 +761,12 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
     func makeUIView(context: Context) -> MediaViewerDismissGestureHostView {
         let view = MediaViewerDismissGestureHostView()
         view.backgroundColor = .clear
+        // 关键修复：让这个覆盖全屏的宿主视图彻底不参与命中测试，把触摸透传给
+        // 下方的 LazyPager 内容手势（横滑翻页 / 捏合缩放 / 点按隐藏底栏）。
+        // iOS 15 上 SwiftUI 为 representable 生成的宿主视图不会自动尊重
+        // point(inside:) 返回 false，必须显式关掉 isUserInteractionEnabled，
+        // 否则整屏触摸被它截走，内容手势全部失效（关闭手势挂在 UIWindow 上、不受影响）。
+        view.isUserInteractionEnabled = false
         view.onWindowChanged = { [weak coordinator = context.coordinator, weak view] in
             coordinator?.installGesture(from: view)
         }
@@ -924,33 +930,14 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
 
     func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
-        shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        guard gestureRecognizer === panRecognizer else { return false }
-        // iOS 15 回退：原本对所有滚动视图的平移都返回 true（要求对方先失败），
-        // 会让横向分页的 PagerView 在"等待窗口手势失败"期间无法开始平移、卡死翻页。
-        // 仅对横向 PagerView（contentSize 明显比高大）放行，竖向关闭的协调仍保留：
-        // 其余情况沿用原来的 shouldTakePriority 逻辑，不影响下拉关闭。
-        guard let scrollView = otherGestureRecognizer.view as? UIScrollView,
-              otherGestureRecognizer === scrollView.panGestureRecognizer else {
-            return false
-        }
-        if scrollView.contentSize.width > scrollView.contentSize.height * 1.5 {
-            return false
-        }
-        let velocityY = panRecognizer?.velocity(in: sourceView).y ?? 0
-        return MediaViewerDismissGesturePolicy.shouldTakePriority(
-            over: otherGestureRecognizer,
-            velocityY: velocityY
-        )
+        // 与查看器内部手势（PagerView 翻页、捏合、点按、ZoomableView 纵向 pan）同时识别。
+        // 窗口级关闭手势仅通过 shouldBegin（严格竖向）约束自身，不抢占内容手势。
+        // 覆盖视图已彻底透传触摸（isUserInteractionEnabled=false + hitTest:nil），
+        // 因此内容手势可正常接收触摸并工作。
+        true
     }
-
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
-        ) -> Bool {
-            true
-        }
 
         private func ancestorScrollViews(from view: UIView?) -> [UIScrollView] {
             var scrollViews: [UIScrollView] = []
@@ -989,11 +976,15 @@ private final class MediaViewerDismissGestureHostView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        // 关掉 SwiftUI 为 representable 生成的宿主视图的交互，确保整屏触摸透传
+        // 给下方的 LazyPager 内容手势（横滑 / 捏合 / 点按）。
+        superview?.isUserInteractionEnabled = false
         onWindowChanged?()
     }
 
-    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        false
+    // 彻底从命中测试里移除本视图及其子视图，任何触摸都透传给下层内容。
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        nil
     }
 }
 
