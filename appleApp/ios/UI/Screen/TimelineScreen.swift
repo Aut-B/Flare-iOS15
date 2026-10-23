@@ -4,6 +4,7 @@ import UIKit
 @preconcurrency import KotlinSharedUI
 import FlareAppleCore
 import FlareAppleUI
+import SwiftUIBackports
 
 struct TimelineScreen: View {
     let tabItem: UiTimelineTabItem
@@ -13,7 +14,9 @@ struct TimelineScreen: View {
     @Environment(\.timelineAppearance) private var timelineAppearance
     @Environment(\.appSettings) private var appSettings
     @Environment(\.scenePhase) private var scenePhase
+    // iOS 15 回退：@Observable 不可用，presenter 以 @StateObject 持有（part 6 修复）。
     @StateObject var presenter: KotlinPresenter<TimelineItemPresenterState>
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isAtTop = true
     @State private var isTabRefreshInFlight = false
     init(
@@ -45,6 +48,32 @@ struct TimelineScreen: View {
             onIsAtTopChanged: { isAtTop = $0 }
         )
             .environment(\.timelineAppearance, tabItem.resolveTimelineAppearance(base: timelineAppearance))
+        .environment(\.timelineReading, presenter.state.reading)
+        .overlay(alignment: .top) {
+            VStack(spacing: 0) {
+                if presenter.state.reading?.hasNewContent == true {
+                    Button {
+                        presenter.state.reading?.showLatest()
+                    } label: {
+                        Label("home_timeline_view_latest", systemImage: "chevron.up.2")
+                            .font(.subheadline)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.plain)
+                    .backport
+                    .background(.regularMaterial, in: .capsule) // iOS 15 回退：glassEffect 是 iOS 26+ API，改用 iOS 15 可用的 Material 胶囊背景
+                    .accessibilityIdentifier("home-new-content")
+                    .transition(reduceMotion ? .opacity : .move(edge: .top))
+                }
+            }
+            .animation(
+                reduceMotion ? .easeInOut(duration: 0.15) : .spring(response: 0.3, dampingFraction: 1),
+                value: presenter.state.reading?.hasNewContent == true
+            )
+            .clipped()
+            .padding(.top, 8)
+        }
             .refreshable {
                 try? await presenter.state.refreshSuspend()
             }
