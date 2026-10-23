@@ -4,7 +4,6 @@ import UIKit
 @preconcurrency import KotlinSharedUI
 import FlareAppleCore
 import FlareAppleUI
-import SwiftUIBackports
 
 struct TimelineScreen: View {
     let tabItem: UiTimelineTabItem
