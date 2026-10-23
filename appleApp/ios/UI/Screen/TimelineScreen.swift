@@ -60,8 +60,7 @@ struct TimelineScreen: View {
                             .padding(.vertical, 8)
                     }
                     .buttonStyle(.plain)
-                    .backport
-                    .background(.regularMaterial, in: .capsule) // iOS 15 回退：glassEffect 是 iOS 26+ API，改用 iOS 15 可用的 Material 胶囊背景
+                    .background(Material.regularMaterial, in: Capsule()) // iOS 15 回退：glassEffect 是 iOS 26+ API，改用 iOS 15 可用的 Material 胶囊背景
                     .accessibilityIdentifier("home-new-content")
                     .transition(reduceMotion ? .opacity : .move(edge: .top))
                 }

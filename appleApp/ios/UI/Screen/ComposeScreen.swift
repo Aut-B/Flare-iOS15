@@ -49,7 +49,7 @@ struct ComposeScreen: View {
     // MediaViewModel 均以 ObservableObject/@Perceptible + @StateObject 持有（part 6 修复）。
     @StateObject private var presenter: KotlinPresenter<ComposeState>
     @StateObject private var viewModel = ComposeContentViewModel()
-    @StateObject private var mediaViewModel = MediaViewModel()
+    @State private var mediaViewModel = MediaViewModel()
     @State private var imageInput = ComposeImageInput()
     @State private var uiTextView: UITextView?
     @State private var pendingCursor: Int?
@@ -69,218 +69,220 @@ struct ComposeScreen: View {
     ]
 
     var body: some View {
+        WithPerceptionTracking {
 
-        VStack(
-            spacing: 8
-        ) {
-            accountSelectionView
-            ScrollView {
                 VStack(
                     spacing: 8
                 ) {
-                    if viewModel.enableContentWarning {
-                        TextField(text: $viewModel.contentWarning) {
-                            Text("compose_cw_placeholder")
-                        }
-                        .textFieldStyle(.plain)
-                        .textInputAutocapitalization(.sentences)
-                        .keyboardType(.twitter)
-                        .focused($cwKeyboardFocused)
-                        Divider()
-                    }
-                    
-                    TextEditor(text: $viewModel.text)
-                        .font(.body)
-                        .textInputAutocapitalization(.sentences)
-                        .keyboardType(.twitter)
-                        .introspect(.textEditor, on: .iOS(.v16, .v17)) { textView in
-                            self.uiTextView = textView
-                            imageInput.receiveImage = { [weak mediaViewModel] in mediaViewModel?.importImage($0) }
-                            imageInput.install(on: textView)
-                            applyCursorIfPossible()
-                        }
-                        .frame(minHeight: 120)
-                        .focused($keyboardFocused)
-                        .overlay(alignment: .topLeading) {
-                            if viewModel.text.isEmpty {
-                                Text("compose_placeholder")
-                                    .foregroundStyle(.tertiary)
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 8)
-                                    .allowsHitTesting(false)
+                    accountSelectionView
+                    ScrollView {
+                        VStack(
+                            spacing: 8
+                        ) {
+                            if viewModel.enableContentWarning {
+                                TextField(text: $viewModel.contentWarning) {
+                                    Text("compose_cw_placeholder")
+                                }
+                                .textFieldStyle(.plain)
+                                .textInputAutocapitalization(.sentences)
+                                .keyboardType(.twitter)
+                                .focused($cwKeyboardFocused)
+                                Divider()
                             }
-                        }
-                        .onAppear {
-                            requestDefaultFocus()
-                        }
-                    Spacer()
-                    if mediaViewModel.items.count > 0 {
-                        ScrollView(.horizontal) {
-                            HStack {
-                                ForEach(mediaViewModel.items) { item in
-                                    ComposeMediaItemView(item: item, mediaViewModel: mediaViewModel)
+                    
+                            TextEditor(text: $viewModel.text)
+                                .font(.body)
+                                .textInputAutocapitalization(.sentences)
+                                .keyboardType(.twitter)
+                                .introspect(.textEditor, on: .iOS(.v16, .v17)) { textView in
+                                    self.uiTextView = textView
+                                    imageInput.receiveImage = { [weak mediaViewModel] in mediaViewModel?.importImage($0) }
+                                    imageInput.install(on: textView)
+                                    applyCursorIfPossible()
+                                }
+                                .frame(minHeight: 120)
+                                .focused($keyboardFocused)
+                                .overlay(alignment: .topLeading) {
+                                    if viewModel.text.isEmpty {
+                                        Text("compose_placeholder")
+                                            .foregroundStyle(.tertiary)
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 8)
+                                            .allowsHitTesting(false)
+                                    }
+                                }
+                                .onAppear {
+                                    requestDefaultFocus()
+                                }
+                            Spacer()
+                            if mediaViewModel.items.count > 0 {
+                                ScrollView(.horizontal) {
+                                    HStack {
+                                        ForEach(mediaViewModel.items) { item in
+                                            ComposeMediaItemView(item: item, mediaViewModel: mediaViewModel)
+                                        }
+                                    }
+                                }
+                                .onDrop(of: [.image, .text], isTargeted: nil) { providers in
+                                    mediaViewModel.importDrop(providers, insert: insertDroppedText)
+                                    return true
+                                }
+                                StateView(state: presenter.state.composeConfig) { config in
+                                    if let media = config.media, media.canSensitive {
+                                        Toggle(isOn: $mediaViewModel.sensitive, label: {
+                                            Text("compose_media_mark_sensitive")
+                                        })
+                                    }
                                 }
                             }
+                            if viewModel.pollViewModel.enabled {
+                                ComposePollSection(
+                                    viewModel: viewModel.pollViewModel,
+                                    maxChoices: maxPollOptions
+                                )
+                            }
+                            if let replyState = presenter.state.replyState,
+                               case .success(let reply) = onEnum(of: replyState),
+                               let content = reply.data.timelineContentPost {
+                                ComposeReferenceStatusPreview(data: content)
+                            }
                         }
-                        .onDrop(of: [.image, .text], isTargeted: nil) { providers in
-                            mediaViewModel.importDrop(providers, insert: insertDroppedText)
-                            return true
+                        .padding(.horizontal)
+                    }
+                    .safeAreaInset(edge: .bottom) {
+                        composeActionBar
+                            .padding()
+                            .padding()
+                    }
+            
+                }
+                .onAppear {
+                    let currentPresenter = presenter
+                    let content = viewModel
+                    mediaViewModel.imagesAllowed = { currentPresenter.state.mediaEnabled && !content.pollViewModel.enabled }
+                    mediaViewModel.onError = { error in
+                        SwiftInAppNotification.shared.onError(message: .compose, throwable: KotlinThrowable(message: error.localizedDescription))
+                    }
+                    imageInput.receiveImage = { [weak mediaViewModel] in mediaViewModel?.importImage($0) }
+                    if let uiTextView { imageInput.install(on: uiTextView) }
+                    applyPrefillIfNeeded()
+                }
+                .onDisappear {
+                    mediaViewModel.cancelImports()
+                    mediaViewModel.imagesAllowed = { false }
+                    imageInput.receiveImage = nil
+                    uiTextView?.pasteDelegate = nil
+                }
+                // iOS 15 回退：双参数 onChange 是 iOS 17+，用 backportOnChange。
+                .backportOnChange(of: presenter.state.initialTextState) { _, newValue in
+                    guard !initialTextApplied else { return }
+                    if case .success(let initialText) = onEnum(of: newValue) {
+                        initialTextApplied = true
+                        let prefill = initialText.data.text
+                        viewModel.text = prefill
+                        pendingCursor = Int(initialText.data.cursorPosition)
+                        requestComposerFocus()
+                        applyCursorIfPossible()
+                    }
+                }
+                .onSuccessOf(of: presenter.state.composeConfig) { config in
+                    mediaViewModel.maxSize = Int(config.media?.maxCount ?? 0)
+                    if let media = config.media {
+                        mediaViewModel.enableAltText = media.altTextMaxLength > 0
+                        mediaViewModel.altTextMaxLength = Int(media.altTextMaxLength)
+                    }
+                }
+                .backportOnChange(of: presenter.state.loadedDraftState) { _, newValue in
+                    guard let newValue, case .success(let loadedDraft) = onEnum(of: newValue) else { return }
+                    applyDraft(loadedDraft.data)
+                    presenter.state.consumeLoadedDraft()
+                }
+                .backportOnChange(of: viewModel.enableContentWarning ? viewModel.contentWarning : nil, initial: true) { _, newValue in
+                    presenter.state.setSpoilerText(value: newValue)
+                }
+                .backportOnChange(of: viewModel.text) { oldValue, newValue in
+                    presenter.state.setText(value: newValue)
+                }
+                .backportOnChange(of: keyboardFocused) { _, isFocused in
+                    if isFocused {
+                        applyCursorIfPossible()
+                    }
+                }
+                .backportOnChange(of: mediaViewModel.items.count) { _, newValue in
+                    presenter.state.setMediaSize(value: Int32(newValue))
+                }
+                .sheet(isPresented: $showDraftSheet) {
+                    draftSheet
+                }
+                // toolbarTitleDisplayMode 是 iOS 17；iOS 15 用等价的 navigationBarTitleDisplayMode
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        switch onEnum(of: presenter.state.composeStatus) {
+                        case .none:
+                            Text("compose_title_new")
+                        case .quote:
+                            Text("compose_title_quote")
+                        case .reply:
+                            Text("compose_title_reply")
                         }
-                        StateView(state: presenter.state.composeConfig) { config in
-                            if let media = config.media, media.canSensitive {
-                                Toggle(isOn: $mediaViewModel.sensitive, label: {
-                                    Text("compose_media_mark_sensitive")
-                                })
+                    }
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button {
+                            if hasDraftContent {
+                                showDraftConfirmation = true
+                            } else {
+                                dismiss()
+                            }
+                        } label: {
+                            Label {
+                                Text("Cancel")
+                            } icon: {
+                                Image(systemName: "xmark")
+                            }
+                        }
+                        .confirmationDialog("Draft", isPresented: $showDraftConfirmation, titleVisibility: .visible) {
+                            if #available(iOS 26.0, *) {
+                                Button("Save Draft", role: .confirm) {
+                                    saveDraft(shouldDismiss: true)
+                                }
+                            } else {
+                                Button("Save Draft") {
+                                    saveDraft(shouldDismiss: true)
+                                }
+                            }
+                            Button("Cancel", role: .cancel) {
+                                dismiss()
+                            }
+                        } message: {
+                            Text("Save your current content as a draft before leaving?")
+                        }
+                    }
+                    // iOS 15 的 ToolbarContentBuilder 没有 buildIf，条件要放进 ToolbarItem 内部
+                    ToolbarItem(placement: .primaryAction) {
+                        if presenter.state.showDraft {
+                            Button {
+                                showDraftSheet = true
+                            } label: {
+                                Text("Drafts")
                             }
                         }
                     }
-                    if viewModel.pollViewModel.enabled {
-                        ComposePollSection(
-                            viewModel: viewModel.pollViewModel,
-                            maxChoices: maxPollOptions
-                        )
-                    }
-                    if let replyState = presenter.state.replyState,
-                       case .success(let reply) = onEnum(of: replyState),
-                       let content = reply.data.timelineContentPost {
-                        ComposeReferenceStatusPreview(data: content)
-                    }
-                }
-                .padding(.horizontal)
-            }
-            .safeAreaInset(edge: .bottom) {
-                composeActionBar
-                    .padding()
-                    .padding()
-            }
-            
-        }
-        .onAppear {
-            let currentPresenter = presenter
-            let content = viewModel
-            mediaViewModel.imagesAllowed = { currentPresenter.state.mediaEnabled && !content.pollViewModel.enabled }
-            mediaViewModel.onError = { error in
-                SwiftInAppNotification.shared.onError(message: .compose, throwable: KotlinThrowable(message: error.localizedDescription))
-            }
-            imageInput.receiveImage = { [weak mediaViewModel] in mediaViewModel?.importImage($0) }
-            if let uiTextView { imageInput.install(on: uiTextView) }
-            applyPrefillIfNeeded()
-        }
-        .onDisappear {
-            mediaViewModel.cancelImports()
-            mediaViewModel.imagesAllowed = { false }
-            imageInput.receiveImage = nil
-            uiTextView?.pasteDelegate = nil
-        }
-        // iOS 15 回退：双参数 onChange 是 iOS 17+，用 backportOnChange。
-        .backportOnChange(of: presenter.state.initialTextState) { _, newValue in
-            guard !initialTextApplied else { return }
-            if case .success(let initialText) = onEnum(of: newValue) {
-                initialTextApplied = true
-                let prefill = initialText.data.text
-                viewModel.text = prefill
-                pendingCursor = Int(initialText.data.cursorPosition)
-                requestComposerFocus()
-                applyCursorIfPossible()
-            }
-        }
-        .onSuccessOf(of: presenter.state.composeConfig) { config in
-            mediaViewModel.maxSize = Int(config.media?.maxCount ?? 0)
-            if let media = config.media {
-                mediaViewModel.enableAltText = media.altTextMaxLength > 0
-                mediaViewModel.altTextMaxLength = Int(media.altTextMaxLength)
-            }
-        }
-        .backportOnChange(of: presenter.state.loadedDraftState) { _, newValue in
-            guard let newValue, case .success(let loadedDraft) = onEnum(of: newValue) else { return }
-            applyDraft(loadedDraft.data)
-            presenter.state.consumeLoadedDraft()
-        }
-        .backportOnChange(of: viewModel.enableContentWarning ? viewModel.contentWarning : nil, initial: true) { _, newValue in
-            presenter.state.setSpoilerText(value: newValue)
-        }
-        .backportOnChange(of: viewModel.text) { oldValue, newValue in
-            presenter.state.setText(value: newValue)
-        }
-        .backportOnChange(of: keyboardFocused) { _, isFocused in
-            if isFocused {
-                applyCursorIfPossible()
-            }
-        }
-        .backportOnChange(of: mediaViewModel.items.count) { _, newValue in
-            presenter.state.setMediaSize(value: Int32(newValue))
-        }
-        .sheet(isPresented: $showDraftSheet) {
-            draftSheet
-        }
-        // toolbarTitleDisplayMode 是 iOS 17；iOS 15 用等价的 navigationBarTitleDisplayMode
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                switch onEnum(of: presenter.state.composeStatus) {
-                case .none:
-                    Text("compose_title_new")
-                case .quote:
-                    Text("compose_title_quote")
-                case .reply:
-                    Text("compose_title_reply")
-                }
-            }
-            ToolbarItem(placement: .cancellationAction) {
-                Button {
-                    if hasDraftContent {
-                        showDraftConfirmation = true
-                    } else {
-                        dismiss()
-                    }
-                } label: {
-                    Label {
-                        Text("Cancel")
-                    } icon: {
-                        Image(systemName: "xmark")
-                    }
-                }
-                .confirmationDialog("Draft", isPresented: $showDraftConfirmation, titleVisibility: .visible) {
-                    if #available(iOS 26.0, *) {
-                        Button("Save Draft", role: .confirm) {
-                            saveDraft(shouldDismiss: true)
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button {
+                            send()
+                        } label: {
+                            Label {
+                                Text("agent_chat_send")
+                            } icon: {
+                                Image(systemName: "paperplane.fill")
+                            }
                         }
-                    } else {
-                        Button("Save Draft") {
-                            saveDraft(shouldDismiss: true)
-                        }
-                    }
-                    Button("Cancel", role: .cancel) {
-                        dismiss()
-                    }
-                } message: {
-                    Text("Save your current content as a draft before leaving?")
-                }
-            }
-            // iOS 15 的 ToolbarContentBuilder 没有 buildIf，条件要放进 ToolbarItem 内部
-            ToolbarItem(placement: .primaryAction) {
-                if presenter.state.showDraft {
-                    Button {
-                        showDraftSheet = true
-                    } label: {
-                        Text("Drafts")
+                        .disabled(!presenter.state.canSend || mediaViewModel.items.contains { !$0.isReady })
                     }
                 }
-            }
-            ToolbarItem(placement: .confirmationAction) {
-                Button {
-                    send()
-                } label: {
-                    Label {
-                        Text("agent_chat_send")
-                    } icon: {
-                        Image(systemName: "paperplane.fill")
-                    }
-                }
-                .disabled(!presenter.state.canSend || mediaViewModel.items.contains { !$0.isReady })
-            }
-        }
     
+        }
     }
 
     private var composeActionBar: some View {
@@ -741,76 +743,78 @@ private extension Array where Element == UiProfile {
 }
 
 struct ComposeMediaItemView: View {
-    @ObservedObject var item: MediaItem
-    @ObservedObject var mediaViewModel: MediaViewModel
+    var item: MediaItem
+    var mediaViewModel: MediaViewModel
     @State private var showAltTextEditor = false
 
     var body: some View {
+        WithPerceptionTracking {
 
-        Group {
-            if let image = item.image {
-                Image(uiImage: image).resizable().scaledToFill()
-            } else if let error = item.loadError {
-                VStack {
-                    Image(systemName: "exclamationmark.triangle")
-                    Text(verbatim: error).font(.caption).lineLimit(3)
+                Group {
+                    if let image = item.image {
+                        Image(uiImage: image).resizable().scaledToFill()
+                    } else if let error = item.loadError {
+                        VStack {
+                            Image(systemName: "exclamationmark.triangle")
+                            Text(verbatim: error).font(.caption).lineLimit(3)
+                        }
+                    } else if item.isReady {
+                        Image(systemName: item.type == .video ? "video.fill" : "photo").font(.largeTitle)
+                    } else {
+                        ProgressView()
+                    }
                 }
-            } else if item.isReady {
-                Image(systemName: item.type == .video ? "video.fill" : "photo").font(.largeTitle)
-            } else {
-                ProgressView()
-            }
-        }
-        .frame(width: 128, height: 128)
-        .cornerRadius(8)
-        .overlay(alignment: .bottomLeading) {
-            if mediaViewModel.enableAltText && !item.altText.isEmpty {
-                Text("ALT")
-                    .font(.caption2)
-                    .bold()
-                    .foregroundStyle(.black)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-                    .background(.white.opacity(0.8))
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .padding(4)
-            }
-        }
-        .onTapGesture {
-            if mediaViewModel.enableAltText {
-                showAltTextEditor = true
-            }
-        }
-        .contextMenu {
-            Button(action: {
-                withAnimation {
-                    mediaViewModel.remove(item: item)
+                .frame(width: 128, height: 128)
+                .cornerRadius(8)
+                .overlay(alignment: .bottomLeading) {
+                    if mediaViewModel.enableAltText && !item.altText.isEmpty {
+                        Text("ALT")
+                            .font(.caption2)
+                            .bold()
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(.white.opacity(0.8))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .padding(4)
+                    }
                 }
-            }, label: {
-                Label {
-                    Text("delete")
-                } icon: {
-                    Image(fontAwesome: .trash)
+                .onTapGesture {
+                    if mediaViewModel.enableAltText {
+                        showAltTextEditor = true
+                    }
                 }
-            })
+                .contextMenu {
+                    Button(action: {
+                        withAnimation {
+                            mediaViewModel.remove(item: item)
+                        }
+                    }, label: {
+                        Label {
+                            Text("delete")
+                        } icon: {
+                            Image(fontAwesome: .trash)
+                        }
+                    })
 
-            if mediaViewModel.enableAltText {
-                Button {
-                    showAltTextEditor = true
-                } label: {
-                    Label("Edit Description", systemImage: "pencil")
+                    if mediaViewModel.enableAltText {
+                        Button {
+                            showAltTextEditor = true
+                        } label: {
+                            Label("Edit Description", systemImage: "pencil")
+                        }
+                    }
                 }
-            }
-        }
-        .sheet(isPresented: $showAltTextEditor) {
-            AltTextEditSheet(item: item, maxLength: mediaViewModel.altTextMaxLength)
-        }
-        .accessibilityLabel(Text(verbatim: mediaDescription))
+                .sheet(isPresented: $showAltTextEditor) {
+                    AltTextEditSheet(item: item, maxLength: mediaViewModel.altTextMaxLength)
+                }
+                .accessibilityLabel(Text(verbatim: mediaDescription))
     
+        }
     }
 
     private var mediaDescription: String {
-        let trimmedAltText = item.altText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedAltText = item.altText.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
         if !trimmedAltText.isEmpty {
             return trimmedAltText
         }
