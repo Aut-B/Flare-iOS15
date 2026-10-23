@@ -9,7 +9,9 @@ import NavigationBackport
 struct Router<Root: View>: View {
     @Environment(\.openURL) private var openURL
     @ViewBuilder let root: (@escaping (Route) -> Void) -> Root
-    @State private var navigation = RouterNavigationState<Route>()
+    // iOS 15 回退：navigation 是 ObservableObject，需用 @StateObject 订阅其刷新
+    // （@State 持有类对象不会订阅 objectWillChange）。
+    @StateObject private var navigation = RouterNavigationState()
     @State private var alertRoute: Route? = nil
     @StateObject private var deepLinkPresenter: KotlinPresenter<DeepLinkPresenterState>
     @State private var deepLinkHandler: DeepLinkHandler

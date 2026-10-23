@@ -1,10 +1,12 @@
 import XCTest
 
+// iOS 15 回退：RouterNavigationState 由「泛型 + @Perceptible」改为具体 Route 的
+// ObservableObject 后，原先用 String 占位路由的断言改用无载荷的叶子路由替代。
 @MainActor
 final class RouterNavigationStateTests: XCTestCase {
     func testReloginSuccessAtRootDismissesSheetWithoutPoppingEmptyStack() {
-        let navigation = RouterNavigationState<String>()
-        navigation.sheet = "relogin"
+        let navigation = RouterNavigationState()
+        navigation.sheet = .serviceSelect
 
         navigation.dismissSheet()
 
@@ -13,31 +15,31 @@ final class RouterNavigationStateTests: XCTestCase {
     }
 
     func testReloginSuccessPreservesParentNavigationAndCanBeRepeated() {
-        let navigation = RouterNavigationState<String>()
-        navigation.backStack = ["settings", "accounts"]
-        navigation.sheet = "relogin"
+        let navigation = RouterNavigationState()
+        navigation.backStack = [.settings, .accountManagement]
+        navigation.sheet = .serviceSelect
 
         navigation.dismissSheet()
         navigation.dismissSheet()
 
         XCTAssertNil(navigation.sheet)
-        XCTAssertEqual(navigation.backStack, ["settings", "accounts"])
+        XCTAssertEqual(navigation.backStack, [.settings, .accountManagement])
     }
 
     func testDismissingSheetPreservesCover() {
-        let navigation = RouterNavigationState<String>()
-        navigation.sheet = "relogin"
-        navigation.cover = "media"
+        let navigation = RouterNavigationState()
+        navigation.sheet = .serviceSelect
+        navigation.cover = .about
 
         navigation.dismissSheet()
 
         XCTAssertNil(navigation.sheet)
-        XCTAssertEqual(navigation.cover, "media")
+        XCTAssertEqual(navigation.cover, .about)
     }
 
     func testDismissingCoverAtRootDoesNotPopEmptyStack() {
-        let navigation = RouterNavigationState<String>()
-        navigation.cover = "media"
+        let navigation = RouterNavigationState()
+        navigation.cover = .about
 
         navigation.dismissCover()
 
@@ -46,30 +48,30 @@ final class RouterNavigationStateTests: XCTestCase {
     }
 
     func testDismissingCoverPreservesParentAndSheetAndCanBeRepeated() {
-        let navigation = RouterNavigationState<String>()
-        navigation.backStack = ["post"]
-        navigation.sheet = "share"
-        navigation.cover = "media"
+        let navigation = RouterNavigationState()
+        navigation.backStack = [.home]
+        navigation.sheet = .tabSettings
+        navigation.cover = .about
 
         navigation.dismissCover()
         navigation.dismissCover()
 
         XCTAssertNil(navigation.cover)
-        XCTAssertEqual(navigation.sheet, "share")
-        XCTAssertEqual(navigation.backStack, ["post"])
+        XCTAssertEqual(navigation.sheet, .tabSettings)
+        XCTAssertEqual(navigation.backStack, [.home])
     }
 
     func testGoingBackPopsOnlyOneNavigationDestination() {
-        let navigation = RouterNavigationState<String>()
-        navigation.backStack = ["settings", "accounts"]
+        let navigation = RouterNavigationState()
+        navigation.backStack = [.settings, .accountManagement]
 
         navigation.goBack()
 
-        XCTAssertEqual(navigation.backStack, ["settings"])
+        XCTAssertEqual(navigation.backStack, [.settings])
     }
 
     func testGoingBackAtRootIsSafe() {
-        let navigation = RouterNavigationState<String>()
+        let navigation = RouterNavigationState()
 
         navigation.goBack()
 
