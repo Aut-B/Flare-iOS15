@@ -128,7 +128,7 @@ public struct TimelineGapView: View {
             .frame(maxWidth: .infinity, minHeight: 44)
         }
         .disabled(gap.loading || activating)
-        .onChange(of: gap.renderHash) { activating = false }
+        .backportOnChange(of: gap.renderHash) { _ in activating = false } // iOS 15 回退：上游 iOS17 目标的 onChange 闭包会解析到 iOS17 重载
         .buttonStyle(.plain)
         .accessibilityIdentifier("timeline-gap")
     }

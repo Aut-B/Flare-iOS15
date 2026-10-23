@@ -125,7 +125,7 @@ struct HomeTimelineScreen: View {
                             }
                             selectedTabId = tabIds.first(where: { $0 == presenter.state.initialSelectedTabId }) ?? tabIds.first
                         }
-                        .onChange(of: selectedTabId) { _, id in
+                        .backportOnChange(of: selectedTabId) { _, id in // iOS 15 回退：上游 iOS17 目标的 onChange 闭包会解析到 iOS17 重载
                             if let id { presenter.state.selectTab(tabId: id) }
                         }
                         .toolbar {
