@@ -127,6 +127,7 @@ public struct StatusView: View {
         let quoteItems = self.quotes
         let hasQuotes = !quoteItems.isEmpty
         let sourceChannelName = data.sourceChannel?.name
+        let ipLocation: String? = data.ipLocation.flatMap { $0.isEmpty ? nil : $0 }
         let emojiReactions = Array(data.emojiReactions)
         let hasEmojiReactions = showEmojiReactions && !emojiReactions.isEmpty
         let visibility = data.visibility
@@ -430,12 +431,20 @@ public struct StatusView: View {
                         }
 
                         if showMedia, !isQuote {
-                            if sourceChannelName != nil || hasEmojiReactions {
+                            if sourceChannelName != nil || ipLocation != nil || hasEmojiReactions {
                                 VStack(alignment: .leading, spacing: 4) {
                                     if let sourceChannelName {
                                         HStack(spacing: 4) {
                                             Image(fontAwesome: .tv)
                                             Text(sourceChannelName)
+                                        }
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                    }
+                                    if let ipLocation {
+                                        HStack(spacing: 4) {
+                                            Image(fontAwesome: .locationDot)
+                                            Text(ipLocation)
                                         }
                                         .font(.footnote)
                                         .foregroundStyle(.secondary)

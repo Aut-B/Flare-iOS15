@@ -1636,6 +1636,14 @@ internal val UiTimelineV2.Post.Visibility.localName: StringResource
             UiTimelineV2.Post.Visibility.Channel -> {
                 Res.string.misskey_visibility_public
             }
+
+            UiTimelineV2.Post.Visibility.Private -> {
+                Res.string.misskey_visibility_specified
+            }
+
+            UiTimelineV2.Post.Visibility.Mutual -> {
+                Res.string.misskey_visibility_followers
+            }
         }
 
 internal val UiTimelineV2.Post.Visibility.localDescription: StringResource
@@ -1659,5 +1667,13 @@ internal val UiTimelineV2.Post.Visibility.localDescription: StringResource
 
             UiTimelineV2.Post.Visibility.Channel -> {
                 Res.string.misskey_visibility_public_description
+            }
+
+            UiTimelineV2.Post.Visibility.Private -> {
+                Res.string.misskey_visibility_specified_description
+            }
+
+            UiTimelineV2.Post.Visibility.Mutual -> {
+                Res.string.misskey_visibility_followers_description
             }
         }

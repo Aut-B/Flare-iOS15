@@ -1619,6 +1619,14 @@ internal val UiTimelineV2.Post.Visibility.localName: Int
             UiTimelineV2.Post.Visibility.Channel -> {
                 R.string.misskey_visibility_public
             }
+
+            UiTimelineV2.Post.Visibility.Private -> {
+                R.string.misskey_visibility_specified
+            }
+
+            UiTimelineV2.Post.Visibility.Mutual -> {
+                R.string.misskey_visibility_followers
+            }
         }
 
 internal val UiTimelineV2.Post.Visibility.localDescription: Int
@@ -1642,5 +1650,13 @@ internal val UiTimelineV2.Post.Visibility.localDescription: Int
 
             UiTimelineV2.Post.Visibility.Channel -> {
                 R.string.misskey_visibility_public_description
+            }
+
+            UiTimelineV2.Post.Visibility.Private -> {
+                R.string.misskey_visibility_specified_description
+            }
+
+            UiTimelineV2.Post.Visibility.Mutual -> {
+                R.string.misskey_visibility_followers_description
             }
         }

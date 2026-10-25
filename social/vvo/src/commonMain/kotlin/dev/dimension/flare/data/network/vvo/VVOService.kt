@@ -34,6 +34,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -123,6 +124,11 @@ internal class VVOService private constructor(
     )
 
     private val refreshMutex = Mutex()
+    private val configMutex = Mutex()
+    private var cachedConfig: VVOResponse<Config>? = null
+    private var cachedConfigAtEpochMillis: Long = 0L
+    private var configInFlight: CompletableDeferred<VVOResponse<Config>>? = null
+    private val configCacheTtl = 10.minutes
 
     companion object {
         fun checkChocolates(chocolate: String): Boolean =
@@ -136,6 +142,62 @@ internal class VVOService private constructor(
     }
 
     override suspend fun config(): VVOResponse<Config> {
+        // 每次刷新时间线都串行打一次 api/config 会白等一个 RTT（弱网下就是 1~2 秒）。
+        // 登录态在短时间内不会变，这里缓存结果，写操作失败时再主动失效。
+        var owned: CompletableDeferred<VVOResponse<Config>>? = null
+        val pending =
+            configMutex.withLock {
+                val cached = cachedConfig
+                if (cached != null &&
+                    cached.data?.login == true &&
+                    Clock.System.now().toEpochMilliseconds() - cachedConfigAtEpochMillis < configCacheTtl.inWholeMilliseconds
+                ) {
+                    return cached
+                }
+                // 多路时间线同时刷新时共用同一个在途请求，避免并发打 api/config。
+                configInFlight
+                    ?: CompletableDeferred<VVOResponse<Config>>().also {
+                        configInFlight = it
+                        owned = it
+                    }
+            }
+
+        // 只有创建了在途请求的协程负责真正发网络请求，其余协程等它的结果。
+        val mine = owned
+        if (mine == null) {
+            return pending.await()
+        }
+
+        try {
+            val response = loadConfig()
+            if (response.data?.login == true) {
+                configMutex.withLock {
+                    cachedConfig = response
+                    cachedConfigAtEpochMillis = Clock.System.now().toEpochMilliseconds()
+                    if (configInFlight === mine) configInFlight = null
+                }
+            } else {
+                invalidateConfigCache()
+            }
+            mine.complete(response)
+            return response
+        } catch (error: Throwable) {
+            configMutex.withLock { if (configInFlight === mine) configInFlight = null }
+            mine.completeExceptionally(error)
+            throw error
+        }
+    }
+
+    /** 登录态变化（Cookie 刷新 / 写操作失败）后调用，下一次 [config] 会重新校验。 */
+    suspend fun invalidateConfigCache() {
+        configMutex.withLock {
+            cachedConfig = null
+            cachedConfigAtEpochMillis = 0L
+            configInFlight = null
+        }
+    }
+
+    private suspend fun loadConfig(): VVOResponse<Config> {
         val refreshedCredential = refreshChocolateIfNeeded()
         var requestCredential = refreshedCredential ?: currentCredential()
 
@@ -291,13 +353,16 @@ internal class VVOService private constructor(
                     setCookieHeaders = response.headers.getAll(HttpHeaders.SetCookie).orEmpty(),
                 ) ?: currentChocolate
 
-            currentCredential
-                .copy(
-                    chocolate = refreshedChocolate,
-                    lastCookieRefreshEpochMillis = refreshedAtEpochMillis,
-                ).also {
-                    onCredentialRefreshed(it)
-                }
+            val updated =
+                currentCredential
+                    .copy(
+                        chocolate = refreshedChocolate,
+                        lastCookieRefreshEpochMillis = refreshedAtEpochMillis,
+                    )
+            // Cookie 变了，缓存的 st / 登录态可能已经过期。
+            invalidateConfigCache()
+            onCredentialRefreshed(updated)
+            updated
         }
     }
 

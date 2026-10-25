@@ -29,6 +29,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.floatOrNull
 import kotlinx.serialization.json.jsonObject
@@ -40,6 +41,7 @@ import kotlin.time.Instant
 internal data class VVOResponse<T>(
     val data: T? = null,
     val ok: Long? = null,
+    val msg: String? = null,
     @SerialName("http_code")
     val httpCode: Long? = null,
 )
@@ -52,6 +54,7 @@ internal class VVOResponseSerializer<T>(
         buildClassSerialDescriptor("VVOResponse") {
             element("data", dataSer.descriptor.nullable)
             element<Long?>("ok")
+            element<String?>("msg")
             element<Long?>("http_code")
         }
 
@@ -70,9 +73,11 @@ internal class VVOResponseSerializer<T>(
             }
 
         val ok = obj["ok"]?.jsonPrimitive?.longOrNull
+        // msg 有时是字符串、有时是数字，偶尔还可能是对象，这里只取能当文本用的部分。
+        val msg = (obj["msg"] as? JsonPrimitive)?.contentOrNull
         val httpCode = obj["http_code"]?.jsonPrimitive?.longOrNull
 
-        return VVOResponse(data, ok, httpCode)
+        return VVOResponse(data, ok, msg, httpCode)
     }
 
     override fun serialize(
@@ -88,6 +93,7 @@ internal class VVOResponseSerializer<T>(
             buildJsonObject {
                 value.data?.let { put("data", json.encodeToJsonElement(dataSer, it)) }
                 value.ok?.let { put("ok", JsonPrimitive(it)) }
+                value.msg?.let { put("msg", JsonPrimitive(it)) }
                 value.httpCode?.let { put("http_code", JsonPrimitive(it)) }
             }
         jsonEncoder.encodeJsonElement(obj)

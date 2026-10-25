@@ -160,6 +160,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
     private var quoteDividers: [UIView] = []
 
     private var sourceChannelContainerStorage: SourceChannelRowView?
+    private var ipLocationContainerStorage: SourceChannelRowView?
 
     private var reactionViewStorage: StatusReactionUIView?
     private var detailTimestampViewStorage: DateTimeUILabel?
@@ -347,6 +348,13 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         if let sourceChannelContainerStorage { return sourceChannelContainerStorage }
         let view = SourceChannelRowView()
         sourceChannelContainerStorage = view
+        return view
+    }
+
+    private func resolvedIpLocationContainer() -> SourceChannelRowView {
+        if let ipLocationContainerStorage { return ipLocationContainerStorage }
+        let view = SourceChannelRowView()
+        ipLocationContainerStorage = view
         return view
     }
 
@@ -984,6 +992,12 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                 sourceChannelContainer.configure(text: channel.name)
                 append(sourceChannelContainer, before: 4)
             }
+            // 微博的 IP 属地（region_name，形如「发布于 北京」）
+            if let ipLocation = data.ipLocation, !ipLocation.isEmpty {
+                let ipLocationContainer = resolvedIpLocationContainer()
+                ipLocationContainer.configure(text: ipLocation, icon: .locationDot)
+                append(ipLocationContainer, before: 4)
+            }
             if appearance.showEmojiReactions, !data.emojiReactions.isEmpty {
                 let reactionView = resolvedReactionView()
                 reactionView.configure(data: Array(data.emojiReactions), isDetail: isDetail)
@@ -1409,7 +1423,8 @@ private final class SourceChannelRowView: UIView, ManualLayoutMeasurable, Timeli
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
-    func configure(text: String) {
+    func configure(text: String, icon: FontAwesomeIcon = .tv) {
+        self.icon.image = UIImage(fontAwesome: icon)
         label.text = text
         invalidateIntrinsicContentSize()
         setNeedsLayout()

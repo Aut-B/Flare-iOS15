@@ -31,7 +31,7 @@ internal interface StatusApi {
         @Field("content") content: String,
         @Field("st") st: String,
         @Header("X-Xsrf-Token") xsrfToken: String = st,
-        // 6 for friends only, 1 for private
+        // 0 公开 / 1 仅自己可见 / 6 互相关注 / 10 仅粉丝可见；null 时按公开处理
         @Field("visible") visible: String? = null,
         @Field("picId") picId: String? = null,
     ): VVOResponse<Status>
@@ -45,6 +45,8 @@ internal interface StatusApi {
         @Header("X-Xsrf-Token") xsrfToken: String = st,
         @Field("picId") picId: String? = null,
         @Field("mid") mid: String = id,
+        // 0 公开 / 1 仅自己可见 / 6 互相关注 / 10 仅粉丝可见；null 时按公开处理
+        @Field("visible") visible: String? = null,
     ): VVOResponse<Status>
 
     @POST("api/comments/create")

@@ -323,6 +323,9 @@ public sealed class UiTimelineV2 {
         public override val accountType: AccountType,
         @Transient
         override val itemKey: String? = null,
+        // 微博的 IP 属地（m.weibo.cn 的 region_name，形如「发布于 北京」）。
+        // 追加在构造参数末尾，避免影响已有的 Swift 调用点参数顺序。
+        val ipLocation: String? = null,
     ) : UiTimelineV2() {
         @Transient
         override val stableItemKey: String = calculateStableItemKey()
@@ -371,6 +374,7 @@ public sealed class UiTimelineV2 {
                 .add(references.renderSummaryHash { it.renderSummaryHash() })
                 .add(mediaClickPolicy)
                 .add(accountType)
+                .add(ipLocation)
                 .build()
         }
 
@@ -420,6 +424,12 @@ public sealed class UiTimelineV2 {
             Followers,
             Specified,
             Channel,
+
+            /** 仅自己可见（微博 visible=1） */
+            Private,
+
+            /** 互相关注可见（微博 visible=6，即「好友圈」） */
+            Mutual,
         }
     }
 
@@ -561,6 +571,7 @@ private fun UiTimelineV2.Post.renderSummaryHash(): Int =
         .add(replyToHandle)
         .add(sourceChannel?.id)
         .add(sourceChannel?.name)
+        .add(ipLocation)
         .add(visibility)
         .add(translationDisplayState)
         .add(actions.renderSummaryHash { it.renderSummaryHash() })

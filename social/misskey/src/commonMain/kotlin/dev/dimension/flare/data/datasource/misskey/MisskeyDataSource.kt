@@ -508,6 +508,9 @@ internal class MisskeyDataSource(
                         UiTimelineV2.Post.Visibility.Followers -> "followers"
                         UiTimelineV2.Post.Visibility.Specified -> "specified"
                         UiTimelineV2.Post.Visibility.Channel -> "public"
+                        // Misskey 没有「仅自己可见 / 互相关注」选项，退回最接近的语义。
+                        UiTimelineV2.Post.Visibility.Private -> "specified"
+                        UiTimelineV2.Post.Visibility.Mutual -> "followers"
                     },
                 renoteId = renoteId,
                 replyId = inReplyToID,

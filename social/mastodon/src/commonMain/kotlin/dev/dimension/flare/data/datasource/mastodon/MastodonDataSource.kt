@@ -325,6 +325,9 @@ internal open class MastodonDataSource(
                         UiTimelineV2.Post.Visibility.Followers -> Visibility.Private
                         UiTimelineV2.Post.Visibility.Specified -> Visibility.Direct
                         UiTimelineV2.Post.Visibility.Channel -> Visibility.Public
+                        // Mastodon 没有「仅自己可见 / 互相关注」选项，退回最接近的语义。
+                        UiTimelineV2.Post.Visibility.Private -> Visibility.Direct
+                        UiTimelineV2.Post.Visibility.Mutual -> Visibility.Private
                     },
                 inReplyToID = inReplyToID,
                 mediaIDS = mediaIds.takeIf { it.isNotEmpty() },

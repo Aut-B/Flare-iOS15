@@ -311,6 +311,16 @@ private fun Status.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
                     ),
                 ),
             accountType = AccountType.Specific(accountKey),
+            // 只对非公开的微博标记可见度，公开（visible=0 或字段缺失）保持 null，
+            // 避免时间线里每条微博都多出一个地球图标。
+            visibility =
+                when (visible?.type) {
+                    1L -> UiTimelineV2.Post.Visibility.Private
+                    6L -> UiTimelineV2.Post.Visibility.Mutual
+                    10L -> UiTimelineV2.Post.Visibility.Followers
+                    else -> null
+                },
+            ipLocation = regionName?.let(::formatVvoIpLocation),
         )
     return if (message != null || quote != null) {
         UiTimelineV2.TimelinePostItem(
@@ -556,6 +566,15 @@ internal fun User.render(accountKey: MicroBlogKey): UiProfile {
                 ),
             ),
     )
+}
+
+/**
+ * 微博接口里的 region_name 形如「发布于 北京」；少数情况下只有城市名，补一个前缀。
+ */
+private fun formatVvoIpLocation(raw: String): String? {
+    val value = raw.trim()
+    if (value.isEmpty()) return null
+    return if (value.startsWith("发布于") || value.startsWith("来自")) value else "IP属地：$value"
 }
 
 internal fun renderVVOText(

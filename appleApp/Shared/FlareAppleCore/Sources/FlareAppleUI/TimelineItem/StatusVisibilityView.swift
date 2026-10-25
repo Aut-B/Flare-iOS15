@@ -19,13 +19,19 @@ public struct StatusVisibilityView: View {
                 .accessibilityLabel(Text("status_visibility_unlisted", bundle: FlareAppleUILocalization.bundle))
         case .followers:
             Image(fontAwesome: .lock)
-                .accessibilityLabel(Text("matrix_followers", bundle: FlareAppleUILocalization.bundle))
+                .accessibilityLabel(Text("status_visibility_fans", bundle: FlareAppleUILocalization.bundle))
         case .specified:
             Image(fontAwesome: .at)
                 .accessibilityLabel(Text("status_visibility_specified", bundle: FlareAppleUILocalization.bundle))
         case .channel:
             Image(fontAwesome: .tv)
                 .accessibilityLabel(Text("channel_title", bundle: FlareAppleUILocalization.bundle))
+        case .private:
+            Image(fontAwesome: .lock)
+                .accessibilityLabel(Text("status_visibility_private", bundle: FlareAppleUILocalization.bundle))
+        case .mutual:
+            Image(fontAwesome: .users)
+                .accessibilityLabel(Text("status_visibility_mutual", bundle: FlareAppleUILocalization.bundle))
         }
     }
 }

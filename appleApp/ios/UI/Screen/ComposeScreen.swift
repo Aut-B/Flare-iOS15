@@ -62,10 +62,10 @@ struct ComposeScreen: View {
     // 转发/引用场景下，共享模块通常不托管可见度状态，这里在本地保存用户的选择，
     // 保证地球按键可用且选择能随发帖数据一并提交。
     @State private var overrideVisibility: UiTimelineV2.PostVisibility?
-    // 转发/引用默认提供的四项可见度，对应「所有人可见 / 仅在主页时间线显示 /
-    // 仅关注者可见 / 仅指定用户可见」
+    // 转发/引用默认提供的四项可见度，与微博一致：
+    // 公开 / 仅自己可见 / 互相关注 / 仅粉丝可见
     private static let defaultQuoteVisibilities: [UiTimelineV2.PostVisibility] = [
-        .public, .home, .followers, .specified
+        .public, .private, .mutual, .followers
     ]
 
     var body: some View {

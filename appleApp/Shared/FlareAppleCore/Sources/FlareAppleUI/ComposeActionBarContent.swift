@@ -297,11 +297,15 @@ private extension UiTimelineV2.PostVisibility {
         case .home:
             "home_tab_home_title"
         case .followers:
-            "matrix_followers"
+            "status_visibility_fans"
         case .specified:
             "status_visibility_specified"
         case .channel:
             "status_visibility_public"
+        case .private:
+            "status_visibility_private"
+        case .mutual:
+            "status_visibility_mutual"
         }
     }
 
@@ -323,11 +327,15 @@ private extension UiTimelineV2.PostVisibility {
         case .home:
             "status_visibility_home_description"
         case .followers:
-            "status_visibility_followers_description"
+            "status_visibility_fans_description"
         case .specified:
             "status_visibility_specified_description"
         case .channel:
             "status_visibility_public_description"
+        case .private:
+            "status_visibility_private_description"
+        case .mutual:
+            "status_visibility_mutual_description"
         }
     }
 }

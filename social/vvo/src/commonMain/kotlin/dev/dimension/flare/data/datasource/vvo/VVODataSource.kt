@@ -34,6 +34,7 @@ import dev.dimension.flare.data.model.tab.ShortcutSpec
 import dev.dimension.flare.data.model.tab.TimelineSpec
 import dev.dimension.flare.data.network.vvo.VVOService
 import dev.dimension.flare.data.network.vvo.model.StatusDetailItem
+import dev.dimension.flare.data.network.vvo.model.VVOResponse
 import dev.dimension.flare.data.platform.CommonTimelineSpecs
 import dev.dimension.flare.data.platform.VVO_PLATFORM_ID
 import dev.dimension.flare.data.platform.VVoCredential
@@ -396,36 +397,52 @@ internal class VVODataSource(
         val mediaId = mediaIds.joinToString(",")
         val referenceStatus = data.referenceStatus
         val composeStatus = referenceStatus?.composeStatus
-        if (composeStatus is ComposeStatus.VVOComment) {
-            service.replyComment(
-                cid = composeStatus.statusKey.id,
-                reply = composeStatus.statusKey.id,
-                id = composeStatus.rootId,
-                mid = composeStatus.rootId,
-                content = data.content,
-                st = st,
-                picId = mediaId,
-            )
-        } else if (composeStatus is ComposeStatus.Reply) {
-            service.commentStatus(
-                id = composeStatus.statusKey.id,
-                content = data.content,
-                st = st,
-                picId = mediaId,
-            )
-        } else if (composeStatus is ComposeStatus.Quote) {
-            service.repostStatus(
-                id = composeStatus.statusKey.id,
-                content = data.content,
-                st = st,
-                picId = mediaId,
-            )
-        } else {
-            service.updateStatus(
-                content = data.content,
-                st = st,
-                picId = mediaId,
-            )
+        // 公开（默认）不传 visible，保持与旧版本完全一致的请求；只有非公开才显式带上。
+        val visible = data.visibility.toVvoVisible()
+        val picId = mediaId.takeIf { it.isNotEmpty() }
+        try {
+            if (composeStatus is ComposeStatus.VVOComment) {
+                service.replyComment(
+                    cid = composeStatus.statusKey.id,
+                    reply = composeStatus.statusKey.id,
+                    id = composeStatus.rootId,
+                    mid = composeStatus.rootId,
+                    content = data.content,
+                    st = st,
+                    picId = mediaId,
+                )
+            } else if (composeStatus is ComposeStatus.Reply) {
+                service.commentStatus(
+                    id = composeStatus.statusKey.id,
+                    content = data.content,
+                    st = st,
+                    picId = mediaId,
+                )
+            } else if (composeStatus is ComposeStatus.Quote) {
+                service.repostStatus(
+                    id = composeStatus.statusKey.id,
+                    // 纯转发（不写理由）时微博需要非空内容，与网页端「转发微博」一致。
+                    content = data.content.ifBlank { "转发微博" },
+                    st = st,
+                    picId = picId,
+                    visible = visible,
+                ).requireSuccess("转发")
+            } else {
+                service.updateStatus(
+                    content = data.content,
+                    st = st,
+                    picId = picId,
+                    visible = visible,
+                ).requireSuccess("发布")
+            }
+        } catch (error: kotlinx.coroutines.CancellationException) {
+            throw error
+        } catch (error: LoginExpiredException) {
+            throw error
+        } catch (error: Exception) {
+            // 写失败常见原因是 st / 登录态过期，清缓存让下一次读取重新校验。
+            service.invalidateConfigCache()
+            throw error
         }
     }
 
@@ -440,6 +457,23 @@ internal class VVODataSource(
                     allowMediaOnly = false,
                     compression = MEDIA_COMPRESSION,
                 ),
+            // 微博的可见范围：公开 / 仅自己可见 / 互相关注 / 仅粉丝可见。
+            // 评论（Reply）没有可见范围概念，因此只在发博和转发时提供。
+            visibility =
+                if (type == ComposeType.Reply) {
+                    null
+                } else {
+                    ComposeConfig.Visibility(
+                        allVisibilities =
+                            persistentListOf(
+                                UiTimelineV2.Post.Visibility.Public,
+                                UiTimelineV2.Post.Visibility.Private,
+                                UiTimelineV2.Post.Visibility.Mutual,
+                                UiTimelineV2.Post.Visibility.Followers,
+                            ),
+                        defaultVisibility = UiTimelineV2.Post.Visibility.Public,
+                    )
+                },
             emoji =
                 ComposeConfig.Emoji(
                     emoji = emojiHandler.emoji,
@@ -578,4 +612,35 @@ internal class VVODataSource(
 
         return json.firstOrNull()?.status?.render(accountKey) ?: throw Exception("status not found")
     }
+}
+
+/**
+ * 微博「谁可以看」对应的 visible 值（与网页版 / App 一致）：
+ * 0 公开、1 仅自己可见、6 互相关注（好友圈）、10 仅粉丝可见。
+ * 公开时返回 null，请求里不带该字段。
+ */
+private fun UiTimelineV2.Post.Visibility.toVvoVisible(): String? =
+    when (this) {
+        UiTimelineV2.Post.Visibility.Public -> null
+        UiTimelineV2.Post.Visibility.Private -> "1"
+        UiTimelineV2.Post.Visibility.Mutual -> "6"
+        UiTimelineV2.Post.Visibility.Followers -> "10"
+        // 微博没有对应语义，退回公开
+        UiTimelineV2.Post.Visibility.Home,
+        UiTimelineV2.Post.Visibility.Specified,
+        UiTimelineV2.Post.Visibility.Channel -> null
+    }
+
+/**
+ * 微博接口失败时 ok=0，之前直接当成功处理，于是「点了发送但主页没有帖子」。
+ * 这里把失败显式抛出来，让 UI 显示错误而不是静默吞掉。
+ */
+private fun VVOResponse<*>.requireSuccess(action: String) {
+    val failed = ok == 0L || (ok == null && data == null)
+    if (!failed) return
+    val detail =
+        msg?.takeIf { it.isNotBlank() }
+            ?: httpCode?.let { "HTTP $it" }
+            ?: "ok=$ok"
+    throw Exception("微博$action失败：$detail")
 }
