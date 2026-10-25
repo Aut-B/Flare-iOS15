@@ -642,5 +642,5 @@ private fun VVOResponse<*>.requireSuccess(action: String) {
         msg?.takeIf { it.isNotBlank() }
             ?: httpCode?.let { "HTTP $it" }
             ?: "ok=$ok"
-    throw Exception("微博$action失败：$detail")
+    throw Exception("微博${action}失败：$detail")
 }
