@@ -160,7 +160,6 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
     private var quoteDividers: [UIView] = []
 
     private var sourceChannelContainerStorage: SourceChannelRowView?
-    private var ipLocationContainerStorage: SourceChannelRowView?
 
     private var reactionViewStorage: StatusReactionUIView?
     private var detailTimestampViewStorage: DateTimeUILabel?
@@ -348,13 +347,6 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         if let sourceChannelContainerStorage { return sourceChannelContainerStorage }
         let view = SourceChannelRowView()
         sourceChannelContainerStorage = view
-        return view
-    }
-
-    private func resolvedIpLocationContainer() -> SourceChannelRowView {
-        if let ipLocationContainerStorage { return ipLocationContainerStorage }
-        let view = SourceChannelRowView()
-        ipLocationContainerStorage = view
         return view
     }
 
@@ -991,12 +983,6 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                 let sourceChannelContainer = resolvedSourceChannelContainer()
                 sourceChannelContainer.configure(text: channel.name)
                 append(sourceChannelContainer, before: 4)
-            }
-            // 微博的 IP 属地（region_name，形如「发布于 北京」）
-            if let ipLocation = data.ipLocation, !ipLocation.isEmpty {
-                let ipLocationContainer = resolvedIpLocationContainer()
-                ipLocationContainer.configure(text: ipLocation, icon: .locationDot)
-                append(ipLocationContainer, before: 4)
             }
             if appearance.showEmojiReactions, !data.emojiReactions.isEmpty {
                 let reactionView = resolvedReactionView()

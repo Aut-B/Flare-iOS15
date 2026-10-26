@@ -2,16 +2,17 @@ package dev.dimension.flare.data.datasource.xqt
 
 import androidx.paging.ExperimentalPagingApi
 import dev.dimension.flare.common.encodeJson
+import dev.dimension.flare.data.database.cache.mapper.XQTTimeline
 import dev.dimension.flare.data.database.cache.mapper.cursor
 import dev.dimension.flare.data.database.cache.mapper.isBottomEnd
 import dev.dimension.flare.data.database.cache.mapper.tweets
+import dev.dimension.flare.data.datasource.microblog.paging.ContextPageUpdate
 import dev.dimension.flare.data.datasource.microblog.paging.ContextUpdate
 import dev.dimension.flare.data.datasource.microblog.paging.PagingRequest
 import dev.dimension.flare.data.datasource.microblog.paging.PagingResult
 import dev.dimension.flare.data.datasource.microblog.paging.PostContextLoader
 import dev.dimension.flare.data.datasource.microblog.paging.toContextUpdate
 import dev.dimension.flare.data.network.xqt.XQTService
-import dev.dimension.flare.data.network.xqt.model.PostCreateTweetRequestFeatures
 import dev.dimension.flare.data.network.xqt.model.Tweet
 import dev.dimension.flare.data.network.xqt.model.TweetPreviewDisplay
 import dev.dimension.flare.data.network.xqt.model.TweetTombstone
@@ -50,12 +51,28 @@ internal class StatusDetailRemoteMediator(
         request: PagingRequest,
         result: PagingResult<UiTimelineV2>,
         initial: Boolean,
-    ): ContextUpdate =
-        if (request == PagingRequest.Refresh && !statusOnly) {
-            ContextUpdate(posts = result.data)
-        } else {
-            result.toContextUpdate(statusKey, if (initial) PagingRequest.Refresh else request, initial)
+    ): ContextUpdate {
+        if (request != PagingRequest.Refresh || statusOnly) {
+            return result.toContextUpdate(statusKey, if (initial) PagingRequest.Refresh else request, initial)
         }
+        // TweetDetail 首屏响应里本来就同时带着这条推文和第一批回复。
+        // 以前这里只留主推文，回复被丢掉，然后 Paging 又串行发一次「初始 Append」
+        // （而且那次 Append 还额外请求了一次主推文），进详情要等三个往返。
+        // 现在直接把回复填进 after，首屏一个请求就能出评论。
+        val anchor = result.data.indexOfFirst { it.statusKey == statusKey }
+        if (anchor < 0) {
+            return ContextUpdate(posts = result.data)
+        }
+        return ContextUpdate(
+            posts = result.data,
+            after =
+                ContextPageUpdate(
+                    keys = result.data.drop(anchor + 1).map { it.statusKey },
+                    cursor = result.nextKey,
+                    replace = true,
+                ),
+        )
+    }
 
     override suspend fun load(
         pageSize: Int,
@@ -83,58 +100,23 @@ internal class StatusDetailRemoteMediator(
                             ?.instructions
                             .orEmpty()
 
-                    val tweet =
-                        service
-                            .getTweetResultByRestId(
-                                variables =
-                                    TweetDetailWithRestIdRequest(
-                                        tweetID = statusKey.id,
-                                        withCommunity = true,
-                                        includePromotedContent = true,
-                                        withVoice = true,
-                                    ).encodeJson(),
-                                features =
-                                    PostCreateTweetRequestFeatures(
-                                        responsiveWebTwitterArticleTweetConsumptionEnabled = true,
-                                    ).encodeJson(),
-                            ).body()
-                            ?.data
-                            ?.tweetResult
-                            ?.result
-
-                    conversationId =
-                        when (tweet) {
-                            is Tweet -> tweet.legacy?.conversationIdStr
-
-                            is TweetPreviewDisplay,
-                            is TweetTombstone,
-                            -> null
-
-                            is TweetUnavailable -> null
-
-                            is TweetWithVisibilityResults -> tweet.tweet.legacy?.conversationIdStr
-
-                            null -> null
-                        }
+                    // conversationId 在首屏 Refresh 时就从主推文取到了。
+                    // 以前这里为了拿它又整发一次 getTweetResultByRestId，
+                    // 等于每翻一页评论都白等一个完整往返。
+                    val resolvedConversationId =
+                        conversationId
+                            ?: response
+                                .tweets()
+                                .firstOrNull { it.id == statusKey.id }
+                                ?.let { conversationIdOf(it.tweets.tweetResults.result) }
+                    if (resolvedConversationId != null) {
+                        conversationId = resolvedConversationId
+                    }
 
                     val actualTweet =
                         response
                             .tweets()
-                            .filter {
-                                when (val result = it.tweets.tweetResults.result) {
-                                    is TweetTombstone -> false
-
-                                    is TweetPreviewDisplay,
-                                    is TweetUnavailable,
-                                    -> false
-
-                                    null -> false
-
-                                    is Tweet -> result.legacy?.conversationIdStr == conversationId
-
-                                    is TweetWithVisibilityResults -> result.tweet.legacy?.conversationIdStr == conversationId
-                                }
-                            }
+                            .filter { isValidInConversation(it, resolvedConversationId) }
 
                     PagingResult(
                         endOfPaginationReached = response.isBottomEnd() || actualTweet.size == 1 || response.cursor() == null,
@@ -169,18 +151,52 @@ internal class StatusDetailRemoteMediator(
                         .orEmpty()
                 val tweet = response.tweets()
                 val item = tweet.firstOrNull { it.id == statusKey.id }
+                conversationId = item?.let { conversationIdOf(it.tweets.tweetResults.result) }
+
+                // 首屏响应里本来就带着第一批回复，一并交给 Paging，
+                // 这样进详情一个请求就能同时出主推文和评论。
+                val data =
+                    if (statusOnly) {
+                        listOfNotNull(item)
+                    } else {
+                        tweet.filter { isValidInConversation(it, conversationId) }
+                    }
 
                 PagingResult(
                     endOfPaginationReached = statusOnly,
-                    data =
-                        listOfNotNull(item).mapNotNull {
-                            it.render(accountKey)
-                        },
-                    nextKey = if (statusOnly) null else "",
+                    data = data.mapNotNull { it.render(accountKey) },
+                    nextKey = if (statusOnly) null else response.cursor(),
                 )
             }
         }
 }
+
+/**
+ * 过滤掉墓碑 / 不可见 / 推广等无效推文，并只保留同一条对话里的内容。
+ * conversationId 为空时（首屏拿不到主推文）退化为只做有效性过滤。
+ */
+private fun isValidInConversation(
+    item: XQTTimeline,
+    conversationId: String?,
+): Boolean {
+    val result = item.tweets.tweetResults.result
+    return when (result) {
+        is TweetTombstone,
+        is TweetPreviewDisplay,
+        is TweetUnavailable,
+        null,
+        -> false
+
+        else -> conversationId == null || conversationIdOf(result) == conversationId
+    }
+}
+
+private fun conversationIdOf(result: Any?): String? =
+    when (result) {
+        is Tweet -> result.legacy?.conversationIdStr
+        is TweetWithVisibilityResults -> result.tweet.legacy?.conversationIdStr
+        else -> null
+    }
 
 @Serializable
 internal data class TweetDetailWithRestIdRequest(

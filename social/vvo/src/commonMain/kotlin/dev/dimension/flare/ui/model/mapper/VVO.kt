@@ -496,6 +496,8 @@ private fun Comment.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
                     },
                 ),
             accountType = AccountType.Specific(accountKey),
+            // 评论的 IP 属地在 source 字段（形如「来自 北京」），只保留地名。
+            ipLocation = source?.let(::formatVvoCommentIpLocation),
         )
     return if (quote.isNotEmpty()) {
         UiTimelineV2.TimelinePostItem(
@@ -569,12 +571,31 @@ internal fun User.render(accountKey: MicroBlogKey): UiProfile {
 }
 
 /**
- * 微博接口里的 region_name 形如「发布于 北京」；少数情况下只有城市名，补一个前缀。
+ * 微博的 IP 属地：帖子在 region_name（形如「发布于 北京」），评论在 source（形如「来自 北京」）。
+ * 界面上只展示地名本身（如「北京」），前缀一律去掉。
  */
-private fun formatVvoIpLocation(raw: String): String? {
-    val value = raw.trim()
+private fun formatVvoIpLocation(raw: String): String? = raw.toBareIpRegion()
+
+/**
+ * 评论的 source 正常是「来自 北京」，但少数历史数据是客户端名（如「来自 iPhone客户端」），
+ * 这类不是属地，直接丢弃。
+ */
+private fun formatVvoCommentIpLocation(raw: String): String? {
+    val region = raw.toBareIpRegion() ?: return null
+    if (region.contains("客户端") || region.contains("微博") || region.contains("网页")) return null
+    return region
+}
+
+private fun String.toBareIpRegion(): String? {
+    var value = trim()
     if (value.isEmpty()) return null
-    return if (value.startsWith("发布于") || value.startsWith("来自")) value else "IP属地：$value"
+    for (prefix in listOf("发布于", "来自", "IP属地：", "IP属地:", "IP 属地：", "IP 属地:")) {
+        if (value.startsWith(prefix)) {
+            value = value.removePrefix(prefix).trim()
+            break
+        }
+    }
+    return value.ifEmpty { null }
 }
 
 internal fun renderVVOText(

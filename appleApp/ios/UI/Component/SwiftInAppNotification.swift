@@ -20,11 +20,16 @@ final class SwiftInAppNotification: InAppNotification {
             guard let self else { return }
             switch message {
             case .compose:
+                // 把微博/服务端返回的真实原因带出来（比如「重复转发」「操作频繁」），
+                // 否则用户只看到「发送失败」，无法判断是客户端还是账号被限流。
+                let detail = throwable.message?.trimmingCharacters(in: .whitespacesAndNewlines)
                 Drops.show(
                     .init(
                         title: .init(localized: "notification_compose_error"),
-                        icon: UIImage(fontAwesome: .circleExclamation)
-
+                        subtitle: (detail?.isEmpty == false) ? detail : nil,
+                        subtitleNumberOfLines: 3,
+                        icon: UIImage(fontAwesome: .circleExclamation),
+                        duration: .seconds(5)
                     )
                 )
             case .loginExpired:

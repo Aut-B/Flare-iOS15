@@ -208,6 +208,7 @@ public struct StatusView: View {
                                             translationDisplayState: translationDisplayState,
                                             platformIcon: data.platformIcon,
                                             platformId: data.platformId,
+                                            ipLocation: ipLocation,
                                             createdAt: createdAt,
                                             accountType: accountType,
                                             statusKey: statusKey
@@ -222,6 +223,7 @@ public struct StatusView: View {
                                             translationDisplayState: translationDisplayState,
                                             platformIcon: data.platformIcon,
                                             platformId: data.platformId,
+                                            ipLocation: ipLocation,
                                             createdAt: createdAt,
                                             accountType: accountType,
                                             statusKey: statusKey
@@ -236,6 +238,7 @@ public struct StatusView: View {
                                             translationDisplayState: translationDisplayState,
                                             platformIcon: data.platformIcon,
                                             platformId: data.platformId,
+                                            ipLocation: ipLocation,
                                             createdAt: createdAt,
                                             accountType: accountType,
                                             statusKey: statusKey
@@ -431,20 +434,12 @@ public struct StatusView: View {
                         }
 
                         if showMedia, !isQuote {
-                            if sourceChannelName != nil || ipLocation != nil || hasEmojiReactions {
+                            if sourceChannelName != nil || hasEmojiReactions {
                                 VStack(alignment: .leading, spacing: 4) {
                                     if let sourceChannelName {
                                         HStack(spacing: 4) {
                                             Image(fontAwesome: .tv)
                                             Text(sourceChannelName)
-                                        }
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                    }
-                                    if let ipLocation {
-                                        HStack(spacing: 4) {
-                                            Image(fontAwesome: .locationDot)
-                                            Text(ipLocation)
                                         }
                                         .font(.footnote)
                                         .foregroundStyle(.secondary)
@@ -514,6 +509,7 @@ public struct StatusView: View {
         translationDisplayState: TranslationDisplayState,
         platformIcon: UiIcon,
         platformId: String,
+        ipLocation: String?,
         createdAt: UiDateTime,
         accountType: AccountType,
         statusKey: MicroBlogKey
@@ -530,20 +526,29 @@ public struct StatusView: View {
                     .foregroundStyle(.secondary)
             }
             if showPlatformLogo {
-                Image(fontAwesome: platformIcon.fontAwesomeIcon)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel(
-                        Text(
-                            verbatim: String(
-                                format: FlareAppleUILocalization.string(
-                                    "status_platform",
-                                    fallback: "Platform: %@"
-                                ),
-                                platformId
+                // 平台图标下方放 IP 属地，只显示地名（如「北京」）。
+                VStack(alignment: .trailing, spacing: 0) {
+                    Image(fontAwesome: platformIcon.fontAwesomeIcon)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel(
+                            Text(
+                                verbatim: String(
+                                    format: FlareAppleUILocalization.string(
+                                        "status_platform",
+                                        fallback: "Platform: %@"
+                                    ),
+                                    platformId
+                                )
                             )
                         )
-                    )
+                    if let ipLocation, !ipLocation.isEmpty {
+                        Text(ipLocation)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
             }
             if !isDetail {
                 DateTimeText(data: createdAt)
