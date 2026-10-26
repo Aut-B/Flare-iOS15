@@ -1403,19 +1403,27 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
             }
             if collectionView.preservesReadingPosition {
                 pendingRefreshEnd = false
-                collectionView.beginRefreshing(
-                    revealingIndicator: !isUserRefreshing && pendingReloadPosition?.itemID == nil
-                )
+                let shouldRevealIndicator =
+                    !isUserRefreshing
+                        && !hasCompletedInitialRefreshCycle
+                        && pendingReloadPosition?.itemID == nil
+                collectionView.beginRefreshing(revealingIndicator: shouldRevealIndicator)
                 return
             }
             if !refreshControl.isRefreshing {
-                // Capture the resting inset before UIKit adds space for the refresh control.
-                // Reading it after beginRefreshing() can count the indicator height twice.
-                pendingRefreshControlOffsetY = isUserRefreshing
-                    ? nil
-                    : -(collectionView.adjustedContentInset.top + max(refreshControl.bounds.height, 60))
-                refreshControl.beginRefreshing()
-                revealRefreshControlIfNeeded()
+                // 非用户触发的刷新（后台补数据）只更新内容，不再把列表滚下去露指示器：
+                // 否则静默刷新会在顶部闪一下，还会打断阅读位置。
+                if isUserRefreshing || !hasCompletedInitialRefreshCycle {
+                    // Capture the resting inset before UIKit adds space for the refresh control.
+                    // Reading it after beginRefreshing() can count the indicator height twice.
+                    pendingRefreshControlOffsetY = isUserRefreshing
+                        ? nil
+                        : -(collectionView.adjustedContentInset.top + max(refreshControl.bounds.height, 60))
+                    refreshControl.beginRefreshing()
+                    revealRefreshControlIfNeeded()
+                } else {
+                    pendingRefreshControlOffsetY = nil
+                }
             }
         } else if !isUserRefreshing {
             pendingRefreshControlOffsetY = nil

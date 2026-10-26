@@ -4,6 +4,7 @@ import androidx.paging.ExperimentalPagingApi
 import androidx.paging.LoadType
 import androidx.paging.PagingState
 import androidx.paging.RemoteMediator.MediatorResult
+import dev.dimension.flare.common.PlatformDispatchers
 import dev.dimension.flare.common.SnowflakeIdGenerator
 import dev.dimension.flare.data.database.cache.CacheDatabase
 import dev.dimension.flare.data.database.cache.connect
@@ -24,11 +25,18 @@ import dev.dimension.flare.ui.model.asTimelinePostItem
 import dev.dimension.flare.ui.render.toUi
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlin.time.Clock
 import kotlin.uuid.Uuid
@@ -37,6 +45,15 @@ internal data class GapLoadResult(
     val insertedKeys: List<String> = emptyList(),
     val failure: Throwable? = null,
 )
+
+/** 后台刷新完成后的一小段时间内，由 invalidation 触发的刷新直接跳过，避免自我循环。 */
+private const val deferredRefreshSettleMillis: Long = 2_500L
+
+/** 提前返回时给下拉手势的最短反馈时间。 */
+private const val deferredRefreshFeedbackMillis: Long = 320L
+
+/** 后台刷新进行中时，翻页最多等这么久；超时就直接并行，交给提交令牌做冲突检测。 */
+private const val deferredRefreshWaitMillis: Long = 10_000L
 
 @OptIn(ExperimentalPagingApi::class)
 internal open class TimelineRemoteMediator(
@@ -50,6 +67,13 @@ internal open class TimelineRemoteMediator(
     private val accountKeys: Set<MicroBlogKey> = emptySet(),
     private val refreshSession: HomeTimelineRefreshSessions.Session? = null,
     private val retainedHome: suspend () -> TimelineRemoteMediator? = { null },
+    /**
+     * 首页下拉刷新不在加载协程里等网络：
+     * 立即返回成功让刷新指示器结束，真正的取数放到后台协程，写库后由
+     * Room 的 invalidation 自动把新内容刷进列表。混合首页里最慢的那个平台
+     * （例如微博）不会再拖住整次刷新。
+     */
+    private val deferRefresh: Boolean = false,
 ) : BasePagingRemoteMediator<
         OffsetFromStartPagingKey,
         TimelinePageItem,
@@ -61,6 +85,13 @@ internal open class TimelineRemoteMediator(
     private var suppressInitialPrepend = false
     private var refreshSharedHomeOnPrepend = false
     private val ordersByTime = (loader as? MixedRemoteMediator)?.pageLoader()?.ordersByTime == true
+
+    private val deferredRefreshScope = CoroutineScope(SupervisorJob() + PlatformDispatchers.IO)
+    private val refreshGate = Mutex()
+    private val deferredRefreshLock = Mutex()
+    private var deferredRefreshInFlight = false
+    private var lastRefreshFinishedAt = 0L
+    private var blockNextRefresh = false
 
     override val pagingKey: String
         get() = loader.pagingKey
@@ -102,6 +133,27 @@ internal open class TimelineRemoteMediator(
         if (loadType == LoadType.REFRESH) {
             suppressInitialPrepend = false
             refreshSharedHomeOnPrepend = false
+            // 只有「保留历史」的首页时间线才走 loadHomePage，后台刷新复用同一条路径。
+            if (deferRefresh && retainHistory != null) {
+                when (decideDeferredRefresh()) {
+                    DeferredRefresh.Defer -> {
+                        deferredRefreshScope.launch { runDeferredRefresh(state.config.pageSize) }
+                        // 给下拉手势一点反馈，避免指示器一闪而过像没刷新。
+                        delay(deferredRefreshFeedbackMillis)
+                        return MediatorResult.Success(endOfPaginationReached = false)
+                    }
+
+                    DeferredRefresh.Skip -> return MediatorResult.Success(endOfPaginationReached = false)
+
+                    DeferredRefresh.Block -> Unit
+                }
+            }
+        }
+        if (deferRefresh && retainHistory != null && loadType != LoadType.REFRESH) {
+            // 后台刷新还在跑的时候，翻页先等它落地，避免两边同时改同一份续页游标。
+            withTimeoutOrNull(deferredRefreshWaitMillis) {
+                deferredRefreshLock.withLock {}
+            }
         }
         return when {
             retainHistory == null -> {
@@ -132,6 +184,75 @@ internal open class TimelineRemoteMediator(
             else -> {
                 loadHomePage(loadType, state.config.pageSize)
             }
+        }
+    }
+
+    private enum class DeferredRefresh {
+        /** 立即结束刷新指示器，真正的取数交给后台。 */
+        Defer,
+
+        /** 已经有刷新在跑（或刚刚跑完），这次什么都不用做。 */
+        Skip,
+
+        /** 必须同步等网络：没有缓存、或者上一次后台刷新失败了。 */
+        Block,
+    }
+
+    private suspend fun decideDeferredRefresh(): DeferredRefresh =
+        refreshGate.withLock {
+            val now = Clock.System.now().toEpochMilliseconds()
+            when {
+                // 首次进入没有缓存时不能提前返回，否则会先闪一个空列表。
+                !database.pagingTimelineDao().anyPaging(pagingKey) -> DeferredRefresh.Block
+
+                deferredRefreshInFlight -> DeferredRefresh.Skip
+
+                // 上一次后台刷新失败，这次同步做一次，让错误能直接反馈给用户。
+                blockNextRefresh -> {
+                    blockNextRefresh = false
+                    DeferredRefresh.Block
+                }
+
+                // 后台刷新刚写完库时会触发一次由 invalidation 引起的 REFRESH，
+                // 这里直接跳过，避免「刷新 -> 写库 -> 再刷新」的循环。
+                now - lastRefreshFinishedAt < deferredRefreshSettleMillis -> DeferredRefresh.Skip
+
+                else -> {
+                    deferredRefreshInFlight = true
+                    DeferredRefresh.Defer
+                }
+            }
+        }
+
+    private suspend fun runDeferredRefresh(pageSize: Int) {
+        try {
+            val session = refreshSession
+            deferredRefreshLock.withLock {
+                if (session != null) {
+                    session.mutex.withLock { loadHomePage(LoadType.REFRESH, pageSize) }
+                } else {
+                    loadHomePage(LoadType.REFRESH, pageSize)
+                }
+            }.let { result ->
+                if (result is MediatorResult.Error) {
+                    refreshGate.withLock { blockNextRefresh = true }
+                    notifyError(result.throwable)
+                } else {
+                    refreshGate.withLock {
+                        lastRefreshFinishedAt = Clock.System.now().toEpochMilliseconds()
+                    }
+                }
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: IllegalStateException) {
+            // 后台刷新期间用户翻页会让提交令牌失效（"Timeline changed while loading"），
+            // 这不是错误：那批数据下一轮刷新会重新取。
+        } catch (error: Throwable) {
+            refreshGate.withLock { blockNextRefresh = true }
+            notifyError(error)
+        } finally {
+            refreshGate.withLock { deferredRefreshInFlight = false }
         }
     }
 

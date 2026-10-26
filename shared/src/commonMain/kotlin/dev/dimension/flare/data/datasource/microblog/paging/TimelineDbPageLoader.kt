@@ -12,10 +12,15 @@ import dev.dimension.flare.ui.model.UiProfile
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+
+/** 把同一次写库产生的一批失效合并成一个判断，避免重复整窗重建。 */
+private const val invalidationCoalesceMillis: Long = 120L
 
 internal class TimelineDbPageCache {
     private val mutex = Mutex()
@@ -241,32 +246,44 @@ internal class TimelineDbPageLoader(
 
     override fun observeInvalidations(invalidate: () -> Unit): PageInvalidationSubscription {
         val ready = CompletableDeferred<Unit>()
+        val signals = Channel<Unit>(Channel.CONFLATED)
         val job =
             CoroutineScope(PlatformDispatchers.IO).launch(start = CoroutineStart.UNDISPATCHED) {
-                val dao = database.pagingTimelineDao()
-                database
-                    .invalidationTracker
-                    .createFlow(
-                        "DbPagingTimeline",
-                        "DbStatus",
-                        "status_reference",
-                        "timeline_item_presentation_reference",
-                        "DbTranslation",
-                        emitInitialState = true,
-                    ).collect {
-                        if (ready.complete(Unit)) {
-                            return@collect
-                        }
-                        val currentWindowChanged =
-                            pageCache.hasCurrentWindowChanged(
-                                dao = dao,
-                                pagingKey = pagingKey,
-                            )
-                        if (!currentWindowChanged) {
-                            return@collect
-                        }
-                        invalidate()
+                try {
+                    val dao = database.pagingTimelineDao()
+                    launch {
+                        database
+                            .invalidationTracker
+                            .createFlow(
+                                "DbPagingTimeline",
+                                "DbStatus",
+                                "status_reference",
+                                "timeline_item_presentation_reference",
+                                "DbTranslation",
+                                emitInitialState = true,
+                            ).collect {
+                                if (ready.complete(Unit)) {
+                                    return@collect
+                                }
+                                signals.trySend(Unit)
+                            }
                     }
+                    while (true) {
+                        signals.receive()
+                        // 一次刷新写库会同时改动 DbStatus / DbPagingTimeline / 引用表，
+                        // 逐条处理会让整窗重建 3~5 次；等这一批写入安静下来再统一判断一次。
+                        delay(invalidationCoalesceMillis)
+                        while (signals.tryReceive().isSuccess) {
+                            // 把同一批里剩下的信号一起吃掉。
+                        }
+                        if (pageCache.hasCurrentWindowChanged(dao = dao, pagingKey = pagingKey)) {
+                            invalidate()
+                        }
+                    }
+                } finally {
+                    // 订阅异常或取消时也要放行首次读取，否则分页会一直等在这里。
+                    ready.complete(Unit)
+                }
             }
         return PageInvalidationSubscription(
             job = job,

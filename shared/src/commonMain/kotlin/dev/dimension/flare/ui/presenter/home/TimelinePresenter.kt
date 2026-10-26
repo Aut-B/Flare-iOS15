@@ -300,6 +300,9 @@ public open class TimelinePresenter : PresenterBase<TimelineState> {
                                     settingsRepository.appSettings.first().refreshHomeTimelineOnLaunch
                                 }
                         },
+                        // 首页下拉刷新不等网络：先结束指示器，取数在后台跑，写库后自动刷新列表。
+                        // 混合首页里最慢的平台（微博）就不会再拖住整次刷新。
+                        deferRefresh = isHomeTimeline,
                     )
                 }
             homeMediator.value = mediator
