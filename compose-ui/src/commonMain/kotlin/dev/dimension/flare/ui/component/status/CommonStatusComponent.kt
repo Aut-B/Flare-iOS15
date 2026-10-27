@@ -59,6 +59,7 @@ import compose.icons.FontAwesomeIcons
 import compose.icons.fontawesomeicons.Solid
 import compose.icons.fontawesomeicons.solid.At
 import compose.icons.fontawesomeicons.solid.Ellipsis
+import compose.icons.fontawesomeicons.solid.EyeSlash
 import compose.icons.fontawesomeicons.solid.Globe
 import compose.icons.fontawesomeicons.solid.Image
 import compose.icons.fontawesomeicons.solid.Language
@@ -68,6 +69,7 @@ import compose.icons.fontawesomeicons.solid.Reply
 import compose.icons.fontawesomeicons.solid.Robot
 import compose.icons.fontawesomeicons.solid.TriangleExclamation
 import compose.icons.fontawesomeicons.solid.Tv
+import compose.icons.fontawesomeicons.solid.UserPlus
 import dev.dimension.flare.compose.ui.Res
 import dev.dimension.flare.compose.ui.bookmark_add
 import dev.dimension.flare.compose.ui.bookmark_remove
@@ -990,8 +992,8 @@ public fun StatusVisibilityComponent(
 
         UiTimelineV2.Post.Visibility.Private -> {
             FAIcon(
-                imageVector = FontAwesomeIcons.Solid.Lock,
-                contentDescription = stringResource(resource = Res.string.mastodon_visibility_private),
+                imageVector = FontAwesomeIcons.Solid.EyeSlash,
+                contentDescription = stringResource(resource = Res.string.status_visibility_private),
                 modifier = modifier,
                 tint = tint,
             )
@@ -999,8 +1001,8 @@ public fun StatusVisibilityComponent(
 
         UiTimelineV2.Post.Visibility.Mutual -> {
             FAIcon(
-                imageVector = FontAwesomeIcons.Solid.Users,
-                contentDescription = stringResource(resource = Res.string.mastodon_visibility_private),
+                imageVector = FontAwesomeIcons.Solid.UserPlus,
+                contentDescription = stringResource(resource = Res.string.status_visibility_mutual),
                 modifier = modifier,
                 tint = tint,
             )

@@ -69,6 +69,12 @@
     <string name="mastodon_visibility_unlisted_description">任何人都可以看到此帖，但不会出现在公共时间轴上</string>
     <string name="mastodon_visibility_private_description">只有关注者可以看到此帖</string>
     <string name="mastodon_visibility_direct_description">只有被提到的人可以看到此帖</string>
+    <string name="status_visibility_private">仅自己可见</string>
+    <string name="status_visibility_mutual">互相关注</string>
+    <string name="status_visibility_fans">仅粉丝可见</string>
+    <string name="status_visibility_private_description">只有你自己可以看到这条微博</string>
+    <string name="status_visibility_mutual_description">只有互相关注的人可以看到这条微博</string>
+    <string name="status_visibility_fans_description">只有你的粉丝可以看到这条微博</string>
     <string name="settings_notifications_title">通知</string>
     <string name="settings_notifications_subtitle">自定义 Flare 如何通知你</string>
     <string name="status_loadmore_end">没有更多帖子了</string>

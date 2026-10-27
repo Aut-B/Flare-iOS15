@@ -87,6 +87,12 @@
     <string name="mastodon_visibility_unlisted_description">Anyone can see this post, but it won\'t appear on the public timeline</string>
     <string name="mastodon_visibility_private_description">Only followers can see this post</string>
     <string name="mastodon_visibility_direct_description">Only mentioned users can see this post</string>
+    <string name="status_visibility_private">Only me</string>
+    <string name="status_visibility_mutual">Mutual followers</string>
+    <string name="status_visibility_fans">Followers only</string>
+    <string name="status_visibility_private_description">Only you can see this post</string>
+    <string name="status_visibility_mutual_description">Only users you follow and who follow you back can see this post</string>
+    <string name="status_visibility_fans_description">Only your followers can see this post</string>
 
     <string name="settings_notifications_title">Notifications</string>
     <string name="settings_notifications_subtitle">Customize how Flare notifies you</string>
