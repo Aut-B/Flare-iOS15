@@ -64,7 +64,7 @@ jobs:
 
       - name: Build release APK
         env:
-          BUILD_NUMBER: '1781'
+          BUILD_NUMBER: '1782'
           BUILD_VERSION: '1.7.8'
         run: |
           chmod +x gradlew
