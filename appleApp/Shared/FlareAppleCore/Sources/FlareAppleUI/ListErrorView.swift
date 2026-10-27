@@ -53,10 +53,13 @@ public struct ListErrorView: View {
                 }
                 .buttonStyle(.borderedProminent)
             } else  {
-                Image(systemName: "exclamationmark.triangle.text.page")
+                // exclamationmark.triangle.text.page 是 iOS 17 才有的符号，iOS 15/16 上
+                // 画不出来（错误页会只剩文字）。统一用 iOS 13 起就有的三角形。
+                Image(systemName: "exclamationmark.triangle")
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 64, height: 64)
+                    .frame(width: 44, height: 44)
+                    .foregroundStyle(.secondary)
                 Text("error", bundle: FlareAppleUILocalization.bundle)
                     .multilineTextAlignment(.center)
                     .font(.headline)
@@ -66,11 +69,28 @@ public struct ListErrorView: View {
                     Text("action_retry", bundle: FlareAppleUILocalization.bundle)
                 }
                 .buttonStyle(.borderedProminent)
-                if let message = error.message {
-                    Text(message)
-                        .font(.caption)
+                // 真实原因放大 + 可长按选中，方便直接复制/截图反馈。
+                VStack(alignment: .leading, spacing: 4) {
+                    if let message = error.message, !message.isEmpty {
+                        Text(message)
+                            .font(.footnote)
+                            .foregroundStyle(.primary)
+                    } else {
+                        Text(String(describing: error))
+                            .font(.footnote)
+                            .foregroundStyle(.primary)
+                    }
+                    Text(String(describing: type(of: error)))
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                .multilineTextAlignment(.leading)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .background(Color.flareSystemGroupedBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal)
             }
         }
         .padding()

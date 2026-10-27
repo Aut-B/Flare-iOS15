@@ -10,16 +10,10 @@ struct SecondaryTabsScreen: View {
     @StateObject private var presenter = KotlinPresenter(presenter: SecondaryTabsPresenter())
     @StateObject private var aiAgentEnabledPresenter = KotlinPresenter(presenter: AiAgentEnabledPresenter())
     var body: some View {
-        Group {
-            if #available(iOS 18.0, *) {
-                Router { _ in
-                    content
-                }
-            } else {
-                content
-            }
-        }
-        .toolbar {
+        // 这一页里所有跳转都改成 onTabSelected（关 sheet + 主导航栈 push），
+        // 不再需要 iOS 18 那层嵌套 Router/NavigationStack。
+        content
+            .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     dismiss()
@@ -67,45 +61,44 @@ struct SecondaryTabsScreen: View {
             }
 
             Section {
-                NBNavigationLink(value: Route.draftBox) {
-                    Label {
-                        Text("Drafts")
-                    } icon: {
-                        Image(fontAwesome: .penToSquare)
-                    }
-                }
-                NBNavigationLink(value: Route.rssManagement) {
-                    Label {
-                        Text("settings_rss_management_title")
-                    } icon: {
-                        Image(fontAwesome: .squareRss)
-                    }
-                }
-                NBNavigationLink(value: Route.localHostory) {
-                    Label {
-                        Text("local_history_title")
-                    } icon: {
-                        Image(fontAwesome: .clockRotateLeft)
-                    }
-                }
+                // iOS 18+ 回退：这里原来用 NBNavigationLink，会落到 SecondaryTabsScreen
+                // 里那层嵌套的 Router/NavigationStack 上；而 iOS 15 走的是 sheet 自己的
+                // 导航栈。iOS 26/27 上嵌套栈里的目标页面会渲染成「只有一个图标、没有文字」。
+                // 改成走 onTabSelected（和上面账号 tab 完全相同的路径）：关掉 sheet、
+                // 在主导航栈上 push，全系统版本行为一致，也不再有任何嵌套导航栈。
+                secondaryRouteButton("Drafts", icon: .penToSquare, route: .draftBox)
+                secondaryRouteButton("settings_rss_management_title", icon: .squareRss, route: .rssManagement)
+                secondaryRouteButton("local_history_title", icon: .clockRotateLeft, route: .localHostory)
                 if aiAgentEnabledPresenter.state.enabled {
-                    NBNavigationLink(value: Route.agentHistory) {
-                        Label {
-                            Text("agent_history_title")
-                        } icon: {
-                            Image(fontAwesome: .robot)
-                        }
-                    }
+                    secondaryRouteButton("agent_history_title", icon: .robot, route: .agentHistory)
                 }
-                NBNavigationLink(value: Route.settings) {
-                    Label {
-                        Text("settings_title")
-                    } icon: {
-                        Image(fontAwesome: .gear)
-                    }
-                }
+                secondaryRouteButton("settings_title", icon: .gear, route: .settings)
             }
         }
+    }
+
+    private func secondaryRouteButton(
+        _ title: LocalizedStringKey,
+        icon: FontAwesomeIcon,
+        route: Route
+    ) -> some View {
+        Button {
+            onTabSelected(route)
+        } label: {
+            HStack(spacing: 8) {
+                Label {
+                    Text(title)
+                } icon: {
+                    Image(fontAwesome: icon)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
