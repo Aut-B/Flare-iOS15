@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -115,10 +116,18 @@ internal fun InAppNotificationComponent(
                             AnimatedVisibility(showText) {
                                 Row {
                                     Spacer(modifier = Modifier.width(12.dp))
-                                    Text(
-                                        stringResource(it.messageId, *it.args.toTypedArray()),
-                                        modifier = Modifier.weight(1f),
-                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            stringResource(it.messageId, *it.args.toTypedArray()),
+                                        )
+                                        it.detail?.let { detail ->
+                                            Text(
+                                                detail,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
                                     it.reloginTarget?.let { target ->
                                         Spacer(modifier = Modifier.width(8.dp))
                                         TextButton(

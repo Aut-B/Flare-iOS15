@@ -175,6 +175,13 @@
     <string name="misskey_visibility_home_description">只有此站台上的使用者可以看到此貼文</string>
     <string name="misskey_visibility_followers_description">只有追蹤者可以看到此貼文</string>
     <string name="misskey_visibility_specified_description">只有被提及的使用者可以看到此貼文</string>
+    <string name="status_visibility_private">僅自己可見</string>
+    <string name="status_visibility_private_description">只有你自己可以看到這則貼文</string>
+    <string name="status_visibility_mutual">互相關注</string>
+    <string name="status_visibility_mutual_description">只有互相關注的人可以看到這則貼文</string>
+    <string name="status_visibility_fans">僅粉絲可見</string>
+    <string name="status_visibility_fans_description">只有你的粉絲可以看到這則貼文</string>
+    <string name="status_ip_location">IP 屬地</string>
     <string name="bluesky_login_username_hint">使用者名稱</string>
     <string name="bluesky_login_password_hint">密碼</string>
     <string name="bluesky_login_auth_factor_token_hint">2FA 驗證碼</string>

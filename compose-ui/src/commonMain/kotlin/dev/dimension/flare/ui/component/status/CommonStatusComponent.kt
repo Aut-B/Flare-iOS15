@@ -280,19 +280,37 @@ public fun CommonStatusComponent(
                                     state = item.translationDisplayState,
                                 )
                             }
-                            if (appearanceSettings.showPlatformLogo) {
-                                FAIcon(
-                                    imageVector = item.platformIcon.toImageVector(),
-                                    contentDescription =
-                                        stringResource(
-                                            Res.string.status_platform,
-                                            item.platformId,
-                                        ),
-                                    modifier =
-                                        Modifier
-                                            .size(PlatformTheme.typography.caption.fontSize.value.dp),
-                                    tint = PlatformTheme.colorScheme.caption,
-                                )
+                            val ipLocation = item.ipLocation?.takeIf { it.isNotBlank() }
+                            if (appearanceSettings.showPlatformLogo || ipLocation != null) {
+                                // 平台图标在上、IP 属地在下的竖排（对应 iOS 右上角的位置）。
+                                // 只显示地名本身，不带「发布于」这类前缀；关闭图标开关时 IP 仍然显示。
+                                Column(
+                                    horizontalAlignment = Alignment.End,
+                                    verticalArrangement = Arrangement.spacedBy(1.dp),
+                                ) {
+                                    if (appearanceSettings.showPlatformLogo) {
+                                        FAIcon(
+                                            imageVector = item.platformIcon.toImageVector(),
+                                            contentDescription =
+                                                stringResource(
+                                                    Res.string.status_platform,
+                                                    item.platformId,
+                                                ),
+                                            modifier =
+                                                Modifier
+                                                    .size(PlatformTheme.typography.caption.fontSize.value.dp),
+                                            tint = PlatformTheme.colorScheme.caption,
+                                        )
+                                    }
+                                    if (ipLocation != null) {
+                                        PlatformText(
+                                            text = ipLocation,
+                                            style = PlatformTheme.typography.caption,
+                                            color = PlatformTheme.colorScheme.caption,
+                                            maxLines = 1,
+                                        )
+                                    }
+                                }
                             }
                             if (!isDetail) {
                                 DateTimeText(
