@@ -30,6 +30,7 @@ import dev.dimension.flare.common.toPagingState
 import dev.dimension.flare.data.database.app.AppDatabase
 import dev.dimension.flare.data.database.cache.CacheDatabase
 import dev.dimension.flare.data.database.cache.model.TranslationDisplayOptions
+import dev.dimension.flare.data.datasource.microblog.MixedRemoteMediator
 import dev.dimension.flare.data.datasource.microblog.offsetPagingConfig
 import dev.dimension.flare.data.datasource.microblog.paging.CacheableRemoteLoader
 import dev.dimension.flare.data.datasource.microblog.paging.HomeTimelineRefreshSessions
@@ -300,9 +301,10 @@ public open class TimelinePresenter : PresenterBase<TimelineState> {
                                     settingsRepository.appSettings.first().refreshHomeTimelineOnLaunch
                                 }
                         },
-                        // 首页下拉刷新不等网络：先结束指示器，取数在后台跑，写库后自动刷新列表。
-                        // 混合首页里最慢的平台（微博）就不会再拖住整次刷新。
-                        deferRefresh = isHomeTimeline,
+                        // 只有混合首页才需要「指示器先结束、取数后台跑」：混合首页要等所有平台，
+                        // 总耗时等于最慢的那个。单平台首页（X / 微博）本身够快，defer 反而
+                        // 让人觉得「刷新了但内容没出来」，所以单平台保持同步刷新。
+                        deferRefresh = isHomeTimeline && loader is MixedRemoteMediator,
                     )
                 }
             homeMediator.value = mediator

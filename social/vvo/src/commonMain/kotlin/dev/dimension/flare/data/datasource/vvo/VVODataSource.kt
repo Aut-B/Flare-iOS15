@@ -386,6 +386,9 @@ internal class VVODataSource(
         data: ComposeData,
         progress: () -> Unit,
     ) {
+        // 写操作不复用读路径缓存的 st：微博会把复用/过期的 st 当成异常请求，
+        // 返回「操作频繁」这类风控提示。发之前强制取一次新的 config。
+        service.invalidateConfigCache()
         val st = ensureLogin()
 
         val mediaIds =
@@ -397,9 +400,9 @@ internal class VVODataSource(
         val mediaId = mediaIds.joinToString(",")
         val referenceStatus = data.referenceStatus
         val composeStatus = referenceStatus?.composeStatus
-        // 公开（默认）不传 visible，保持与旧版本完全一致的请求；只有非公开才显式带上。
+        // 可见范围始终传合法值（0 公开 / 1 仅自己 / 6 互相关注 / 10 仅粉丝），
+        // 避免 null 被序列化成非法值后整条请求被判异常。
         val visible = data.visibility.toVvoVisible()
-        val picId = mediaId.takeIf { it.isNotEmpty() }
         try {
             if (composeStatus is ComposeStatus.VVOComment) {
                 service.replyComment(
@@ -421,17 +424,19 @@ internal class VVODataSource(
             } else if (composeStatus is ComposeStatus.Quote) {
                 service.repostStatus(
                     id = composeStatus.statusKey.id,
-                    // 纯转发（不写理由）时微博需要非空内容，与网页端「转发微博」一致。
-                    content = data.content.ifBlank { "转发微博" },
+                    // 纯转发保持空内容，由微博服务端生成「转发微博」。
+                    // 之前客户端塞固定文案「转发微博」，连续转发时内容完全一致，
+                    // 会被当成重复内容刷屏，是「操作频繁」的诱因之一。
+                    content = data.content,
                     st = st,
-                    picId = picId,
+                    picId = mediaId,
                     visible = visible,
                 ).requireSuccess("转发")
             } else {
                 service.updateStatus(
                     content = data.content,
                     st = st,
-                    picId = picId,
+                    picId = mediaId,
                     visible = visible,
                 ).requireSuccess("发布")
             }
@@ -617,18 +622,18 @@ internal class VVODataSource(
 /**
  * 微博「谁可以看」对应的 visible 值（与网页版 / App 一致）：
  * 0 公开、1 仅自己可见、6 互相关注（好友圈）、10 仅粉丝可见。
- * 公开时返回 null，请求里不带该字段。
+ * 始终返回合法值，不返回 null，避免表单里出现空值/非法值。
  */
-private fun UiTimelineV2.Post.Visibility.toVvoVisible(): String? =
+private fun UiTimelineV2.Post.Visibility.toVvoVisible(): String =
     when (this) {
-        UiTimelineV2.Post.Visibility.Public -> null
         UiTimelineV2.Post.Visibility.Private -> "1"
         UiTimelineV2.Post.Visibility.Mutual -> "6"
         UiTimelineV2.Post.Visibility.Followers -> "10"
-        // 微博没有对应语义，退回公开
+        // 公开，以及微博没有对应语义的取值，统一按公开处理
+        UiTimelineV2.Post.Visibility.Public,
         UiTimelineV2.Post.Visibility.Home,
         UiTimelineV2.Post.Visibility.Specified,
-        UiTimelineV2.Post.Visibility.Channel -> null
+        UiTimelineV2.Post.Visibility.Channel -> "0"
     }
 
 /**
