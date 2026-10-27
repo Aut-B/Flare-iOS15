@@ -993,7 +993,7 @@ public fun StatusVisibilityComponent(
         UiTimelineV2.Post.Visibility.Private -> {
             FAIcon(
                 imageVector = FontAwesomeIcons.Solid.EyeSlash,
-                contentDescription = stringResource(resource = Res.string.status_visibility_private),
+                contentDescription = stringResource(resource = Res.string.mastodon_visibility_private),
                 modifier = modifier,
                 tint = tint,
             )
@@ -1002,7 +1002,7 @@ public fun StatusVisibilityComponent(
         UiTimelineV2.Post.Visibility.Mutual -> {
             FAIcon(
                 imageVector = FontAwesomeIcons.Solid.UserPlus,
-                contentDescription = stringResource(resource = Res.string.status_visibility_mutual),
+                contentDescription = stringResource(resource = Res.string.mastodon_visibility_private),
                 modifier = modifier,
                 tint = tint,
             )
