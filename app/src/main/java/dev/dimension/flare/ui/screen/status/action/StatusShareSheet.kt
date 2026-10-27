@@ -355,7 +355,7 @@ internal fun StatusShareSheet(
                             Intent.createChooser(
                                 intent,
                                 @SuppressLint("LocalContextGetResourceValueCall")
-                                context.getString(R.string.media_menu_share_image),
+                                context.getString(R.string.status_share_screenshot),
                             ),
                         )
                         onBack()
@@ -364,10 +364,10 @@ internal fun StatusShareSheet(
             ) {
                 FAIcon(
                     FontAwesomeIcons.Solid.Image,
-                    contentDescription = stringResource(id = R.string.media_menu_save),
+                    contentDescription = stringResource(id = R.string.status_share_screenshot),
                 )
                 Spacer(modifier = Modifier.width(4.dp))
-                Text(text = stringResource(id = R.string.media_menu_share_image))
+                Text(text = stringResource(id = R.string.status_share_screenshot))
             }
 
             FilledTonalButton(
@@ -391,10 +391,10 @@ internal fun StatusShareSheet(
             ) {
                 FAIcon(
                     FontAwesomeIcons.Solid.Download,
-                    contentDescription = stringResource(id = R.string.media_menu_save),
+                    contentDescription = stringResource(id = R.string.status_share_save_screenshot),
                 )
                 Spacer(modifier = Modifier.width(4.dp))
-                Text(text = stringResource(id = R.string.media_menu_save))
+                Text(text = stringResource(id = R.string.status_share_save_screenshot))
             }
 
             if (fxShareUrl != null) {

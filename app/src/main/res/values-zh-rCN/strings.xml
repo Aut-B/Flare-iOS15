@@ -605,6 +605,8 @@
     <string name="status_share_sheet_preview_content">仅内容</string>
     <string name="status_share_crosspost">跨平台转发</string>
     <string name="status_share_crosspost_failed">无法准备跨平台转发</string>
+    <string name="status_share_screenshot">分享截图</string>
+    <string name="status_share_save_screenshot">保存截图</string>
     <string name="channel_title">频道</string>
     <string name="channel_item_follow">关注</string>
     <string name="channel_item_unfollow">取消关注</string>

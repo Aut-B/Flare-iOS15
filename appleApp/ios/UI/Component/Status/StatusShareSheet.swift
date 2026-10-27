@@ -62,6 +62,28 @@ struct StatusShareSheet: View {
                 .listRowBackground(Color.clear)
                 
                 Section {
+                    // 截图放在最前面：这是这个面板的主功能。
+                    if let image {
+                        BackportShareLink(item: image) {
+                            Label("share_screenshot", systemImage: "photo")
+                        }
+                    } else {
+                        // 渲染中保留占位，避免「分享截图」按钮突然消失、看起来像没有截图功能。
+                        HStack(spacing: 12) {
+                            Label("share_screenshot", systemImage: "photo")
+                            Spacer(minLength: 0)
+                            ProgressView()
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+
+                    Button {
+                        saveImage()
+                    } label: {
+                        Label("save_screenshot", systemImage: "arrow.down.circle")
+                    }
+                    .disabled(image == nil)
+
                     Button {
                         crossPost()
                     } label: {
@@ -78,19 +100,7 @@ struct StatusShareSheet: View {
                             Label("share_link", systemImage: "link")
                         }
                     }
-                    
-                    if let image {
-                        BackportShareLink(item: image) {
-                            Label("share_screenshot", systemImage: "photo")
-                        }
-                    }
 
-                    Button {
-                        saveImage()
-                    } label: {
-                        Label("save_screenshot", systemImage: "arrow.down.circle")
-                    }
-                    
                     if let fxShareUrl, let url = URL(string: fxShareUrl) {
                         BackportShareLink(item: url) {
                             Label("share_via_fxembed", systemImage: "link")
@@ -239,18 +249,44 @@ extension View {
     ) async -> UIImage? {
         let controller = UIHostingController(rootView: self.edgesIgnoringSafeArea(.top))
         controller.overrideUserInterfaceStyle = colorScheme == .dark ? .dark : .light
-        let view = controller.view
-        let targetSize = controller.view.intrinsicContentSize
-        view?.bounds = CGRect(origin: CGPoint(x: 0, y: 0), size: targetSize)
-        view?.backgroundColor = .systemGroupedBackground
+        guard let view = controller.view else { return nil }
+
+        // UIHostingController 的 intrinsicContentSize 有时会是 -1 或 0（内含
+        // UIViewRepresentable 时尤其常见），直接用会渲染出一张空图。
+        var targetSize = view.intrinsicContentSize
+        if targetSize.width < 1 || targetSize.height < 1 {
+            targetSize = controller.sizeThatFits(
+                in: CGSize(
+                    width: UIView.layoutFittingCompressedSize.width,
+                    height: UIView.layoutFittingCompressedSize.height
+                )
+            )
+        }
+        guard targetSize.width >= 1,
+              targetSize.height >= 1,
+              targetSize.width.isFinite,
+              targetSize.height.isFinite
+        else {
+            return nil
+        }
+
+        view.bounds = CGRect(origin: .zero, size: targetSize)
+        view.backgroundColor = .systemGroupedBackground
+        view.layoutIfNeeded()
         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        view.layoutIfNeeded()
+
+        // 超长微博降采样，避免 3x 渲染长图时爆内存。
+        var scale: CGFloat = 3
+        if targetSize.height * scale > 12_000 { scale = 2 }
+        if targetSize.height * scale > 12_000 { scale = 1 }
 
         let format = UIGraphicsImageRendererFormat()
-        format.scale = 3
+        format.scale = scale
         format.opaque = true
         let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
         return renderer.image { _ in
-            view?.drawHierarchy(in: controller.view.bounds, afterScreenUpdates: true)
+            view.drawHierarchy(in: view.bounds, afterScreenUpdates: true)
         }
     }
 }

@@ -712,6 +712,8 @@
     <string name="notification_error">錯誤</string>
     <string name="status_share_crosspost">跨平台轉發</string>
     <string name="status_share_crosspost_failed">無法準備跨平台轉發</string>
+    <string name="status_share_screenshot">分享截圖</string>
+    <string name="status_share_save_screenshot">儲存截圖</string>
     <string name="clear_search">清除搜尋</string>
     <string name="collapsed">已收合</string>
     <string name="compose_add_media">新增圖片或影片</string>

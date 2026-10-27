@@ -168,6 +168,20 @@ public struct StatusActionView: View {
                 Divider()
             } else {
                 Menu {
+                    // 「截图」入口：微博/各平台的「更多」菜单里直接进入截图分享面板。
+                    // macOS 的分享菜单本身已包含截图项，这里只补 iOS。
+                    #if !os(macOS)
+                    if let screenshotAction = screenshotSource(in: group) {
+                        Button {
+                            screenshotAction.onClicked(
+                                ClickContext(launcher: AppleUriLauncher(openUrl: openURL))
+                            )
+                        } label: {
+                            Label("share_screenshot", systemImage: "photo")
+                        }
+                        Divider()
+                    }
+                    #endif
                     ForEach(0..<group.actions.count, id: \.self) { index in
                         StatusActionView(
                             data: group.actions[index],
@@ -225,6 +239,17 @@ public struct StatusActionView: View {
         case .divider:
             Divider()
         }
+    }
+
+    /// 找到「更多」分组里的分享动作，复用它跳到截图分享面板。
+    private func screenshotSource(in group: ActionMenuGroup) -> ActionMenuItem? {
+        for action in group.actions {
+            if case .item(let item) = onEnum(of: action),
+               item.actionFamily == .share || item.actionFamily == .fxShare {
+                return item
+            }
+        }
+        return nil
     }
 }
 
