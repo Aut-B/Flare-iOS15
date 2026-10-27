@@ -73,8 +73,20 @@ final class ListErrorUIView: UIView {
             stack.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 16),
         ])
         button.addAction(UIAction { [weak self] _ in self?.handleButtonTap() }, for: .touchUpInside)
+        // 错误详情可长按复制，方便把真实报错发出来定位。
+        detailLabel.isUserInteractionEnabled = true
+        detailLabel.addGestureRecognizer(
+            UILongPressGestureRecognizer(target: self, action: #selector(copyDetail))
+        )
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    @objc private func copyDetail() {
+        guard let text = detailLabel.text, !text.isEmpty else { return }
+        UIPasteboard.general.string = text
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.success)
+    }
 
     enum Mode {
         case retry
@@ -88,13 +100,14 @@ final class ListErrorUIView: UIView {
         messageLabel.isHidden = true
 
         if let expired = error as? LoginExpiredException {
-            iconView.image = UIImage(systemName: "person.badge.shield.exclamationmark")
+            // person.badge.shield.exclamationmark 是 iOS 16 才有的符号，iOS 15 上会渲染成空白。
+            iconView.image = UIImage(systemName: "exclamationmark.shield")
             titleLabel.text = String(format: String(localized: "error_login_expired %@"), "\(expired.accountKey)")
             button.setTitle(String(localized: "error_login_expired_action"), for: .normal)
             actionURL = reloginURL(accountKey: expired.accountKey, platformId: expired.platformId)
             mode = .openLogin
         } else if let reloginError = error as? RequireReLoginException {
-            iconView.image = UIImage(systemName: "person.badge.shield.exclamationmark")
+            iconView.image = UIImage(systemName: "exclamationmark.shield")
             titleLabel.text = String(localized: "permission_denied_title")
             messageLabel.text = String(localized: "permission_denied_message")
             messageLabel.isHidden = false
@@ -102,15 +115,17 @@ final class ListErrorUIView: UIView {
             actionURL = reloginURL(accountKey: reloginError.accountKey, platformId: reloginError.platformId)
             mode = .openLogin
         } else {
-            iconView.image = UIImage(systemName: "exclamationmark.triangle.text.page")
+            // exclamationmark.triangle.text.page 是 iOS 17 才有的符号，换成 iOS 13 就有的。
+            iconView.image = UIImage(systemName: "exclamationmark.triangle")
             titleLabel.text = String(localized: "error")
             button.setTitle(String(localized: "action_retry"), for: .normal)
             actionURL = nil
             mode = .retry
-            if let message = error.message {
-                detailLabel.text = message
-                detailLabel.isHidden = false
-            }
+            let message = error.message ?? ""
+            detailLabel.text = message.isEmpty
+                ? String(describing: type(of: error))
+                : "\(message)\n\(String(describing: type(of: error)))"
+            detailLabel.isHidden = false
         }
     }
 
