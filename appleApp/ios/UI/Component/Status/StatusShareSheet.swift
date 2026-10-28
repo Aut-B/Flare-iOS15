@@ -278,20 +278,21 @@ struct StatusShareSheet: View {
     }
 
     private func renderImage(data: UiTimelineV2) async -> UIImage? {
-        // 先把要出现在图里的图片全部拉进 Kingfisher 缓存，
-        // 否则离屏渲染时图片还是占位色块。
+        // 先把要出现在图里的图片全部下载好，渲染时直接画 UIImage，
+        // 避免离屏渲染时异步加载来不及、截出一堆灰色占位块。
         let urls = Self.imageURLs(of: data) + selectedComments.flatMap(Self.imageURLs(of:))
-        await Self.preload(urls: urls)
+        let images = await ScreenshotImageLoader.load(urls: urls)
         return await ScreenshotPostView(
             item: data,
             comments: selectedComments,
             contentWidth: 390,
             showsCard: previewStyle == .card
         )
+        .environment(\.screenshotImages, images)
         .environment(\.colorScheme, theme ?? colorScheme)
         .snapshot(
             colorScheme: theme ?? colorScheme,
-            delay: 0.6
+            delay: 0.5
         )
     }
 

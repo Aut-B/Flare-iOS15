@@ -1,8 +1,58 @@
 import SwiftUI
 import UIKit
+import Kingfisher
 import KotlinSharedUI
 import FlareAppleCore
 import FlareAppleUI
+
+// MARK: - 预加载好的图片
+//
+// 离屏渲染时 KFImage 的异步加载不一定来得及，截出来就是灰色占位块。
+// 这里先把所有图片下载好塞进环境，渲染时直接用 UIImage 画，绝不会出现灰块。
+
+private struct ScreenshotImageStoreKey: EnvironmentKey {
+    static let defaultValue: [String: UIImage] = [:]
+}
+
+extension EnvironmentValues {
+    var screenshotImages: [String: UIImage] {
+        get { self[ScreenshotImageStoreKey.self] }
+        set { self[ScreenshotImageStoreKey.self] = newValue }
+    }
+}
+
+enum ScreenshotImageLoader {
+    static func load(urls: [URL]) async -> [String: UIImage] {
+        let unique = Array(Set(urls))
+        guard !unique.isEmpty else { return [:] }
+        return await withTaskGroup(of: (String, UIImage?).self) { group in
+            for url in unique {
+                group.addTask {
+                    await withCheckedContinuation { (continuation: CheckedContinuation<(String, UIImage?), Never>) in
+                        KingfisherManager.shared.retrieveImage(
+                            with: url,
+                            options: [.backgroundDecode]
+                        ) { result in
+                            switch result {
+                            case .success(let value):
+                                continuation.resume(returning: (url.absoluteString, value.image))
+                            case .failure:
+                                continuation.resume(returning: (url.absoluteString, nil))
+                            }
+                        }
+                    }
+                }
+            }
+            var images: [String: UIImage] = [:]
+            for await (key, image) in group {
+                if let image {
+                    images[key] = image
+                }
+            }
+            return images
+        }
+    }
+}
 
 /// 长截图版式：把「贴文正文 + 全部配图（整张显示，不裁剪）+ 引用的微博 + 选中的评论」
 /// 合成到一张竖图里，效果类似 VVebo 的微博截图。
@@ -92,8 +142,11 @@ private struct ScreenshotPostHeader: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
-            AvatarView(data: post.user?.avatar?.url, customHeader: post.user?.avatar?.customHeaders)
-                .frame(width: avatarSize, height: avatarSize)
+            ScreenshotAvatar(
+                url: post.user?.avatar?.url,
+                customHeaders: post.user?.avatar?.customHeaders,
+                size: avatarSize
+            )
             VStack(alignment: .leading, spacing: 2) {
                 Text(post.user?.name.innerText ?? "")
                     .font(.system(size: compact ? 13 : 15, weight: .semibold))
@@ -121,8 +174,32 @@ private struct ScreenshotPostHeader: View {
 
 // MARK: - 配图（整张显示，不裁剪）
 
+private struct ScreenshotAvatar: View {
+    let url: String?
+    let customHeaders: [String: String]?
+    let size: CGFloat
+
+    @Environment(\.screenshotImages) private var images
+
+    var body: some View {
+        Group {
+            if let url, let image = images[url] {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                AvatarView(data: url, customHeader: customHeaders)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+    }
+}
+
 private struct ScreenshotMediaStack: View {
     let images: [any UiMedia]
+
+    @Environment(\.screenshotImages) private var loadedImages
 
     var body: some View {
         if !images.isEmpty {
@@ -139,35 +216,39 @@ private struct ScreenshotMediaStack: View {
         switch onEnum(of: media) {
         case .image(let image):
             let source = image.url.isEmpty ? image.previewUrl : image.url
-            NetworkImage(data: source, customHeader: image.customHeaders, contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .aspectRatio(Self.ratio(image.aspectRatio), contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            mediaImage(source: source, customHeaders: image.customHeaders, ratio: image.aspectRatio)
         case .gif(let gif):
             let source = gif.url.isEmpty ? gif.previewUrl : gif.url
-            NetworkImage(data: source, customHeader: gif.customHeaders, contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .aspectRatio(Self.ratio(gif.aspectRatio), contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            mediaImage(source: source, customHeaders: gif.customHeaders, ratio: gif.aspectRatio)
         case .video(let video):
             ZStack {
-                NetworkImage(data: video.thumbnailUrl, customHeader: video.customHeaders, contentMode: .fit)
-                    .frame(maxWidth: .infinity)
-                    .aspectRatio(Self.ratio(video.aspectRatio), contentMode: .fit)
+                mediaImage(source: video.thumbnailUrl, customHeaders: video.customHeaders, ratio: video.aspectRatio)
                 Image(fontAwesome: .circlePlay)
                     .font(.system(size: 40))
                     .foregroundStyle(.white.opacity(0.9))
                     .shadow(radius: 4)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         case .ugoira(let ugoira):
-            NetworkImage(data: ugoira.previewUrl, customHeader: ugoira.customHeaders, contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .aspectRatio(Self.ratio(ugoira.aspectRatio), contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            mediaImage(source: ugoira.previewUrl, customHeaders: ugoira.customHeaders, ratio: ugoira.aspectRatio)
         default:
             EmptyView()
         }
+    }
+
+    @ViewBuilder
+    private func mediaImage(source: String, customHeaders: [String: String]?, ratio: Float) -> some View {
+        Group {
+            if let image = loadedImages[source] {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                NetworkImage(data: source, customHeader: customHeaders, contentMode: .fit)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .aspectRatio(Self.ratio(ratio), contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     /// 微博给的尺寸偶尔是 0，兜一个 1:1，避免除零把高度算成无穷大。
@@ -207,8 +288,11 @@ private struct ScreenshotCommentRow: View {
     var body: some View {
         if let post = StatusShareSheet.postOf(data) {
             HStack(alignment: .top, spacing: 8) {
-                AvatarView(data: post.user?.avatar?.url, customHeader: post.user?.avatar?.customHeaders)
-                    .frame(width: 22, height: 22)
+                ScreenshotAvatar(
+                    url: post.user?.avatar?.url,
+                    customHeaders: post.user?.avatar?.customHeaders,
+                    size: 22
+                )
                 VStack(alignment: .leading, spacing: 3) {
                     Text(post.user?.name.innerText ?? "")
                         .font(.system(size: 12, weight: .semibold))
