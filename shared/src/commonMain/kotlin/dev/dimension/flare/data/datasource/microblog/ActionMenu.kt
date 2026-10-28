@@ -34,6 +34,7 @@ public enum class PostActionFamily {
     Report,
     MuteUser,
     BlockUser,
+    Screenshot,
 }
 
 public enum class PostActionPlacement {
@@ -55,6 +56,8 @@ public data class PostActionLayoutConfig(
             persistentListOf(
                 PostActionFamily.Reply,
                 PostActionFamily.Comment,
+                // 截图默认跟在「评论」后面，用户可在设置里调顺序 / 移到更多菜单。
+                PostActionFamily.Screenshot,
                 PostActionFamily.Repost,
                 PostActionFamily.Like,
                 PostActionFamily.React,
@@ -185,6 +188,10 @@ public sealed class ActionMenu {
 public fun ImmutableList<ActionMenu>.applyPostActionLayout(config: PostActionLayoutConfig): ImmutableList<ActionMenu> {
     if (!config.enabled) return this
 
+    // 老版本存下来的布局配置里没有「截图」，默认插到「评论」后面，
+    // 免得升级后它被当成新动作丢进更多菜单。
+    val config = config.withScreenshotDefault()
+
     var nextIndex = 0
     val entries = mutableListOf<PostActionEntry>()
 
@@ -267,6 +274,7 @@ public object PostActionLayoutHelpers {
         listOf(
             PostActionFamily.Reply,
             PostActionFamily.Comment,
+            PostActionFamily.Screenshot,
             PostActionFamily.Repost,
             PostActionFamily.Like,
             PostActionFamily.React,
@@ -281,14 +289,15 @@ public object PostActionLayoutHelpers {
         )
 
     public fun normalizedForEdit(config: PostActionLayoutConfig): PostActionLayoutConfig {
-        val primary = config.primary.cleanFamilies()
-        val hidden = config.hidden.cleanFamilies().filterNot { it in primary }
+        val migrated = config.withScreenshotDefault()
+        val primary = migrated.primary.cleanFamilies()
+        val hidden = migrated.hidden.cleanFamilies().filterNot { it in primary }
         val overflow =
             (
-                config.overflow.cleanFamilies().filterNot { it in primary || it in hidden } +
-                    allEditableFamilies.filterNot { it in primary || it in hidden || it in config.overflow }
+                migrated.overflow.cleanFamilies().filterNot { it in primary || it in hidden } +
+                    allEditableFamilies.filterNot { it in primary || it in hidden || it in migrated.overflow }
             ).distinct()
-        return config.copy(
+        return migrated.copy(
             primary = primary.toPersistentList(),
             overflow = overflow.toPersistentList(),
             hidden = hidden.toPersistentList(),
@@ -450,6 +459,28 @@ private data class PostActionEntry(
     val action: ActionMenu,
     val family: PostActionFamily?,
 )
+
+/**
+ * 「截图」是后加的动作，老配置里没有它。
+ * 三个位置都没有它时，默认放到「评论」后面（按钮行），用户仍可自行移走。
+ */
+private fun PostActionLayoutConfig.withScreenshotDefault(): PostActionLayoutConfig {
+    if (PostActionFamily.Screenshot in primary ||
+        PostActionFamily.Screenshot in overflow ||
+        PostActionFamily.Screenshot in hidden
+    ) {
+        return this
+    }
+    val commentIndex = primary.indexOf(PostActionFamily.Comment)
+    val insertAt = if (commentIndex >= 0) commentIndex + 1 else primary.size
+    return copy(
+        primary =
+            primary
+                .toMutableList()
+                .apply { add(insertAt, PostActionFamily.Screenshot) }
+                .toPersistentList(),
+    )
+}
 
 private fun Iterable<PostActionFamily>.cleanFamilies(): List<PostActionFamily> =
     filter { it in PostActionLayoutHelpers.allEditableFamilies }.distinct()

@@ -197,6 +197,7 @@ private extension PostActionFamily {
         case .report: return String(localized: "bluesky_report")
         case .muteUser: return String(localized: "Mute user")
         case .blockUser: return String(localized: "Block user")
+        case .screenshot: return String(localized: "screenshot_action")
         }
     }
 
@@ -217,6 +218,7 @@ private extension PostActionFamily {
         case .report: return .circleInfo
         case .muteUser: return .volumeXmark
         case .blockUser: return .userSlash
+        case .screenshot: return .image
         }
     }
 }

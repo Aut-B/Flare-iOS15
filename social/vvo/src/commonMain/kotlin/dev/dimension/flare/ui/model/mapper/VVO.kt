@@ -241,6 +241,21 @@ private fun Status.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
                             ),
                         actionFamily = PostActionFamily.Comment,
                     ),
+                    // 截图：直接把「贴文 + 配图 + 引用微博」合成一张长图的面板。
+                    // 点击复用分享面板的路由，iOS/Android 都能落到各自的截图界面。
+                    ActionMenu.Item(
+                        icon = UiIcon.Screenshot,
+                        text = ActionMenu.Item.Text.Raw("截图"),
+                        clickEvent =
+                            ClickEvent.Deeplink(
+                                DeeplinkRoute.Status.ShareSheet(
+                                    statusKey = statusKey,
+                                    accountType = AccountType.Specific(accountKey),
+                                    shareUrl = url,
+                                ),
+                            ),
+                        actionFamily = PostActionFamily.Screenshot,
+                    ),
                     ActionMenu.vvoLike(
                         statusKey = statusKey,
                         liked = liked == true,

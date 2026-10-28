@@ -362,6 +362,8 @@ public extension UiIcon {
             .check
         case .translate:
             .language
+        case .screenshot:
+            .image
         }
     }
 }

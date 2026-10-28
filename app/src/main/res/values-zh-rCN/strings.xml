@@ -296,6 +296,7 @@
     <string name="settings_post_action_family_report">举报</string>
     <string name="settings_post_action_family_mute_user">静音用户</string>
     <string name="settings_post_action_family_block_user">屏蔽用户</string>
+    <string name="settings_post_action_family_screenshot">截图</string>
     <string name="settings_appearance_show_media">显示媒体</string>
     <string name="settings_appearance_show_media_description">在动态中显示媒体附件</string>
     <string name="settings_appearance_show_numbers">显示计数</string>

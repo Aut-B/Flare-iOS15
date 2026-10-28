@@ -18,6 +18,7 @@ import compose.icons.fontawesomeicons.regular.Star
 import compose.icons.fontawesomeicons.solid.At
 import compose.icons.fontawesomeicons.solid.Bell
 import compose.icons.fontawesomeicons.solid.Bookmark
+import compose.icons.fontawesomeicons.solid.Camera
 import compose.icons.fontawesomeicons.solid.Check
 import compose.icons.fontawesomeicons.solid.CircleInfo
 import compose.icons.fontawesomeicons.solid.CircleUser
@@ -110,4 +111,5 @@ public fun UiIcon.toImageVector(): ImageVector =
         UiIcon.X -> FontAwesomeIcons.Brands.XTwitter
         UiIcon.Weibo -> FontAwesomeIcons.Brands.Weibo
         UiIcon.Translate -> FontAwesomeIcons.Solid.Language
+        UiIcon.Screenshot -> FontAwesomeIcons.Solid.Camera
     }

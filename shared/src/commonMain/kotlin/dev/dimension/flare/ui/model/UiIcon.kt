@@ -66,6 +66,8 @@ public enum class UiIcon {
     Pixiv,
     Fanbox,
     Eye,
+    // 截图（长截图）动作，追加在末尾，避免影响已有枚举序。
+    Screenshot,
 }
 
 /**

@@ -471,6 +471,7 @@ private val PostActionFamily.icon: UiIcon
             PostActionFamily.Report -> UiIcon.Report
             PostActionFamily.MuteUser -> UiIcon.Mute
             PostActionFamily.BlockUser -> UiIcon.Block
+            PostActionFamily.Screenshot -> UiIcon.Screenshot
         }
 
 private val PostActionFamily.label: StringResource
@@ -491,4 +492,6 @@ private val PostActionFamily.label: StringResource
             PostActionFamily.Report -> Res.string.settings_post_action_family_report
             PostActionFamily.MuteUser -> Res.string.settings_post_action_family_mute_user
             PostActionFamily.BlockUser -> Res.string.settings_post_action_family_block_user
+            // 桌面端暂未单独做「截图」文案，复用分享的条目名，等桌面端支持截图再补。
+            PostActionFamily.Screenshot -> Res.string.settings_post_action_family_share
         }

@@ -154908,6 +154908,28 @@
         }
       }
     },
+    "screenshot_action" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Screenshot"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "\u622a\u56fe"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "\u622a\u5716"
+          }
+        }
+      }
+    },
     "screenshot_comments_pick" : {
       "extractionState" : "manual",
       "localizations" : {

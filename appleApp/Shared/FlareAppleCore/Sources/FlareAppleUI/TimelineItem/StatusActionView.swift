@@ -169,20 +169,6 @@ public struct StatusActionView: View {
             } else {
                 Menu {
                     ForEach(0..<group.actions.count, id: \.self) { index in
-                        // 「截图」入口：紧挨着「分享」出现，点一下直接进截图面板。
-                        // macOS 的分享菜单本身已含截图项，这里只补 iOS。
-                        #if !os(macOS)
-                        if case .item(let item) = onEnum(of: group.actions[index]),
-                           item.actionFamily == .share || item.actionFamily == .fxShare {
-                            Button {
-                                item.onClicked(
-                                    ClickContext(launcher: AppleUriLauncher(openUrl: openURL))
-                                )
-                            } label: {
-                                Label("share_screenshot", systemImage: "photo")
-                            }
-                        }
-                        #endif
                         StatusActionView(
                             data: group.actions[index],
                             useText: true,

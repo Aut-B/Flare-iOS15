@@ -148,6 +148,8 @@ public extension PostActionFamily {
             "Mute user"
         case .blockUser:
             "Block user"
+        case .screenshot:
+            "screenshot_action"
         }
     }
 
@@ -183,6 +185,8 @@ public extension PostActionFamily {
             .volumeXmark
         case .blockUser:
             .userSlash
+        case .screenshot:
+            .image
         }
     }
 }

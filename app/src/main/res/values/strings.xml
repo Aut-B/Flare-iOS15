@@ -383,6 +383,7 @@
     <string name="settings_post_action_family_report">Report</string>
     <string name="settings_post_action_family_mute_user">Mute user</string>
     <string name="settings_post_action_family_block_user">Block user</string>
+    <string name="settings_post_action_family_screenshot">Screenshot</string>
     <string name="settings_appearance_show_cw_img">Show sensitive content</string>
     <string name="settings_appearance_show_cw_img_description">Always reveal sensitive media in posts</string>
     <string name="settings_appearance_expand_content_warning">Show content behind content warnings</string>

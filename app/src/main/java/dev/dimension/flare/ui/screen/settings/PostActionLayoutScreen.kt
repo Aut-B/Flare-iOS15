@@ -616,6 +616,7 @@ private val PostActionFamily.icon: UiIcon
             PostActionFamily.Report -> UiIcon.Report
             PostActionFamily.MuteUser -> UiIcon.Mute
             PostActionFamily.BlockUser -> UiIcon.Block
+            PostActionFamily.Screenshot -> UiIcon.Screenshot
         }
 
 private val PostActionFamily.labelRes: Int
@@ -636,4 +637,5 @@ private val PostActionFamily.labelRes: Int
             PostActionFamily.Report -> R.string.settings_post_action_family_report
             PostActionFamily.MuteUser -> R.string.settings_post_action_family_mute_user
             PostActionFamily.BlockUser -> R.string.settings_post_action_family_block_user
+            PostActionFamily.Screenshot -> R.string.settings_post_action_family_screenshot
         }

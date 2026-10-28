@@ -21,7 +21,6 @@ struct StatusShareSheet: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.timelineAppearance) private var timelineAppearance
     @StateObject private var presenter: KotlinPresenter<StatusState>
     @StateObject private var commentsPresenter: KotlinPresenter<ScreenshotCommentsState>
     @State private var theme: ColorScheme? = nil
@@ -29,6 +28,7 @@ struct StatusShareSheet: View {
     @State private var image: UIImage? = nil
     @State private var selectedComments: [UiTimelineV2] = []
     @State private var showCommentPicker = false
+    @State private var showPreview = false
 
     init(
         statusKey: MicroBlogKey,
@@ -64,20 +64,10 @@ struct StatusShareSheet: View {
     var body: some View {
         List {
             StateView(state: presenter.state.status) { data in
-                ViewBox {
-                    ZStack {
-                        previewView(data: data)
-                            .padding()
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                            }
-                    }
-                }
-                .frame(minHeight: 200, maxHeight: 360)
-                .listRowSeparator(.hidden)
-                .listRowInsets(.init(top: 0, leading: 0, bottom: 0, trailing: 0))
-                .listRowBackground(Color.clear)
+                previewSection
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(.init(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .listRowBackground(Color.clear)
 
                 Section {
                     // 截图放在最前面：这是这个面板的主功能。
@@ -217,6 +207,17 @@ struct StatusShareSheet: View {
                 selected: $selectedComments
             )
         }
+        .sheet(isPresented: $showPreview) {
+            ScrollView {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            .background(Color(.systemBackground))
+        }
         .onSuccessOf(of: presenter.state.status) { data in
             render(data: data)
         }
@@ -244,42 +245,53 @@ struct StatusShareSheet: View {
         }
     }
 
+    /// 已经渲染好的长图预览。点一下可以放大看细节，确认没问题再保存/分享。
     @ViewBuilder
-    private func previewView(data: UiTimelineV2) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            TimelineView(data: data, detailStatusKey: statusKey, showTranslate: false)
-            if !selectedComments.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(0..<selectedComments.count, id: \.self) { index in
-                        ScreenshotCommentRow(data: selectedComments[index])
+    private var previewSection: some View {
+        if let image {
+            VStack(spacing: 8) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxHeight: 340)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.flareSeparator, lineWidth: 0.5)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        showPreview = true
                     }
-                }
-                .padding(.top, 4)
             }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+        } else {
+            VStack(spacing: 10) {
+                ProgressView()
+                Text("share_screenshot_rendering")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 180)
         }
-        .frame(width: 360)
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .if(previewStyle == .card) { view in
-            view
-                .clipShape(.rect(cornerRadius: 16))
-                .contentShape(RoundedRectangle(cornerRadius: 16))
-                .shadow(radius: 8)
-                .padding(64)
-        }
-        .background(Color(.systemGroupedBackground))
-        .environment(\.colorScheme, theme ?? colorScheme)
-        .environment(\.timelineAppearance, timelineAppearance.withSharePreviewDefaults())
     }
 
     private func renderImage(data: UiTimelineV2) async -> UIImage? {
         // 先把要出现在图里的图片全部拉进 Kingfisher 缓存，
-        // 否则 UIHostingController 刚布局完就去截图，图片还是占位色块。
+        // 否则离屏渲染时图片还是占位色块。
         let urls = Self.imageURLs(of: data) + selectedComments.flatMap(Self.imageURLs(of:))
         await Self.preload(urls: urls)
-        return await previewView(data: data).snapshot(
+        return await ScreenshotPostView(
+            item: data,
+            comments: selectedComments,
+            contentWidth: 390,
+            showsCard: previewStyle == .card
+        )
+        .environment(\.colorScheme, theme ?? colorScheme)
+        .snapshot(
             colorScheme: theme ?? colorScheme,
-            delay: 0.45
+            delay: 0.6
         )
     }
 
@@ -325,20 +337,40 @@ extension StatusShareSheet {
     }
 
     static func imageURLs(of item: UiTimelineV2) -> [URL] {
-        guard let post = postOf(item) else { return [] }
         var urls: [URL] = []
-        if let avatar = post.user?.avatar?.url, let url = URL(string: avatar) {
+
+        func append(_ value: String?) {
+            guard let value, let url = URL(string: value) else { return }
             urls.append(url)
         }
-        for media in post.images {
-            switch onEnum(of: media) {
-            case .image(let image):
-                if let url = URL(string: image.previewUrl) { urls.append(url) }
-                if let url = URL(string: image.url) { urls.append(url) }
-            case .gif(let gif):
-                if let url = URL(string: gif.url) { urls.append(url) }
-            default:
-                break
+
+        func walk(_ post: UiTimelineV2.Post) {
+            append(post.user?.avatar?.url)
+            for media in post.images {
+                switch onEnum(of: media) {
+                case .image(let image):
+                    append(image.previewUrl)
+                    append(image.url)
+                case .gif(let gif):
+                    append(gif.previewUrl)
+                    append(gif.url)
+                case .video(let video):
+                    append(video.thumbnailUrl)
+                case .ugoira(let ugoira):
+                    append(ugoira.previewUrl)
+                default:
+                    break
+                }
+            }
+        }
+
+        if let post = postOf(item) {
+            walk(post)
+        }
+        // 长截图里会把转发的原微博一起画出来，它的头像和配图也要预载。
+        if case .timelinePostItem(let wrapped) = onEnum(of: item) {
+            for quote in wrapped.presentation.quotes {
+                walk(quote)
             }
         }
         return urls
@@ -359,30 +391,6 @@ extension StatusShareSheet {
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-// MARK: - 评论行（截图里用）
-
-private struct ScreenshotCommentRow: View {
-    let data: UiTimelineV2
-
-    var body: some View {
-        if let post = StatusShareSheet.postOf(data) {
-            HStack(alignment: .top, spacing: 8) {
-                NetworkImage(data: post.user?.avatar?.url, contentMode: .fill)
-                    .frame(width: 18, height: 18)
-                    .clipShape(Circle())
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(post.user?.name.innerText ?? "")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    RichText(text: post.content.original)
-                        .font(.system(size: 12))
-                }
-                Spacer(minLength: 0)
             }
         }
     }
@@ -491,34 +499,6 @@ private struct ScreenshotCommentPickerView: View {
     }
 }
 
-private extension TimelineAppearance {
-    func withSharePreviewDefaults() -> TimelineAppearance {
-        doCopy(
-            avatarShape: avatarShape,
-            showMedia: showMedia,
-            showSensitiveContent: showSensitiveContent,
-            expandContentWarning: true,
-            expandMediaSize: expandMediaSize,
-            mediaLayout: mediaLayout,
-            limitMediaGridToNine: limitMediaGridToNine,
-            videoAutoplay: .never,
-            showLinkPreview: showLinkPreview,
-            compatLinkPreview: compatLinkPreview,
-            showEmojiReactions: showEmojiReactions,
-            showNumbers: showNumbers,
-            postActionStyle: postActionStyle,
-            postActionLayout: postActionLayout,
-            postActionFixedWidth: postActionFixedWidth,
-            fullWidthPost: fullWidthPost,
-            absoluteTimestamp: absoluteTimestamp,
-            showPlatformLogo: showPlatformLogo,
-            timelineDisplayMode: timelineDisplayMode,
-            aiConfig: aiConfig,
-            lineLimit: lineLimit,
-            showTranslateButton: showTranslateButton
-        )
-    }
-}
 
 extension View {
     @MainActor

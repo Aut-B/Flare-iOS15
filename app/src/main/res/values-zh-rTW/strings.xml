@@ -252,6 +252,7 @@
     <string name="settings_post_action_family_report">檢舉</string>
     <string name="settings_post_action_family_mute_user">靜音使用者</string>
     <string name="settings_post_action_family_block_user">封鎖使用者</string>
+    <string name="settings_post_action_family_screenshot">截圖</string>
     <string name="settings_appearance_show_media">顯示媒體</string>
     <string name="settings_appearance_show_media_description">在貼文中顯示媒體附件</string>
     <string name="settings_appearance_show_numbers">顯示數字</string>
