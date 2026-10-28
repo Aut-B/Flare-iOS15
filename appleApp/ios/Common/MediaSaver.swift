@@ -245,11 +245,12 @@ class MediaSaver: NSObject, UIDocumentPickerDelegate {
     ) {
         guard showsSaveResult else { return }
         let allSaved = total > 0 && saved >= total
-        let base = saved > 0
-            ? MediaSaveType.photoAlbum.title(success: true)
-            : MediaSaveType.image.title(success: false)
-        let title = total > 1 ? "\(base) (\(saved)/\(total))" : base
         DispatchQueue.main.async {
+            // MediaSaveType.title 是 MainActor 隔离的，只能在主线程闭包里取。
+            let base = saved > 0
+                ? MediaSaveType.photoAlbum.title(success: true)
+                : MediaSaveType.image.title(success: false)
+            let title = total > 1 ? "\(base) (\(saved)/\(total))" : base
             Drops.show(
                 .init(
                     title: title,
