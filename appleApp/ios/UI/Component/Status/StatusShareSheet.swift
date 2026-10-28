@@ -3,6 +3,7 @@ import KotlinSharedUI
 import UniformTypeIdentifiers
 import FlareAppleCore
 import FlareAppleUI
+import Kingfisher
 
 private enum SharePreviewStyle: Hashable {
     case card
@@ -16,16 +17,18 @@ struct StatusShareSheet: View {
     let fxShareUrl: String?
     let fixvxShareUrl: String?
     let onCrossPost: (ComposePrefill) -> Void
-    
+
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @Environment(\.timelineAppearance) private var timelineAppearance
     @StateObject private var presenter: KotlinPresenter<StatusState>
-    @State private var renderScale: CGFloat = 2.0
+    @StateObject private var commentsPresenter: KotlinPresenter<ScreenshotCommentsState>
     @State private var theme: ColorScheme? = nil
     @State private var previewStyle: SharePreviewStyle = .card
     @State private var image: UIImage? = nil
-    
+    @State private var selectedComments: [UiTimelineV2] = []
+    @State private var showCommentPicker = false
+
     init(
         statusKey: MicroBlogKey,
         accountType: AccountType,
@@ -41,8 +44,22 @@ struct StatusShareSheet: View {
         self.fixvxShareUrl = fixvxShareUrl
         self.onCrossPost = onCrossPost
         self._presenter = .init(wrappedValue: .init(presenter: StatusPresenter(accountType: accountType, statusKey: statusKey)))
+        self._commentsPresenter = .init(
+            wrappedValue: .init(
+                presenter: ScreenshotCommentsPresenter(accountType: accountType, statusKey: statusKey)
+            )
+        )
     }
-    
+
+    /// 选中评论的指纹，用来触发重新渲染。
+    private var selectionSignature: String {
+        selectedComments.map { "\($0.statusKey.id)|\($0.statusKey.host)" }.joined(separator: ",")
+    }
+
+    private var availableCommentCount: Int {
+        commentsPresenter.state.comments.count
+    }
+
     var body: some View {
         List {
             StateView(state: presenter.state.status) { data in
@@ -60,7 +77,7 @@ struct StatusShareSheet: View {
                 .listRowSeparator(.hidden)
                 .listRowInsets(.init(top: 0, leading: 0, bottom: 0, trailing: 0))
                 .listRowBackground(Color.clear)
-                
+
                 Section {
                     // 截图放在最前面：这是这个面板的主功能。
                     if let image {
@@ -85,6 +102,36 @@ struct StatusShareSheet: View {
                     .disabled(image == nil)
 
                     Button {
+                        showCommentPicker = true
+                    } label: {
+                        HStack(spacing: 12) {
+                            Label {
+                                Text("screenshot_comments_pick")
+                            } icon: {
+                                Image(systemName: "text.bubble")
+                            }
+                            Spacer(minLength: 0)
+                            Group {
+                                if commentsPresenter.state.isLoading {
+                                    ProgressView()
+                                } else if selectedComments.isEmpty {
+                                    Text("screenshot_comments_none")
+                                } else {
+                                    Text(String(format: String(localized: "screenshot_comments_selected"), selectedComments.count))
+                                }
+                            }
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            Image(systemName: "chevron.right")
+                                .font(.footnote)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(commentsPresenter.state.isLoading || availableCommentCount == 0)
+
+                    Button {
                         crossPost()
                     } label: {
                         Label {
@@ -106,14 +153,14 @@ struct StatusShareSheet: View {
                             Label("share_via_fxembed", systemImage: "link")
                         }
                     }
-                    
+
                     if let fixvxShareUrl, let url = URL(string: fixvxShareUrl) {
                         BackportShareLink(item: url) {
                             Label("share_via_fixvx", systemImage: "link")
                         }
                     }
                 }
-                
+
                 Picker("appearance_theme", selection: $theme) {
                     Text("appearance_theme_system").tag(nil as ColorScheme?)
                     Text("appearance_theme_light").tag(Optional(ColorScheme.light))
@@ -144,55 +191,79 @@ struct StatusShareSheet: View {
             }
         }
         .navigationTitle("fx_share")
+        .sheet(isPresented: $showCommentPicker) {
+            ScreenshotCommentPickerView(
+                accountType: accountType,
+                statusKey: statusKey,
+                selected: $selectedComments
+            )
+        }
         .onSuccessOf(of: presenter.state.status) { data in
-            image = nil
-            Task {
-                image = await renderImage(data: data)
+            render(data: data)
+        }
+        .backportOnChange(of: theme) { _, _ in
+            if case .success(let data) = onEnum(of: presenter.state.status) {
+                render(data: data.data)
             }
         }
-        .backportOnChange(of: theme) { oldValue, newValue in
+        .backportOnChange(of: previewStyle) { _, _ in
             if case .success(let data) = onEnum(of: presenter.state.status) {
-                image = nil
-                Task {
-                    image = await renderImage(data: data.data)
-                }
+                render(data: data.data)
             }
         }
-        .backportOnChange(of: previewStyle) { oldValue, newValue in
+        .backportOnChange(of: selectionSignature) { _, _ in
             if case .success(let data) = onEnum(of: presenter.state.status) {
-                image = nil
-                Task {
-                    image = await renderImage(data: data.data)
-                }
+                render(data: data.data)
             }
         }
     }
-    
+
+    private func render(data: UiTimelineV2) {
+        image = nil
+        Task {
+            image = await renderImage(data: data)
+        }
+    }
+
     @ViewBuilder
     private func previewView(data: UiTimelineV2) -> some View {
-        TimelineView(data: data, detailStatusKey: statusKey, showTranslate: false)
-            .frame(width: 360)
-            .padding()
-            .background(Color(.secondarySystemGroupedBackground))
-            .if(previewStyle == .card) { view in
-                view
-                    .clipShape(.rect(cornerRadius: 16))
-                    .contentShape(RoundedRectangle(cornerRadius: 16))
-                    .shadow(radius: 8)
-                    .padding(64)
+        VStack(alignment: .leading, spacing: 12) {
+            TimelineView(data: data, detailStatusKey: statusKey, showTranslate: false)
+            if !selectedComments.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(0..<selectedComments.count, id: \.self) { index in
+                        ScreenshotCommentRow(data: selectedComments[index])
+                    }
+                }
+                .padding(.top, 4)
             }
-            .background(Color(.systemGroupedBackground))
-            .environment(\.colorScheme, theme ?? colorScheme)
-            .environment(\.timelineAppearance, timelineAppearance.withSharePreviewDefaults())
+        }
+        .frame(width: 360)
+        .padding()
+        .background(Color(.secondarySystemGroupedBackground))
+        .if(previewStyle == .card) { view in
+            view
+                .clipShape(.rect(cornerRadius: 16))
+                .contentShape(RoundedRectangle(cornerRadius: 16))
+                .shadow(radius: 8)
+                .padding(64)
+        }
+        .background(Color(.systemGroupedBackground))
+        .environment(\.colorScheme, theme ?? colorScheme)
+        .environment(\.timelineAppearance, timelineAppearance.withSharePreviewDefaults())
     }
-    
-    
+
     private func renderImage(data: UiTimelineV2) async -> UIImage? {
+        // 先把要出现在图里的图片全部拉进 Kingfisher 缓存，
+        // 否则 UIHostingController 刚布局完就去截图，图片还是占位色块。
+        let urls = Self.imageURLs(of: data) + selectedComments.flatMap(Self.imageURLs(of:))
+        await Self.preload(urls: urls)
         return await previewView(data: data).snapshot(
-            colorScheme: theme ?? colorScheme
+            colorScheme: theme ?? colorScheme,
+            delay: 0.45
         )
     }
-    
+
     private func saveImage() {
         guard let image = image else { return }
         MediaSaver.shared.saveImage(image)
@@ -209,6 +280,187 @@ struct StatusShareSheet: View {
                 fileName: "flare-crosspost.png"
             )
         )
+    }
+}
+
+// MARK: - 图片预加载
+
+extension StatusShareSheet {
+    static func postOf(_ item: UiTimelineV2) -> UiTimelineV2.Post? {
+        switch onEnum(of: item) {
+        case .post(let post):
+            return post
+        case .timelinePostItem(let wrapped):
+            return wrapped.post
+        default:
+            return nil
+        }
+    }
+
+    static func imageURLs(of item: UiTimelineV2) -> [URL] {
+        guard let post = postOf(item) else { return [] }
+        var urls: [URL] = []
+        if let avatar = post.user?.avatar?.url, let url = URL(string: avatar) {
+            urls.append(url)
+        }
+        for media in post.images {
+            switch onEnum(of: media) {
+            case .image(let image):
+                if let url = URL(string: image.previewUrl) { urls.append(url) }
+                if let url = URL(string: image.url) { urls.append(url) }
+            case .gif(let gif):
+                if let url = URL(string: gif.url) { urls.append(url) }
+            default:
+                break
+            }
+        }
+        return urls
+    }
+
+    static func preload(urls: [URL]) async {
+        let unique = Array(Set(urls))
+        guard !unique.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            for url in unique {
+                group.addTask {
+                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                        KingfisherManager.shared.retrieveImage(
+                            with: url,
+                            options: [.backgroundDecode]
+                        ) { _ in
+                            continuation.resume()
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - 评论行（截图里用）
+
+private struct ScreenshotCommentRow: View {
+    let data: UiTimelineV2
+
+    var body: some View {
+        if let post = StatusShareSheet.postOf(data) {
+            HStack(alignment: .top, spacing: 8) {
+                NetworkImage(data: post.user?.avatar?.url, contentMode: .fill)
+                    .frame(width: 18, height: 18)
+                    .clipShape(Circle())
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(post.user?.name.innerText ?? "")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    RichText(text: post.content.original)
+                        .font(.system(size: 12))
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+}
+
+// MARK: - 评论选择
+
+private struct ScreenshotCommentPickerView: View {
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var presenter: KotlinPresenter<ScreenshotCommentsState>
+    @Binding var selected: [UiTimelineV2]
+
+    init(
+        accountType: AccountType,
+        statusKey: MicroBlogKey,
+        selected: Binding<[UiTimelineV2]>
+    ) {
+        _presenter = .init(
+            wrappedValue: .init(
+                presenter: ScreenshotCommentsPresenter(accountType: accountType, statusKey: statusKey)
+            )
+        )
+        _selected = selected
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("screenshot_comments_title")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Text("screenshot_comments_done")
+                }
+            }
+            .padding()
+            Divider()
+            content
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if presenter.state.isLoading {
+            VStack {
+                ProgressView()
+                Text("screenshot_comments_loading")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 8)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let error = presenter.state.error {
+            ListErrorView(error: error, onRetry: {})
+        } else if presenter.state.comments.isEmpty {
+            ListEmptyView()
+        } else {
+            List {
+                ForEach(0..<presenter.state.comments.count, id: \.self) { index in
+                    let comment = presenter.state.comments[index]
+                    Button {
+                        toggle(comment)
+                    } label: {
+                        row(comment)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func row(_ comment: UiTimelineV2) -> some View {
+        let post = StatusShareSheet.postOf(comment)
+        let isSelected = isSelected(comment)
+        return HStack(alignment: .top, spacing: 10) {
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(post?.user?.name.innerText ?? "")
+                    .font(.footnote.weight(.semibold))
+                if let text = post?.content.original.innerText {
+                    Text(text)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(4)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
+        .padding(.vertical, 4)
+    }
+
+    private func isSelected(_ comment: UiTimelineV2) -> Bool {
+        selected.contains { $0.statusKey.id == comment.statusKey.id && $0.statusKey.host == comment.statusKey.host }
+    }
+
+    private func toggle(_ comment: UiTimelineV2) {
+        if let index = selected.firstIndex(where: { $0.statusKey.id == comment.statusKey.id && $0.statusKey.host == comment.statusKey.host }) {
+            selected.remove(at: index)
+        } else {
+            selected.append(comment)
+        }
     }
 }
 
@@ -274,6 +526,10 @@ extension View {
         view.backgroundColor = .systemGroupedBackground
         view.layoutIfNeeded()
         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        // 图片是异步解码的，等一帧再布局一次，保证截到的是真图而不是占位块。
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        try? await Task.sleep(nanoseconds: 80_000_000)
         view.layoutIfNeeded()
 
         // 超长微博降采样，避免 3x 渲染长图时爆内存。

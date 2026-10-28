@@ -1172,6 +1172,8 @@ private fun composePresenter(
                 accountType = accountType,
                 status = status,
                 draftGroupId = draftGroupId,
+                // 已经通过 initialText 预填了文案（转发评论），不要再叠加平台的引用文案。
+                suppressInitialText = initialText.isNotEmpty(),
             )
         }.invoke()
     val textFieldState by remember {

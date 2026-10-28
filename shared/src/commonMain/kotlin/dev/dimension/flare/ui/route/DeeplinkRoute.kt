@@ -151,6 +151,9 @@ public sealed class DeeplinkRoute {
         public data class Quote(
             val accountKey: MicroBlogKey,
             val statusKey: MicroBlogKey,
+            // 转发时预填的文案。转发评论会带「//@原作者：评论内容」，
+            // 老调用方（普通转发）不传，保持为空。
+            val text: String? = null,
         ) : Compose()
 
         @Serializable

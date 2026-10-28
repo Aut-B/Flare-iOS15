@@ -436,6 +436,7 @@ internal sealed interface Route : NavKey {
         data class Quote(
             val accountKey: MicroBlogKey,
             val statusKey: MicroBlogKey,
+            val initialText: String = "",
         ) : Compose
 
         @Serializable
@@ -577,6 +578,7 @@ internal sealed interface Route : NavKey {
                     Compose.Quote(
                         accountKey = deeplinkRoute.accountKey,
                         statusKey = deeplinkRoute.statusKey,
+                        initialText = deeplinkRoute.text.orEmpty(),
                     )
                 }
 

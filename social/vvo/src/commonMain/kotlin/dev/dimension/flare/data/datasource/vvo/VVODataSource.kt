@@ -533,6 +533,21 @@ internal class VVODataSource(
             statusKey = statusKey,
         )
 
+    /**
+     * 截图面板用：一次性取第一页热门评论。
+     * 这里不走 Pager，只是给「挑选要截进图片的评论」提供一个列表。
+     */
+    suspend fun screenshotComments(statusKey: MicroBlogKey): List<UiTimelineV2> =
+        service
+            .getHotComments(
+                id = statusKey.id,
+                mid = statusKey.id,
+                maxId = null,
+            ).data
+            ?.data
+            .orEmpty()
+            .map { it.render(accountKey) }
+
     fun statusRepost(statusKey: MicroBlogKey): RemoteLoader<UiTimelineV2> =
         StatusRepostRemoteMediator(
             service = service,

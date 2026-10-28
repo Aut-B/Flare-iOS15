@@ -43,6 +43,8 @@ struct ComposeScreen: View {
     let composeStatus: ComposeStatus?
     let draftGroupId: String?
     let prefill: ComposePrefill?
+    // 转发评论时预填的「//@作者：评论内容」，普通转发为空。
+    let initialText: String
     @FocusState private var keyboardFocused: Bool
     @FocusState private var cwKeyboardFocused: Bool
     // iOS 15 回退：@Observable 不可用，KotlinPresenter/ComposeContentViewModel/
@@ -55,6 +57,7 @@ struct ComposeScreen: View {
     @State private var pendingCursor: Int?
     @State private var initialTextApplied = false
     @State private var prefillApplied = false
+    @State private var initialTextFromRouteApplied = false
     @State private var defaultFocusRequested = false
     @State private var showDraftSheet = false
     @State private var showDraftConfirmation = false
@@ -166,6 +169,7 @@ struct ComposeScreen: View {
                     imageInput.receiveImage = { [weak mediaViewModel] in mediaViewModel?.importImage($0) }
                     if let uiTextView { imageInput.install(on: uiTextView) }
                     applyPrefillIfNeeded()
+                    applyInitialTextIfNeeded()
                 }
                 .onDisappear {
                     mediaViewModel.cancelImports()
@@ -524,6 +528,20 @@ struct ComposeScreen: View {
         applyCursorIfPossible()
     }
 
+    /// 转发评论时把「//@作者：评论内容」填进输入框。
+    /// 只在没有草稿/图片预填、输入框还空着的时候生效，避免覆盖已有内容。
+    private func applyInitialTextIfNeeded() {
+        guard !initialTextFromRouteApplied else { return }
+        initialTextFromRouteApplied = true
+        guard prefill == nil, !initialText.isEmpty, viewModel.text.isEmpty else { return }
+        initialTextApplied = true
+        viewModel.text = initialText
+        presenter.state.setText(value: initialText)
+        pendingCursor = initialText.count
+        requestComposerFocus()
+        applyCursorIfPossible()
+    }
+
     private func requestDefaultFocus() {
         guard !defaultFocusRequested else { return }
         defaultFocusRequested = true
@@ -718,13 +736,24 @@ extension ComposeScreen {
         accountType: AccountType?,
         composeStatus: ComposeStatus? = nil,
         draftGroupId: String? = nil,
-        prefill: ComposePrefill? = nil
+        prefill: ComposePrefill? = nil,
+        initialText: String = ""
     ) {
         self.accountType = accountType
         self.composeStatus = composeStatus
         self.draftGroupId = draftGroupId
         self.prefill = prefill
-        self._presenter = .init(wrappedValue: .init(presenter: ComposePresenter(accountType: accountType, status: composeStatus, draftGroupId: draftGroupId)))
+        self.initialText = initialText
+        self._presenter = .init(
+            wrappedValue: .init(
+                presenter: ComposePresenter(
+                    accountType: accountType,
+                    status: composeStatus,
+                    draftGroupId: draftGroupId,
+                    suppressInitialText: !initialText.isEmpty
+                )
+            )
+        )
     }
 }
 

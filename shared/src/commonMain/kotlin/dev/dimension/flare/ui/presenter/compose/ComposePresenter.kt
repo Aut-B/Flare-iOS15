@@ -80,6 +80,7 @@ public class ComposePresenter(
     private val accountType: AccountType?,
     private val status: ComposeStatus? = null,
     private val draftGroupId: String? = null,
+    private val suppressInitialText: Boolean = false,
 ) : PresenterBase<ComposeState>() {
     private val composeUseCase: ComposeUseCase by koinInject()
     private val accountRepository: AccountRepository by koinInject()
@@ -379,7 +380,11 @@ public class ComposePresenter(
     }
 
     private val initialTextFlow by lazy {
-        if (accountType is AccountType.Specific && status != null) {
+        if (suppressInitialText) {
+            // 调用方已经给了预填文案（例如转发评论的「//@作者：评论」），
+            // 不再叠加平台生成的「//@原博主：正文」，否则两条引文会叠在一起。
+            null
+        } else if (accountType is AccountType.Specific && status != null) {
             statusFlow.flatMapLatest { statusState ->
                 selectedUsersFlow
                     .mapNotNull {

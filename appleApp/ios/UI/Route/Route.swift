@@ -111,8 +111,12 @@ enum Route: Hashable, Identifiable {
             ComposeScreen(accountType: nil, prefill: prefill)
         case .composeDraft(let groupId):
             ComposeScreen(accountType: nil, draftGroupId: groupId)
-        case .composeQuote(let accountType, let statusKey):
-            ComposeScreen(accountType: accountType, composeStatus: ComposeStatus.Quote(statusKey: statusKey))
+        case .composeQuote(let accountType, let statusKey, let initialText):
+            ComposeScreen(
+                accountType: accountType,
+                composeStatus: ComposeStatus.Quote(statusKey: statusKey),
+                initialText: initialText
+            )
         case .composeReply(let accountType, let statusKey):
             ComposeScreen(accountType: accountType, composeStatus: ComposeStatus.Reply(statusKey: statusKey))
         case .composeVVOReplyComment(let accountType, let statueKey, let rootId):
@@ -297,7 +301,7 @@ enum Route: Hashable, Identifiable {
     case composeNew
     case composeCrossPost(ComposePrefill)
     case composeDraft(String)
-    case composeQuote(AccountType, MicroBlogKey)
+    case composeQuote(AccountType, MicroBlogKey, String)
     case composeReply(AccountType, MicroBlogKey)
     case composeVVOReplyComment(AccountType, MicroBlogKey, String)
     case mediaImage(String, String?, [String: String]?)
@@ -383,7 +387,11 @@ enum Route: Hashable, Identifiable {
         case .new(let data):
             return Route.composeNew
         case .quote(let data):
-            return Route.composeQuote(AccountType.Specific(accountKey: data.accountKey), data.statusKey)
+            return Route.composeQuote(
+                AccountType.Specific(accountKey: data.accountKey),
+                data.statusKey,
+                data.text ?? ""
+            )
         case .reply(let data):
             return Route.composeReply(AccountType.Specific(accountKey: data.accountKey), data.statusKey)
         case .vVOReplyComment(let data):

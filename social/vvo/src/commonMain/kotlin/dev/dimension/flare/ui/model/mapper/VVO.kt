@@ -392,6 +392,31 @@ private fun Comment.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
             ?.toImmutableList()
             ?: listOfNotNull(status?.renderStatusV2(accountKey)?.contentPostOrNull()).toImmutableList()
 
+    // 评论正文只渲染一次：内容展示和「转发评论」的预填文案共用。
+    val commentRichText =
+        renderVVOText(
+            text.orEmpty(),
+            accountKey,
+            sourceLanguages = persistentListOf("zh-CN"),
+        )
+    // 转发评论：微博的「转发」是把原微博转出来，同时把这条评论以
+    // 「//@作者：评论内容」的形式带进文案。原微博 id 优先取 status.id，
+    // 拿不到时退回 analysis_extra 里的 mid。
+    val parentStatusId = status?.id ?: statusMid
+    val quoteCommentText =
+        parentStatusId?.let { parentId ->
+            buildString {
+                append("//@")
+                append(user?.name?.innerText.orEmpty())
+                append("：")
+                append(commentRichText.innerText)
+            }.takeIf { it.length > 3 }
+        }
+    val quoteCommentStatusKey =
+        parentStatusId?.let {
+            MicroBlogKey(id = it, host = accountKey.host)
+        }
+
     val post =
         UiTimelineV2.Post(
             platformId = VVO_PLATFORM_ID,
@@ -409,11 +434,28 @@ private fun Comment.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
                     }.toImmutableList(),
             content =
                 UiTranslatableText(
-                    original = renderVVOText(text.orEmpty(), accountKey, sourceLanguages = persistentListOf("zh-CN")),
+                    original = commentRichText,
                 ),
             sourceLanguages = persistentListOf("zh-CN"),
             actions =
                 listOfNotNull(
+                    if (quoteCommentStatusKey != null) {
+                        ActionMenu.Item(
+                            icon = UiIcon.Quote,
+                            text = ActionMenu.Item.Text.Localized(ActionMenu.Item.Text.Localized.Type.Quote),
+                            clickEvent =
+                                ClickEvent.Deeplink(
+                                    DeeplinkRoute.Compose.Quote(
+                                        accountKey = accountKey,
+                                        statusKey = quoteCommentStatusKey,
+                                        text = quoteCommentText,
+                                    ),
+                                ),
+                            actionFamily = PostActionFamily.Quote,
+                        )
+                    } else {
+                        null
+                    },
                     statusMid?.let {
                         ActionMenu.Item(
                             icon = UiIcon.Comment,

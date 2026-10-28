@@ -34,7 +34,8 @@ struct MacComposeScreen: View {
                 presenter: ComposePresenter(
                     accountType: request.accountType,
                     status: request.composeStatus,
-                    draftGroupId: request.draftGroupId
+                    draftGroupId: request.draftGroupId,
+                    suppressInitialText: false
                 )
             )
         )
