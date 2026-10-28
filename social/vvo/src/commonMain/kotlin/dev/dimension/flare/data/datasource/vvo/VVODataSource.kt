@@ -56,6 +56,7 @@ import dev.dimension.flare.ui.model.toUi
 import dev.dimension.flare.ui.presenter.compose.ComposeStatus
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
@@ -597,14 +598,19 @@ internal class VVODataSource(
     fun comment(statusKey: MicroBlogKey): CacheData<UiTimelineV2> =
         MemCacheable("vvo_comment_${accountKey}_$statusKey") {
             // 0 回复的评论拿不到 rootComment，属于正常情况，不要把异常抛出去。
+            // 但要放行 CancellationException，否则协程取消会被吞掉。
             val remote =
-                runCatching {
+                try {
                     service
                         .getHotFlowChild(statusKey.id)
                         .rootComment
                         ?.firstOrNull()
                         ?.render(accountKey)
-                }.getOrNull()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    null
+                }
             remote
                 ?: commentCache.value[statusKey.id]
                 ?: throw Exception("status not found")
