@@ -9,6 +9,21 @@ import UIKit
 import SwiftUI
 import Drops
 
+/// 批量保存图片时的一张待保存项。
+nonisolated struct MediaImageSaveItem: Sendable {
+    /// 原图地址。
+    let url: String
+    /// 原图拿不到时（403 / 防盗链 / 链接失效）退回这张，通常是预览图。
+    let fallbackUrl: String?
+    let customHeaders: [String: String]?
+
+    init(url: String, fallbackUrl: String? = nil, customHeaders: [String: String]? = nil) {
+        self.url = url
+        self.fallbackUrl = fallbackUrl
+        self.customHeaders = customHeaders
+    }
+}
+
 class MediaSaver: NSObject, UIDocumentPickerDelegate {
     private override init() {}
     
@@ -60,6 +75,188 @@ class MediaSaver: NSObject, UIDocumentPickerDelegate {
 
     func saveImage(_ image: UIImage) {
         saveImageToPhotos(image)
+    }
+
+    /// 一次保存多张原图（「下载全部」用这个）。
+    ///
+    /// 关键点：所有图片只在**一次** `performChanges` 里写进相册。
+    /// 之前是每张图各调一次 `performChanges`，多张同时发起时系统只会让其中一个成功，
+    /// 其余直接报错，表现就是「下载全部」只存进去一两张。
+    /// 这里还补了两件事：写入前先确认相册写入权限；整批失败时逐张重试。
+    func saveImages(
+        _ items: [MediaImageSaveItem],
+        showsDownloadStarted: Bool = true,
+        showsSaveResult: Bool = true,
+        completion: (@Sendable (Int, Int) -> Void)? = nil
+    ) {
+        guard !items.isEmpty else {
+            completion?(0, 0)
+            return
+        }
+        if showsDownloadStarted {
+            showDownloadStarted(mediaType: .photoAlbum)
+        }
+        Task {
+            let payloads = await Self.downloadPayloads(items)
+            guard !payloads.isEmpty else {
+                Self.showBatchSaveToast(saved: 0, total: items.count, showsSaveResult: showsSaveResult)
+                completion?(0, items.count)
+                return
+            }
+            guard await Self.requestAddOnlyAuthorization() else {
+                Self.showBatchSaveToast(saved: 0, total: items.count, showsSaveResult: showsSaveResult)
+                completion?(0, items.count)
+                return
+            }
+            var saved = await Self.writePayloadsToPhotos(payloads)
+            if saved == 0, payloads.count > 1 {
+                // 整批被拒（相册正忙 / 系统限流）时逐张再试一次。
+                saved = await Self.writePayloadsOneByOne(payloads)
+            }
+            Self.showBatchSaveToast(saved: saved, total: items.count, showsSaveResult: showsSaveResult)
+            completion?(saved, items.count)
+        }
+    }
+
+    /// 把一条帖子里的图片/动图整理成批量保存项。
+    static func imageSaveItem(for media: any UiMedia) -> MediaImageSaveItem? {
+        switch onEnum(of: media) {
+        case .image(let image):
+            return MediaImageSaveItem(
+                url: image.url,
+                fallbackUrl: image.previewUrl,
+                customHeaders: image.customHeaders
+            )
+        case .gif(let gif):
+            return MediaImageSaveItem(url: gif.url, customHeaders: gif.customHeaders)
+        default:
+            return nil
+        }
+    }
+
+    // MARK: - 批量保存的下载与写入
+
+    nonisolated private static func downloadPayloads(_ items: [MediaImageSaveItem]) async -> [Data] {
+        var results: [Int: Data] = [:]
+        // 一次最多 4 张并发，既快又不会把图床打出 403。
+        let chunkSize = 4
+        var start = 0
+        while start < items.count {
+            let end = min(start + chunkSize, items.count)
+            let base = start
+            let slice = Array(items[start..<end])
+            await withTaskGroup(of: (Int, Data?).self) { group in
+                for (offset, item) in slice.enumerated() {
+                    group.addTask {
+                        (base + offset, await downloadPayload(item))
+                    }
+                }
+                for await (index, data) in group {
+                    if let data {
+                        results[index] = data
+                    }
+                }
+            }
+            start = end
+        }
+        return results.keys.sorted().compactMap { results[$0] }
+    }
+
+    nonisolated private static func downloadPayload(_ item: MediaImageSaveItem) async -> Data? {
+        for candidate in [item.url, item.fallbackUrl].compactMap({ $0 }) {
+            guard let url = URL(string: candidate) else { continue }
+            if let data = await fetchImageData(from: url, customHeaders: item.customHeaders), !data.isEmpty {
+                return normalizedImageData(data)
+            }
+        }
+        return nil
+    }
+
+    nonisolated private static func fetchImageData(
+        from url: URL,
+        customHeaders: [String: String]?
+    ) async -> Data? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        request.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+            forHTTPHeaderField: "User-Agent"
+        )
+        request.setValue("https://m.weibo.cn/", forHTTPHeaderField: "Referer")
+        customHeaders?.forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                return nil
+            }
+            return data
+        } catch {
+            return nil
+        }
+    }
+
+    nonisolated private static func requestAddOnlyAuthorization() async -> Bool {
+        switch PHPhotoLibrary.authorizationStatus(for: .addOnly) {
+        case .authorized, .limited:
+            return true
+        case .notDetermined:
+            let status = await withCheckedContinuation { (continuation: CheckedContinuation<PHAuthorizationStatus, Never>) in
+                PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                    continuation.resume(returning: status)
+                }
+            }
+            return status == .authorized || status == .limited
+        default:
+            return false
+        }
+    }
+
+    /// 一次 performChanges 写入全部图片，返回成功写入的张数（整批失败返回 0）。
+    nonisolated private static func writePayloadsToPhotos(_ payloads: [Data]) async -> Int {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Int, Never>) in
+            PHPhotoLibrary.shared().performChanges {
+                for payload in payloads {
+                    let request = PHAssetCreationRequest.forAsset()
+                    request.addResource(with: .photo, data: payload, options: nil)
+                }
+            } completionHandler: { success, error in
+                continuation.resume(returning: (success && error == nil) ? payloads.count : 0)
+            }
+        }
+    }
+
+    nonisolated private static func writePayloadsOneByOne(_ payloads: [Data]) async -> Int {
+        var saved = 0
+        for payload in payloads {
+            let count = await writePayloadsToPhotos([payload])
+            if count > 0 {
+                saved += 1
+            }
+        }
+        return saved
+    }
+
+    nonisolated private static func showBatchSaveToast(
+        saved: Int,
+        total: Int,
+        showsSaveResult: Bool
+    ) {
+        guard showsSaveResult else { return }
+        let allSaved = total > 0 && saved >= total
+        let base = saved > 0
+            ? MediaSaveType.photoAlbum.title(success: true)
+            : MediaSaveType.image.title(success: false)
+        let title = total > 1 ? "\(base) (\(saved)/\(total))" : base
+        DispatchQueue.main.async {
+            Drops.show(
+                .init(
+                    title: title,
+                    icon: UIImage(fontAwesome: allSaved ? .circleCheck : .circleExclamation)
+                )
+            )
+        }
     }
 
     func saveVideo(

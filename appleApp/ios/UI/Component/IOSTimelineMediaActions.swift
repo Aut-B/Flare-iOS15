@@ -113,6 +113,14 @@ enum IOSTimelineMediaActions {
             return
         }
 
+        // 纯图片/动图的帖子走批量写入：一个 performChanges 写完全部。
+        // 逐张并发 performChanges 会让系统只接受其中一个，结果只存进去一两张。
+        let imageItems = medias.compactMap { MediaSaver.imageSaveItem(for: $0) }
+        if imageItems.count == medias.count {
+            MediaSaver.shared.saveImages(imageItems)
+            return
+        }
+
         MediaSaver.shared.showDownloadStarted()
         let tracker = TimelineMediaBatchSaveTracker(count: medias.count)
 

@@ -651,6 +651,14 @@ struct MediaViewerScreen: View {
             return
         }
 
+        // 纯图片的帖子一次性批量写入相册（单个 performChanges），
+        // 逐张并发写会让系统只接受其中一个，表现就是「下载全部」只存进去一部分。
+        let imageItems = medias.compactMap { MediaSaver.imageSaveItem(for: $0) }
+        if imageItems.count == medias.count {
+            MediaSaver.shared.saveImages(imageItems)
+            return
+        }
+
         MediaSaver.shared.showDownloadStarted()
         let tracker = MediaViewerBatchSaveTracker(count: medias.count)
 

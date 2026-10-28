@@ -289,18 +289,11 @@ struct StatusShareSheet: View {
         dismiss()
     }
 
-    /// 把这条博文里的图片/动图原图存进相册（多图会逐张保存）。
+    /// 把这条博文里的图片/动图原图存进相册（多图一次性批量写入，避免只存进去一两张）。
     private func saveOriginalImages(post: UiTimelineV2.Post) {
-        for media in post.images {
-            switch onEnum(of: media) {
-            case .image(let image):
-                MediaSaver.shared.saveImage(url: image.url, customHeaders: image.customHeaders)
-            case .gif(let gif):
-                MediaSaver.shared.saveImage(url: gif.url, customHeaders: gif.customHeaders)
-            default:
-                break
-            }
-        }
+        let items = post.images.compactMap { MediaSaver.imageSaveItem(for: $0) }
+        guard !items.isEmpty else { return }
+        MediaSaver.shared.saveImages(items)
         dismiss()
     }
 
