@@ -136,14 +136,59 @@ class MediaSaver: NSObject, UIDocumentPickerDelegate {
                     completion: completion
                 )
             case .failure:
-                self.finishSave(
-                    success: false,
-                    mediaType: .image,
-                    showsSaveResult: showsSaveResult,
-                    completion: completion
-                )
+                // Kingfisher 拿不到时（防盗链 403、Content-Type 不是图片、超时等）
+                // 用 URLSession 带上 Referer/UA 再试一次，很多图床只认这两个头。
+                self.downloadOriginalDataDirectly(from: url, customHeaders: customHeaders) { data in
+                    guard let data else {
+                        self.finishSave(
+                            success: false,
+                            mediaType: .image,
+                            showsSaveResult: showsSaveResult,
+                            completion: completion
+                        )
+                        return
+                    }
+                    self.saveOriginalDataToPhotos(
+                        data,
+                        showsSaveResult: showsSaveResult,
+                        completion: completion
+                    )
+                }
             }
         }
+    }
+
+    /// 兜底下载：不经过 Kingfisher 的图片校验，直接取原始字节。
+    private func downloadOriginalDataDirectly(
+        from url: URL,
+        customHeaders: [String: String]?,
+        completion: @escaping @Sendable (Data?) -> Void
+    ) {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        if request.value(forHTTPHeaderField: "User-Agent") == nil {
+            request.setValue(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                forHTTPHeaderField: "User-Agent"
+            )
+        }
+        if request.value(forHTTPHeaderField: "Referer") == nil {
+            request.setValue("https://m.weibo.cn/", forHTTPHeaderField: "Referer")
+        }
+        customHeaders?.forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard error == nil,
+                  let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode),
+                  let data,
+                  !data.isEmpty else {
+                completion(nil)
+                return
+            }
+            completion(data)
+        }.resume()
     }
 
     private func completeCachedVideoFileURL(for url: URL) -> URL? {
@@ -263,9 +308,12 @@ class MediaSaver: NSObject, UIDocumentPickerDelegate {
         showsSaveResult: Bool = true,
         completion: (@Sendable (Bool) -> Void)? = nil
     ) {
+        // Photos 对 webp / 部分 HEIC 变体支持不好，直接塞原始字节会整条失败。
+        // 能解码成 UIImage 但格式不认识的，先转成 JPEG 再存。
+        let payload = Self.normalizedImageData(data)
         PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
-            request.addResource(with: .photo, data: data, options: nil)
+            request.addResource(with: .photo, data: payload, options: nil)
         } completionHandler: { success, error in
             self.finishSave(
                 success: success && error == nil,
@@ -274,6 +322,19 @@ class MediaSaver: NSObject, UIDocumentPickerDelegate {
                 completion: completion
             )
         }
+    }
+
+    /// 只放行 Photos 认识的格式（JPEG/PNG/GIF/HEIC），其余转成 JPEG。
+    nonisolated private static func normalizedImageData(_ data: Data) -> Data {
+        if data.starts(with: [0xFF, 0xD8]) ||          // JPEG
+            data.starts(with: [0x89, 0x50, 0x4E, 0x47]) || // PNG
+            data.starts(with: [0x47, 0x49, 0x46]) {    // GIF
+            return data
+        }
+        guard let image = UIImage(data: data) else {
+            return data
+        }
+        return image.jpegData(compressionQuality: 0.95) ?? data
     }
 
     nonisolated private func saveImageToPhotos(_ image: UIImage) {

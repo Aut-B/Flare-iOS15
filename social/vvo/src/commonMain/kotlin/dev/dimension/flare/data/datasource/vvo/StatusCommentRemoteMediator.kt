@@ -16,6 +16,7 @@ internal class StatusCommentRemoteMediator(
     private val service: VVOService,
     private val statusKey: MicroBlogKey,
     private val accountKey: MicroBlogKey,
+    private val onRendered: (List<UiTimelineV2>) -> Unit = {},
 ) : CacheableRemoteLoader<UiTimelineV2> {
     override val pagingKey: String = "status_comments_${statusKey}_$accountKey"
 
@@ -57,13 +58,15 @@ internal class StatusCommentRemoteMediator(
             }
 
         val maxId = response.data?.maxID?.takeIf { it != 0L }
+        val items =
+            response.data
+                ?.data
+                .orEmpty()
+                .map { it.render(accountKey) }
+        onRendered(items)
         return PagingResult(
             endOfPaginationReached = maxId == null,
-            data =
-                response.data
-                    ?.data
-                    .orEmpty()
-                    .map { it.render(accountKey) },
+            data = items,
             nextKey = maxId?.toString(),
         )
     }

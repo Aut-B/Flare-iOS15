@@ -57,7 +57,9 @@ import dev.dimension.flare.ui.presenter.compose.ComposeStatus
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 
 private val MEDIA_COMPRESSION =
     ComposeConfig.Media.Compression(
@@ -65,6 +67,10 @@ private val MEDIA_COMPRESSION =
         maxWidth = 4096,
         maxHeight = 4096,
     )
+
+/** 评论兜底缓存的上限与保留量。 */
+private const val COMMENT_CACHE_LIMIT = 800
+private const val COMMENT_CACHE_KEEP = 600
 
 @OptIn(ExperimentalPagingApi::class)
 internal class VVODataSource(
@@ -531,6 +537,7 @@ internal class VVODataSource(
             service = service,
             accountKey = accountKey,
             statusKey = statusKey,
+            onRendered = ::cacheComments,
         )
 
     /**
@@ -560,17 +567,56 @@ internal class VVODataSource(
             service = service,
             accountKey = accountKey,
             commentKey = commentKey,
+            onRendered = ::cacheComments,
         )
+
+    /**
+     * 最近渲染过的评论（id -> 评论本身）。
+     *
+     * 微博的 `comments/hotFlowChild` 在「这条评论没有任何回复」时不会返回 rootComment，
+     * 导致点进 0 回复的评论只会看到 `status not found`。而这条评论其实刚刚在列表里
+     * 渲染过，所以这里留一份内存缓存做兜底：先查缓存，缓存没有再去请求。
+     *
+     * 放在 companion 里是因为 DataSource 实例会随订阅重建，缓存要跨实例共享。
+     */
+    internal fun cacheComments(items: List<UiTimelineV2>) {
+        if (items.isEmpty()) return
+        commentCache.update { current ->
+            val merged = current + items.associateBy { it.statusKey.id }
+            // 只保留最近的一批，避免长时间使用后无限增长。
+            if (merged.size <= COMMENT_CACHE_LIMIT) {
+                merged
+            } else {
+                merged.entries
+                    .drop(merged.size - COMMENT_CACHE_KEEP)
+                    .associate { it.key to it.value }
+            }
+        }
+    }
 
     fun comment(statusKey: MicroBlogKey): CacheData<UiTimelineV2> =
         MemCacheable("vvo_comment_${accountKey}_$statusKey") {
-            service
-                .getHotFlowChild(statusKey.id)
-                .rootComment
-                ?.firstOrNull()
-                ?.render(accountKey)
+            // 0 回复的评论拿不到 rootComment，属于正常情况，不要把异常抛出去。
+            val remote =
+                runCatching {
+                    service
+                        .getHotFlowChild(statusKey.id)
+                        .rootComment
+                        ?.firstOrNull()
+                        ?.render(accountKey)
+                }.getOrNull()
+            remote
+                ?: commentCache.value[statusKey.id]
                 ?: throw Exception("status not found")
         }
+
+    private companion object {
+        /**
+         * 评论兜底缓存（评论 id -> 渲染好的评论），跨 DataSource 实例共享，
+         * 见 [cacheComments]。
+         */
+        val commentCache = MutableStateFlow<Map<String, UiTimelineV2>>(emptyMap())
+    }
 
     fun statusExtendedText(statusKey: MicroBlogKey): Flow<UiState<String>> =
         MemCacheable(

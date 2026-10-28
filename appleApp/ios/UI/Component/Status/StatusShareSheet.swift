@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import KotlinSharedUI
 import UniformTypeIdentifiers
 import FlareAppleCore
@@ -130,6 +131,24 @@ struct StatusShareSheet: View {
                     }
                     .buttonStyle(.plain)
                     .disabled(commentsPresenter.state.isLoading || availableCommentCount == 0)
+
+                    // 保存博文里带的原图（不是截图）。长按图片也有同样入口，
+                    // 这里放一份是因为长按不容易被发现。
+                    if let post = StatusShareSheet.postOf(data), !post.images.isEmpty {
+                        Button {
+                            saveOriginalImages(post: post)
+                        } label: {
+                            Label {
+                                if post.images.count > 1 {
+                                    Text("media_menu_download_all")
+                                } else {
+                                    Text("media_menu_download")
+                                }
+                            } icon: {
+                                Image(systemName: "arrow.down.to.line")
+                            }
+                        }
+                    }
 
                     Button {
                         crossPost()
@@ -267,6 +286,21 @@ struct StatusShareSheet: View {
     private func saveImage() {
         guard let image = image else { return }
         MediaSaver.shared.saveImage(image)
+        dismiss()
+    }
+
+    /// 把这条博文里的图片/动图原图存进相册（多图会逐张保存）。
+    private func saveOriginalImages(post: UiTimelineV2.Post) {
+        for media in post.images {
+            switch onEnum(of: media) {
+            case .image(let image):
+                MediaSaver.shared.saveImage(url: image.url, customHeaders: image.customHeaders)
+            case .gif(let gif):
+                MediaSaver.shared.saveImage(url: gif.url, customHeaders: gif.customHeaders)
+            default:
+                break
+            }
+        }
         dismiss()
     }
 
@@ -525,6 +559,31 @@ extension View {
         view.bounds = CGRect(origin: .zero, size: targetSize)
         view.backgroundColor = .systemGroupedBackground
         view.layoutIfNeeded()
+
+        // SwiftUI 的 onAppear 只有在 view 真正挂进 window 后才会触发，
+        // 而 KFImage / AsyncImage 是在 onAppear 里才去取图的。离屏的
+        // UIHostingController 直接截图，图片永远停在占位色块上。
+        // 这里挂一个几乎透明、层级最高的临时 window，截完立刻销毁。
+        let window: UIWindow
+        if let scene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive }) {
+            window = UIWindow(windowScene: scene)
+            window.frame = CGRect(origin: .zero, size: targetSize)
+        } else {
+            window = UIWindow(frame: CGRect(origin: .zero, size: targetSize))
+        }
+        window.windowLevel = UIWindow.Level(rawValue: UIWindow.Level.alert.rawValue + 1)
+        window.backgroundColor = .clear
+        window.alpha = 0.01
+        window.rootViewController = controller
+        window.isHidden = false
+        window.layoutIfNeeded()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+
         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         // 图片是异步解码的，等一帧再布局一次，保证截到的是真图而不是占位块。
         view.setNeedsLayout()
