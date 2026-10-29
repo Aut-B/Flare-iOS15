@@ -535,42 +535,44 @@ private final class ScreenshotRenderCoordinator: ObservableObject {
 
         // 第一帧的素材：纯内存查表，不碰网络。
         let cached = ScreenshotImageLoader.cached(urls: urls)
-        if cached.isEmpty {
-            // 一张都没有（纯文字微博或刚进页面），先清掉旧图，避免显示上一条的内容。
+        // 一张缓存都没有时先别画：那样只能画出一版灰块，比直接转圈更难看。
+        let showsQuickFrame = !cached.isEmpty || urls.isEmpty
+        if !showsQuickFrame {
             image = nil
         }
 
         task = Task { [weak self] in
-            let quick = await Self.makeImage(
-                item: item,
-                comments: comments,
-                showsCard: showsCard,
-                colorScheme: colorScheme,
-                images: cached
-            )
-            guard !Task.isCancelled, let self else { return }
-            if let quick { self.image = quick }
+            guard let self else { return }
+            if showsQuickFrame {
+                let quick = await Self.makeImage(
+                    item: item,
+                    comments: comments,
+                    showsCard: showsCard,
+                    colorScheme: colorScheme,
+                    images: cached
+                )
+                guard !Task.isCancelled else { return }
+                if let quick { self.image = quick }
+            }
 
-            // 第二帧：补齐缓存里没有的图。没有缺失就直接结束，省掉一次重渲染。
+            // 第二帧：补齐缓存里没有的图。没有缺失就不必再渲染一次。
             let missing = await ScreenshotImageLoader.load(
                 urls: urls,
                 skipping: Set(cached.keys)
             )
             guard !Task.isCancelled else { return }
-            guard !missing.isEmpty else {
-                self.isFinal = true
-                return
+            if !showsQuickFrame || !missing.isEmpty {
+                let merged = cached.merging(missing) { current, _ in current }
+                let full = await Self.makeImage(
+                    item: item,
+                    comments: comments,
+                    showsCard: showsCard,
+                    colorScheme: colorScheme,
+                    images: merged
+                )
+                guard !Task.isCancelled else { return }
+                if let full { self.image = full }
             }
-            let merged = cached.merging(missing) { current, _ in current }
-            let full = await Self.makeImage(
-                item: item,
-                comments: comments,
-                showsCard: showsCard,
-                colorScheme: colorScheme,
-                images: merged
-            )
-            guard !Task.isCancelled else { return }
-            if let full { self.image = full }
             self.isFinal = true
         }
     }
