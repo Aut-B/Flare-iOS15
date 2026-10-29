@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine
 import KotlinSharedUI
 import UniformTypeIdentifiers
 import FlareAppleCore
