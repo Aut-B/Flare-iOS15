@@ -111,6 +111,28 @@ public class PostHandler(
                 }
             }
         }
+
+    /** 置顶 / 取消置顶自己的帖子（微博）。 */
+    public fun pin(
+        postKey: MicroBlogKey,
+        pinned: Boolean,
+    ): Job =
+        coroutineScope.launch {
+            tryRun {
+                loader.pinStatus(postKey, pinned)
+            }
+        }
+
+    /** 修改已发帖子的可见范围（微博）。 */
+    public fun updateVisibility(
+        postKey: MicroBlogKey,
+        visibility: UiTimelineV2.Post.Visibility,
+    ): Job =
+        coroutineScope.launch {
+            tryRun {
+                loader.updateStatusVisibility(postKey, visibility)
+            }
+        }
 }
 
 @HiddenFromObjC

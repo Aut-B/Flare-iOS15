@@ -169,6 +169,38 @@ internal class VVOLoader(
         }
     }
 
+    override suspend fun pinStatus(
+        statusKey: MicroBlogKey,
+        pinned: Boolean,
+    ) {
+        val st = ensureLogin()
+        val response =
+            service.setTopStatus(
+                id = statusKey.id,
+                top = if (pinned) "1" else "0",
+                st = st,
+            )
+        if ((response.ok ?: 0L) == 0L) {
+            throw Exception("微博置顶失败：${response.msg ?: response.httpCode ?: "unknown"}")
+        }
+    }
+
+    override suspend fun updateStatusVisibility(
+        statusKey: MicroBlogKey,
+        visibility: UiTimelineV2.Post.Visibility,
+    ) {
+        val st = ensureLogin()
+        val response =
+            service.updateVisibility(
+                id = statusKey.id,
+                visibility = visibility.toVvoVisible(),
+                st = st,
+            )
+        if ((response.ok ?: 0L) == 0L) {
+            throw Exception("微博修改可见范围失败：${response.msg ?: response.httpCode ?: "unknown"}")
+        }
+    }
+
     private suspend fun ensureLogin(): String {
         val config = service.config()
         if (config.data?.login != true) {

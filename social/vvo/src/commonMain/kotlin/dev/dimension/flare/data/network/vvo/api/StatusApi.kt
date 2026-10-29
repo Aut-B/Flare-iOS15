@@ -81,6 +81,26 @@ internal interface StatusApi {
         @Header("X-Xsrf-Token") xsrfToken: String = st,
     ): VVOResponse<String>
 
+    /** 置顶 / 取消置顶自己的微博。top=1 置顶，top=0 取消。 */
+    @POST("profile/setTop")
+    @FormUrlEncoded
+    suspend fun setTopStatus(
+        @Field("id") id: String,
+        @Field("top") top: String,
+        @Field("st") st: String,
+        @Header("X-Xsrf-Token") xsrfToken: String = st,
+    ): VVOResponse<String>
+
+    /** 修改已发微博的可见范围：0 公开 / 1 仅自己可见 / 6 好友圈 / 10 仅粉丝可见。 */
+    @POST("statuses/updateVisibility")
+    @FormUrlEncoded
+    suspend fun updateVisibility(
+        @Field("id") id: String,
+        @Field("visibility") visibility: String,
+        @Field("st") st: String,
+        @Header("X-Xsrf-Token") xsrfToken: String = st,
+    ): VVOResponse<String>
+
     @POST("comments/destroy")
     @FormUrlEncoded
     suspend fun deleteComment(

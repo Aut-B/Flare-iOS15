@@ -1129,12 +1129,10 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
             guard generation == refreshRequestGeneration else { return }
             isUserRefreshing = false
             if !currentPagingIsRefreshing {
-                if collectionView.preservesReadingPosition {
-                    pendingRefreshEnd = true
-                    finishPendingRefreshIfReady()
-                } else {
-                    refreshControl.endRefreshing()
-                }
+                // 两种模式都等快照应用完再收指示器：
+                // 数据还没进 dataSource 就把齿轮收掉，用户会以为刷新失败、干等。
+                pendingRefreshEnd = true
+                finishPendingRefreshIfReady()
             }
         }
     }
@@ -1335,10 +1333,17 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
                 applyLayoutForColumnCount()
                 updateBackgroundColors()
             }
-            syncRefreshControl(isRefreshing: plan.isRefreshing)
+            // 结束刷新指示器要等这一轮快照真正应用完：否则齿轮先消失、
+            // 内容后到，用户会以为卡住不动（下拉刷新最常见的错觉）。
+            if plan.isRefreshing {
+                syncRefreshControl(isRefreshing: true)
+            }
 
             let completion = { [weak self] in
                 guard let self else { return }
+                if !plan.isRefreshing {
+                    self.syncRefreshControl(isRefreshing: false)
+                }
                 if let mediaAnchor { self.restoreScrollAnchorIfNeeded(mediaAnchor) }
                 self.restorePendingContentOffsetIfNeeded(finalize: !plan.isInitialLoading)
                 self.updateAutoplayConfiguration()

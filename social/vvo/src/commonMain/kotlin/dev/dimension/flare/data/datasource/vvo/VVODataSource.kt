@@ -691,7 +691,7 @@ internal class VVODataSource(
  * 0 公开、1 仅自己可见、6 互相关注（好友圈）、10 仅粉丝可见。
  * 始终返回合法值，不返回 null，避免表单里出现空值/非法值。
  */
-private fun UiTimelineV2.Post.Visibility.toVvoVisible(): String =
+internal fun UiTimelineV2.Post.Visibility.toVvoVisible(): String =
     when (this) {
         UiTimelineV2.Post.Visibility.Private -> "1"
         UiTimelineV2.Post.Visibility.Mutual -> "6"

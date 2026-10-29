@@ -49,6 +49,8 @@ public struct StatusView: View {
     @State private var contentWarningExpanded = false
     @State private var textExpanded = false
     @State private var overflowingTextIndexes: Set<Int> = []
+    @State private var showManageMenu = false
+    @State private var showDeleteConfirm = false
 
     public init(
         data: UiTimelineV2.Post,
@@ -502,6 +504,71 @@ public struct StatusView: View {
             textExpanded = false
             overflowingTextIndexes.removeAll()
         }
+        .confirmationDialog(
+            Text("status_manage_title", bundle: FlareAppleUILocalization.bundle),
+            isPresented: $showManageMenu,
+            titleVisibility: .visible
+        ) {
+            Button {
+                manage { $0.pin(pinned: true) }
+            } label: {
+                Text("status_manage_pin", bundle: FlareAppleUILocalization.bundle)
+            }
+            Button {
+                manage { $0.pin(pinned: false) }
+            } label: {
+                Text("status_manage_unpin", bundle: FlareAppleUILocalization.bundle)
+            }
+            Button {
+                manage { $0.updateVisibility(visibility: .mutual) }
+            } label: {
+                Text("status_manage_visibility_mutual", bundle: FlareAppleUILocalization.bundle)
+            }
+            Button {
+                manage { $0.updateVisibility(visibility: .followers) }
+            } label: {
+                Text("status_manage_visibility_followers", bundle: FlareAppleUILocalization.bundle)
+            }
+            Button {
+                manage { $0.updateVisibility(visibility: .`private`) }
+            } label: {
+                Text("status_manage_visibility_private", bundle: FlareAppleUILocalization.bundle)
+            }
+            Button(role: .destructive) {
+                showDeleteConfirm = true
+            } label: {
+                Text("delete", bundle: FlareAppleUILocalization.bundle)
+            }
+            Button(role: .cancel) {} label: {
+                Text("Cancel")
+            }
+        }
+        .alert(
+            Text("status_manage_delete_confirm", bundle: FlareAppleUILocalization.bundle),
+            isPresented: $showDeleteConfirm
+        ) {
+            Button(role: .destructive) {
+                DeleteStatusPresenter(accountType: data.accountType, statusKey: data.statusKey)
+                    .models.value.delete()
+            } label: {
+                Text("delete", bundle: FlareAppleUILocalization.bundle)
+            }
+            Button(role: .cancel) {} label: {
+                Text("Cancel")
+            }
+        }
+    }
+
+    private func manage(_ action: (ManageStatusState) -> Void) {
+        let presenter = ManageStatusPresenter(accountType: data.accountType, statusKey: data.statusKey)
+        action(presenter.models.value)
+    }
+
+    /// 只在自己发的帖子右上角显示「更多」入口。
+    private func isOwnPost(_ accountType: AccountType) -> Bool {
+        guard case .specific(let specific) = onEnum(of: accountType) else { return false }
+        guard let userKey = data.user?.key else { return false }
+        return specific.accountKey.id == userKey.id && specific.accountKey.host == userKey.host
     }
     
     private func topEndContent(
@@ -554,6 +621,18 @@ public struct StatusView: View {
                 DateTimeText(data: createdAt)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            if isOwnPost(accountType), !isQuote, !isDetail {
+                Button {
+                    showManageMenu = true
+                } label: {
+                    Image(fontAwesome: .ellipsis)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 2)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text("status_manage_title", bundle: FlareAppleUILocalization.bundle))
             }
             if agentEnabled, !isQuote {
                 Button {
