@@ -44,11 +44,13 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 private val baseUrl = "https://$vvoHost/"
 
@@ -336,7 +338,10 @@ internal class VVOService private constructor(
         }
         val refreshed =
             runCatching {
-                refreshChocolate(refreshedAtEpochMillis = now, refreshOnlyWhenStale = false)
+                // 续签只是写操作的准备动作，链路卡住时不能把转发/评论一起拖死。
+                withTimeoutOrNull(8.seconds) {
+                    refreshChocolate(refreshedAtEpochMillis = now, refreshOnlyWhenStale = false)
+                }
             }.getOrNull()
         // 续签后旧的 st 可能已经失效，强制下一次 config() 重新取。
         if (refreshed != null) {
