@@ -129,6 +129,12 @@ public open class TimelinePresenter : PresenterBase<TimelineState> {
     private val homeMediator = MutableStateFlow<TimelineRemoteMediator?>(null)
     private val gapActivity = MutableStateFlow<Map<String, LoadState>>(emptyMap())
     private val startupRefresh = MutableStateFlow(false)
+
+    /**
+     * 用户手动下拉刷新期间置 true。混合首页的「后台取数」路径会读它，
+     * 手动刷新时必须同步等网络，否则指示器一闪就没、内容还要再等几秒。
+     */
+    private val userRefreshRequested = MutableStateFlow(false)
     internal var sourceActive: Flow<Boolean> = flowOf(true)
     internal var sourceAccounts: Set<dev.dimension.flare.model.MicroBlogKey> = emptySet()
 
@@ -304,7 +310,10 @@ public open class TimelinePresenter : PresenterBase<TimelineState> {
                         // 只有混合首页才需要「指示器先结束、取数后台跑」：混合首页要等所有平台，
                         // 总耗时等于最慢的那个。单平台首页（X / 微博）本身够快，defer 反而
                         // 让人觉得「刷新了但内容没出来」，所以单平台保持同步刷新。
-                        deferRefresh = isHomeTimeline && loader is MixedRemoteMediator,
+                        // 用户手动下拉时同样不 defer：指示器要一直转到内容真的到齐。
+                        deferRefresh = {
+                            isHomeTimeline && loader is MixedRemoteMediator && !userRefreshRequested.value
+                        },
                     )
                 }
             homeMediator.value = mediator
@@ -520,14 +529,20 @@ public open class TimelinePresenter : PresenterBase<TimelineState> {
             }
 
             override suspend fun refresh() {
-                listState
-                    .onSuccess {
-                        refreshSuspend()
-                    }.onEmpty {
-                        refresh()
-                    }.onError {
-                        onRetry()
-                    }
+                // 手动刷新期间不许走「后台取数」：指示器必须一直转到内容真的到齐。
+                userRefreshRequested.value = true
+                try {
+                    listState
+                        .onSuccess {
+                            refreshSuspend()
+                        }.onEmpty {
+                            refresh()
+                        }.onError {
+                            onRetry()
+                        }
+                } finally {
+                    userRefreshRequested.value = false
+                }
             }
         }
     }

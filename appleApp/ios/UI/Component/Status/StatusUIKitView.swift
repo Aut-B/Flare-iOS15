@@ -734,15 +734,109 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         setNeedsLayout()
     }
 
+    /// 只在自己发的帖子右上角显示「更多」入口。
+    private func isOwnPost(_ data: UiTimelineV2.Post) -> Bool {
+        guard case .specific(let specific) = onEnum(of: data.accountType) else { return false }
+        guard let userKey = data.user?.key else { return false }
+        return specific.accountKey.id == userKey.id && specific.accountKey.host == userKey.host
+    }
+
+    private var hostViewController: UIViewController? {
+        var responder: UIResponder? = self
+        while let current = responder {
+            if let controller = current as? UIViewController { return controller }
+            responder = current.next
+        }
+        return nil
+    }
+
+    private func presentManageMenu(for data: UiTimelineV2.Post) {
+        guard let host = hostViewController else { return }
+        let sheet = UIAlertController(
+            title: String(localized: "status_manage_title"),
+            message: nil,
+            preferredStyle: .actionSheet
+        )
+        let accountType = data.accountType
+        let statusKey = data.statusKey
+        sheet.addAction(
+            UIAlertAction(title: String(localized: "status_manage_pin"), style: .default) { _ in
+                StatusManageActions.shared.pin(accountType: accountType, statusKey: statusKey, pinned: true)
+            }
+        )
+        sheet.addAction(
+            UIAlertAction(title: String(localized: "status_manage_unpin"), style: .default) { _ in
+                StatusManageActions.shared.pin(accountType: accountType, statusKey: statusKey, pinned: false)
+            }
+        )
+        sheet.addAction(
+            UIAlertAction(title: String(localized: "status_manage_visibility_mutual"), style: .default) { _ in
+                StatusManageActions.shared.updateVisibility(
+                    accountType: accountType,
+                    statusKey: statusKey,
+                    visibility: .mutual
+                )
+            }
+        )
+        sheet.addAction(
+            UIAlertAction(title: String(localized: "status_manage_visibility_followers"), style: .default) { _ in
+                StatusManageActions.shared.updateVisibility(
+                    accountType: accountType,
+                    statusKey: statusKey,
+                    visibility: .followers
+                )
+            }
+        )
+        sheet.addAction(
+            UIAlertAction(title: String(localized: "status_manage_visibility_private"), style: .default) { _ in
+                StatusManageActions.shared.updateVisibility(
+                    accountType: accountType,
+                    statusKey: statusKey,
+                    visibility: .`private`
+                )
+            }
+        )
+        sheet.addAction(
+            UIAlertAction(title: String(localized: "delete"), style: .destructive) { [weak self] _ in
+                self?.presentDeleteConfirm(for: data)
+            }
+        )
+        sheet.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
+        if let popover = sheet.popoverPresentationController {
+            popover.sourceView = self
+            popover.sourceRect = CGRect(x: bounds.midX, y: bounds.midY, width: 1, height: 1)
+        }
+        host.present(sheet, animated: true)
+    }
+
+    private func presentDeleteConfirm(for data: UiTimelineV2.Post) {
+        guard let host = hostViewController else { return }
+        let alert = UIAlertController(
+            title: String(localized: "status_manage_delete_confirm"),
+            message: nil,
+            preferredStyle: .alert
+        )
+        alert.addAction(
+            UIAlertAction(title: String(localized: "delete"), style: .destructive) { _ in
+                DeleteStatusPresenter(accountType: data.accountType, statusKey: data.statusKey)
+                    .models.value.delete()
+            }
+        )
+        alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
+        host.present(alert, animated: true)
+    }
+
     private func selectAndConfigureHeader(data: UiTimelineV2.Post) -> UIView? {
         guard let user = data.user else { return nil }
         let topEndView = resolvedTopEndView()
+        let showsManage = isOwnPost(data) && !isQuote && !isDetail
         topEndView.configure(
             post: data,
             showPlatformLogo: appearance.showPlatformLogo,
             absoluteTimestamp: appearance.absoluteTimestamp,
             isDetail: isDetail,
             showAgentInsight: appearance.aiAgentEnabled && !isQuote,
+            showManageButton: showsManage,
             onInsightTapped: { [weak self] in
                 guard let self else { return }
                 let route = DeeplinkRoute.StatusInsight(
@@ -752,6 +846,9 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                 if let url = URL(string: route.toUri()) {
                     self.openURL?(url)
                 }
+            },
+            onManageTapped: { [weak self] in
+                self?.presentManageMenu(for: data)
             }
         )
         let onClicked: () -> Void = { [weak self] in self?.onUserTapped() }

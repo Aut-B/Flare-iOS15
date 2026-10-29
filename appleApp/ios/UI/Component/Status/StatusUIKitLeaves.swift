@@ -593,7 +593,9 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
     private var ipLabel: UILabel { platformColumn.ip }
     private let time = DateTimeUILabel()
     private let insightButton = UIButton(type: .system)
+    private let manageButton = UIButton(type: .system)
     private var onInsightTapped: (() -> Void)?
+    private var onManageTapped: (() -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -617,11 +619,26 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         )
         insightButton.setContentHuggingPriority(.required, for: .horizontal)
         insightButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        // 自己发的帖子：时间后面多一个「更多」，管置顶 / 可见范围 / 删除。
+        manageButton.tintColor = .secondaryLabel
+        manageButton.setImage(UIImage(fontAwesome: .ellipsis), for: .normal)
+        manageButton.imageView?.contentMode = .scaleAspectFit
+        manageButton.accessibilityLabel = String(localized: "status_manage_title")
+        manageButton.addAction(
+            UIAction { [weak self] _ in
+                self?.onManageTapped?()
+            },
+            for: .touchUpInside
+        )
+        manageButton.setContentHuggingPriority(.required, for: .horizontal)
+        manageButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        manageButton.isHidden = true
         addSubview(visibility)
         addSubview(translation)
         addSubview(platformColumn)
         addSubview(time)
         addSubview(insightButton)
+        addSubview(manageButton)
     }
     required init(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
@@ -662,6 +679,9 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         if !insightButton.isHidden {
             height = max(height, 16)
         }
+        if !manageButton.isHidden {
+            height = max(height, 16)
+        }
         return ceil(height)
     }
 
@@ -683,9 +703,12 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         absoluteTimestamp: Bool,
         isDetail: Bool,
         showAgentInsight: Bool,
-        onInsightTapped: (() -> Void)?
+        showManageButton: Bool = false,
+        onInsightTapped: (() -> Void)?,
+        onManageTapped: (() -> Void)? = nil
     ) {
         self.onInsightTapped = onInsightTapped
+        self.onManageTapped = onManageTapped
         if let v = post.visibility {
             visibility.isHidden = false
             visibility.set(visibility: v)
@@ -728,6 +751,7 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
             time.set(data: post.createdAt)
         }
         insightButton.isHidden = !showAgentInsight
+        manageButton.isHidden = !showManageButton
         invalidateIntrinsicContentSize()
         setNeedsLayout()
     }
@@ -791,6 +815,9 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         }
         if !insightButton.isHidden {
             items.append((insightButton, CGSize(width: 16, height: 16)))
+        }
+        if !manageButton.isHidden {
+            items.append((manageButton, CGSize(width: 18, height: 16)))
         }
         return items
     }

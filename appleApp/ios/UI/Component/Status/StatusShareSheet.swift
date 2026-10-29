@@ -25,10 +25,14 @@ struct StatusShareSheet: View {
     @StateObject private var commentsPresenter: KotlinPresenter<ScreenshotCommentsState>
     @State private var theme: ColorScheme? = nil
     @State private var previewStyle: SharePreviewStyle = .card
-    @State private var image: UIImage? = nil
+    @StateObject private var renderer = ScreenshotRenderCoordinator()
     @State private var selectedComments: [UiTimelineV2] = []
     @State private var showCommentPicker = false
     @State private var showPreview = false
+
+    /// 渲染出来的长图。真正持有它的是 `renderer`，这里只是转发一下，
+    /// 让下面所有用到 `image` 的地方保持原样。
+    private var image: UIImage? { renderer.image }
 
     init(
         statusKey: MicroBlogKey,
@@ -239,10 +243,14 @@ struct StatusShareSheet: View {
     }
 
     private func render(data: UiTimelineV2) {
-        image = nil
-        Task {
-            image = await renderImage(data: data)
-        }
+        let urls = Self.imageURLs(of: data) + selectedComments.flatMap(Self.imageURLs(of:))
+        renderer.render(
+            item: data,
+            comments: selectedComments,
+            showsCard: previewStyle == .card,
+            colorScheme: theme ?? colorScheme,
+            urls: urls
+        )
     }
 
     /// 已经渲染好的长图预览。点一下可以放大看细节，确认没问题再保存/分享。
@@ -275,25 +283,6 @@ struct StatusShareSheet: View {
             }
             .frame(maxWidth: .infinity, minHeight: 180)
         }
-    }
-
-    private func renderImage(data: UiTimelineV2) async -> UIImage? {
-        // 先把要出现在图里的图片全部下载好，渲染时直接画 UIImage，
-        // 避免离屏渲染时异步加载来不及、截出一堆灰色占位块。
-        let urls = Self.imageURLs(of: data) + selectedComments.flatMap(Self.imageURLs(of:))
-        let images = await ScreenshotImageLoader.load(urls: urls)
-        return await ScreenshotPostView(
-            item: data,
-            comments: selectedComments,
-            contentWidth: 390,
-            showsCard: previewStyle == .card
-        )
-        .environment(\.screenshotImages, images)
-        .environment(\.colorScheme, theme ?? colorScheme)
-        .snapshot(
-            colorScheme: theme ?? colorScheme,
-            delay: 0.5
-        )
     }
 
     private func saveImage() {
@@ -501,11 +490,90 @@ private struct ScreenshotCommentPickerView: View {
 }
 
 
+// MARK: - 截图渲染调度
+//
+// 之前是「等所有图片下载完 → 挂 window → 固定等 500ms → 截图」，图一多就要
+// 用户干等好几秒。现在拆成两段：
+//   第一段只用内存缓存里已有的图（时间线刚显示过，同步就能拿到），立刻出一版；
+//   第二段把缓存里缺的图补下来，再出一版更完整的覆盖上去。
+// 用户感知上就是「点一下马上有图」，跟 VVebo 一样。
+
+@MainActor
+private final class ScreenshotRenderCoordinator: ObservableObject {
+    @Published private(set) var image: UIImage?
+
+    private var task: Task<Void, Never>?
+
+    func render(
+        item: UiTimelineV2,
+        comments: [UiTimelineV2],
+        showsCard: Bool,
+        colorScheme: ColorScheme,
+        urls: [URL]
+    ) {
+        task?.cancel()
+
+        // 第一帧的素材：纯内存查表，不碰网络。
+        let cached = ScreenshotImageLoader.cached(urls: urls)
+        if cached.isEmpty {
+            // 一张都没有（纯文字微博或刚进页面），先清掉旧图，避免显示上一条的内容。
+            image = nil
+        }
+
+        task = Task { [weak self] in
+            let quick = await Self.makeImage(
+                item: item,
+                comments: comments,
+                showsCard: showsCard,
+                colorScheme: colorScheme,
+                images: cached
+            )
+            guard !Task.isCancelled, let self else { return }
+            if let quick { self.image = quick }
+
+            // 第二帧：补齐缓存里没有的图。没有缺失就直接结束，省掉一次重渲染。
+            let missing = await ScreenshotImageLoader.load(
+                urls: urls,
+                skipping: Set(cached.keys)
+            )
+            guard !Task.isCancelled, !missing.isEmpty else { return }
+            let merged = cached.merging(missing) { current, _ in current }
+            let full = await Self.makeImage(
+                item: item,
+                comments: comments,
+                showsCard: showsCard,
+                colorScheme: colorScheme,
+                images: merged
+            )
+            guard !Task.isCancelled, let full else { return }
+            self.image = full
+        }
+    }
+
+    private static func makeImage(
+        item: UiTimelineV2,
+        comments: [UiTimelineV2],
+        showsCard: Bool,
+        colorScheme: ColorScheme,
+        images: [String: UIImage]
+    ) async -> UIImage? {
+        await ScreenshotPostView(
+            item: item,
+            comments: comments,
+            contentWidth: 390,
+            showsCard: showsCard
+        )
+        .environment(\.screenshotImages, images)
+        .environment(\.colorScheme, colorScheme)
+        .snapshot(colorScheme: colorScheme)
+    }
+}
+
 extension View {
     @MainActor
     func snapshot(
         colorScheme: ColorScheme,
-        delay: TimeInterval = 0.1
+        delay: TimeInterval = 0.05
     ) async -> UIImage? {
         let controller = UIHostingController(rootView: self.edgesIgnoringSafeArea(.top))
         controller.overrideUserInterfaceStyle = colorScheme == .dark ? .dark : .light
@@ -558,12 +626,14 @@ extension View {
             window.rootViewController = nil
         }
 
+        // 图片已经是预加载好的 UIImage 了，这里不需要等网络，只要等 SwiftUI
+        // 走完一次布局 + 提交渲染。之前固定等 0.5s 纯属浪费。
+        await Task.yield()
+        CATransaction.flush()
         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-        // 图片是异步解码的，等一帧再布局一次，保证截到的是真图而不是占位块。
         view.setNeedsLayout()
         view.layoutIfNeeded()
-        try? await Task.sleep(nanoseconds: 80_000_000)
-        view.layoutIfNeeded()
+        CATransaction.flush()
 
         // 超长微博降采样，避免 3x 渲染长图时爆内存。
         var scale: CGFloat = 3

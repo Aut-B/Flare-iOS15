@@ -22,24 +22,43 @@ extension EnvironmentValues {
 }
 
 enum ScreenshotImageLoader {
-    /// 解码上限：一张图最多 1200px。九宫格里单格只有 ~120pt，原图动辄 3000px，
+    /// 渲染时单张图最多用到 1200px。九宫格里单格只有 ~120pt，原图动辄 3000px，
     /// 九张全尺寸解码能吃掉两三百 MB，渲染时直接黑图甚至被杀进程。
     private static let maxPixelSize: CGFloat = 1200
 
-    static func load(urls: [URL]) async -> [String: UIImage] {
-        let unique = Array(Set(urls))
+    /// **同步**从 Kingfisher 内存缓存里取图。
+    ///
+    /// 时间线刚刚把这条微博的配图都显示过一遍，这些 UIImage 就躺在内存缓存里，
+    /// 一次查表就能拿到，不需要网络、不需要解码。这是「像 VVebo 一样立刻出图」
+    /// 的关键：第一帧先用手上已有的图渲染，别等下载。
+    static func cached(urls: [URL]) -> [String: UIImage] {
+        var result: [String: UIImage] = [:]
+        for url in Set(urls) {
+            let key = url.absoluteString
+            guard result[key] == nil else { continue }
+            if let image = ImageCache.default.retrieveImageInMemoryCache(forKey: key) {
+                result[key] = downsampleIfNeeded(image)
+            }
+        }
+        return result
+    }
+
+    /// 把内存缓存里没有的补齐。
+    ///
+    /// **故意不加 `DownsamplingImageProcessor`**：Kingfisher 的缓存 key 会带上
+    /// 处理器的标识，一旦加了处理器，时间线里已经下载过的图会全部 miss、
+    /// 重新走一遍网络——这正是之前「图多的时候要渲染半天」的原因。
+    /// 不加处理器时 key 就是 URL 本身，能和 `KFImage` 共用同一份磁盘缓存。
+    static func load(urls: [URL], skipping: Set<String> = []) async -> [String: UIImage] {
+        let unique = Set(urls).filter { !skipping.contains($0.absoluteString) }
         guard !unique.isEmpty else { return [:] }
-        let size = CGSize(width: maxPixelSize, height: maxPixelSize)
         return await withTaskGroup(of: (String, UIImage?).self) { group in
             for url in unique {
                 group.addTask {
                     await withCheckedContinuation { (continuation: CheckedContinuation<(String, UIImage?), Never>) in
                         KingfisherManager.shared.retrieveImage(
                             with: url,
-                            options: [
-                                .processor(DownsamplingImageProcessor(size: size)),
-                                .cacheOriginalImage,
-                            ]
+                            options: [.backgroundDecode]
                         ) { result in
                             switch result {
                             case .success(let value):
@@ -54,10 +73,29 @@ enum ScreenshotImageLoader {
             var images: [String: UIImage] = [:]
             for await (key, image) in group {
                 if let image {
-                    images[key] = image
+                    images[key] = downsampleIfNeeded(image)
                 }
             }
             return images
+        }
+    }
+
+    /// 超大图在内存里缩一次，避免九宫格把内存吃满。已经足够小的图原样返回。
+    private static func downsampleIfNeeded(_ image: UIImage) -> UIImage {
+        let pixelWidth = image.size.width * image.scale
+        let pixelHeight = image.size.height * image.scale
+        let longest = max(pixelWidth, pixelHeight)
+        guard longest.isFinite, longest > maxPixelSize * 1.5 else { return image }
+        let ratio = maxPixelSize / longest
+        let target = CGSize(
+            width: max((pixelWidth * ratio).rounded(), 1),
+            height: max((pixelHeight * ratio).rounded(), 1)
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: target, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: target))
         }
     }
 }
@@ -206,8 +244,10 @@ private struct ScreenshotAvatar: View {
     }
 }
 
-/// 配图区：1 张按原比例整张显示，多张走九宫格（和微博本身一致）。
-/// 之前是每张图纵向整张排开，十张图就能拉到几千点高，离屏渲染直接黑屏。
+/// 配图区：1 张按原比例整张显示，多张走九宫格。
+/// 关键点：**每张图都按原始比例完整显示，不裁切**，而且不限张数——
+/// 用户要的是「什么图都要存全」，所以不做 9 格 +N 遮挡。
+/// 格子宽度固定为 1/3，高度跟着比例走，所以十张图也只有几百点高，不会黑屏。
 private struct ScreenshotMediaStack: View {
     let images: [any UiMedia]
     let width: CGFloat
@@ -215,7 +255,6 @@ private struct ScreenshotMediaStack: View {
     @Environment(\.screenshotImages) private var loadedImages
 
     private let spacing: CGFloat = 4
-    private let maxVisible = 9
 
     private var columnCount: Int {
         switch images.count {
@@ -239,25 +278,20 @@ private struct ScreenshotMediaStack: View {
     }
 
     private var grid: some View {
-        let visible = Array(images.prefix(maxVisible))
         let columns = columnCount
-        let rows = stride(from: 0, to: visible.count, by: columns).map {
-            Array(visible[$0..<min($0 + columns, visible.count)])
+        let rows = stride(from: 0, to: images.count, by: columns).map {
+            Array(images[$0..<min($0 + columns, images.count)])
         }
-        return VStack(spacing: spacing) {
+        return VStack(alignment: .leading, spacing: spacing) {
             ForEach(0..<rows.count, id: \.self) { rowIndex in
-                HStack(spacing: spacing) {
+                HStack(alignment: .top, spacing: spacing) {
                     ForEach(0..<rows[rowIndex].count, id: \.self) { columnIndex in
-                        let index = rowIndex * columns + columnIndex
-                        cell(
-                            rows[rowIndex][columnIndex],
-                            isLastVisible: index == visible.count - 1 && images.count > maxVisible
-                        )
+                        cell(rows[rowIndex][columnIndex])
                     }
                     // 最后一行不满时补位，保证每格等宽。
                     ForEach(0..<(columns - rows[rowIndex].count), id: \.self) { _ in
                         Color.clear
-                            .frame(width: cellSide, height: cellSide)
+                            .frame(width: cellSide, height: 1)
                     }
                 }
             }
@@ -265,62 +299,63 @@ private struct ScreenshotMediaStack: View {
         .frame(width: width, alignment: .leading)
     }
 
-    private func cell(_ media: any UiMedia, isLastVisible: Bool) -> some View {
-        mediaView(media, ratio: 1, corner: 8, fill: true)
-            .frame(width: cellSide, height: cellSide)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(alignment: .center) {
-                if isLastVisible {
-                    ZStack {
-                        Color.black.opacity(0.45)
-                        Text("+\(images.count - maxVisible)")
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundStyle(.white)
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-            }
+    private func cell(_ media: any UiMedia) -> some View {
+        mediaView(media, ratio: ratioOf(media), corner: 8)
+            .frame(width: cellSide)
     }
 
     @ViewBuilder
     private func mediaView(
         _ media: any UiMedia,
         ratio: CGFloat,
-        corner: CGFloat,
-        fill: Bool = false
+        corner: CGFloat
     ) -> some View {
         switch onEnum(of: media) {
         case .image(let image):
-            let source = image.url.isEmpty ? image.previewUrl : image.url
-            mediaImage(source: source, customHeaders: image.customHeaders, ratio: ratio, corner: corner, fill: fill)
+            mediaImage(
+                source: resolvedSource(image.url, image.previewUrl),
+                customHeaders: image.customHeaders,
+                ratio: ratio,
+                corner: corner
+            )
         case .gif(let gif):
-            let source = gif.url.isEmpty ? gif.previewUrl : gif.url
-            mediaImage(source: source, customHeaders: gif.customHeaders, ratio: ratio, corner: corner, fill: fill)
+            mediaImage(
+                source: resolvedSource(gif.url, gif.previewUrl),
+                customHeaders: gif.customHeaders,
+                ratio: ratio,
+                corner: corner
+            )
         case .video(let video):
             mediaImage(
                 source: video.thumbnailUrl,
                 customHeaders: video.customHeaders,
                 ratio: ratio,
-                corner: corner,
-                fill: fill
+                corner: corner
             )
             .overlay {
                 Image(fontAwesome: .circlePlay)
-                    .font(.system(size: fill ? 28 : 40))
+                    .font(.system(size: 28))
                     .foregroundStyle(.white.opacity(0.9))
                     .shadow(radius: 4)
             }
         case .ugoira(let ugoira):
             mediaImage(
-                source: ugoira.previewUrl,
+                source: resolvedSource(ugoira.previewUrl, ugoira.previewUrl),
                 customHeaders: ugoira.customHeaders,
                 ratio: ratio,
-                corner: corner,
-                fill: fill
+                corner: corner
             )
         default:
             Color.clear
         }
+    }
+
+    /// 原图还没到位时先用缩略图顶上：时间线里显示的就是缩略图，它一定在内存
+    /// 缓存里。这样第一帧就能出真图，而不是等原图下载完才有内容。
+    private func resolvedSource(_ primary: String, _ fallback: String) -> String {
+        if !primary.isEmpty, loadedImages[primary] != nil { return primary }
+        if !fallback.isEmpty, loadedImages[fallback] != nil { return fallback }
+        return primary.isEmpty ? fallback : primary
     }
 
     @ViewBuilder
@@ -328,28 +363,20 @@ private struct ScreenshotMediaStack: View {
         source: String,
         customHeaders: [String: String]?,
         ratio: CGFloat,
-        corner: CGFloat,
-        fill: Bool
+        corner: CGFloat
     ) -> some View {
-        let content = Group {
+        Group {
             if let image = loadedImages[source] {
                 Image(uiImage: image)
                     .resizable()
-                    .aspectRatio(contentMode: fill ? .fill : .fit)
+                    .aspectRatio(contentMode: .fit)
             } else {
-                NetworkImage(data: source, customHeader: customHeaders, contentMode: fill ? .fill : .fit)
+                NetworkImage(data: source, customHeader: customHeaders, contentMode: .fit)
             }
         }
-        if fill {
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
-        } else {
-            content
-                .frame(maxWidth: .infinity)
-                .aspectRatio(ratio, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
-        }
+        .frame(maxWidth: .infinity)
+        .aspectRatio(ratio, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
     }
 
     private func ratioOf(_ media: any UiMedia) -> CGFloat {

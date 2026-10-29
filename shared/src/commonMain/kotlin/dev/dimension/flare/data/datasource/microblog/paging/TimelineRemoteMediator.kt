@@ -72,8 +72,11 @@ internal open class TimelineRemoteMediator(
      * 立即返回成功让刷新指示器结束，真正的取数放到后台协程，写库后由
      * Room 的 invalidation 自动把新内容刷进列表。混合首页里最慢的那个平台
      * （例如微博）不会再拖住整次刷新。
+     *
+     * 但**用户手动下拉**时必须返回 false：否则指示器一闪就消失，用户只能
+     * 干等着内容自己冒出来，体感就是「刷新坏了」。后台/自动刷新才走延迟路径。
      */
-    private val deferRefresh: Boolean = false,
+    private val deferRefresh: () -> Boolean = { false },
 ) : BasePagingRemoteMediator<
         OffsetFromStartPagingKey,
         TimelinePageItem,
@@ -134,7 +137,7 @@ internal open class TimelineRemoteMediator(
             suppressInitialPrepend = false
             refreshSharedHomeOnPrepend = false
             // 只有「保留历史」的首页时间线才走 loadHomePage，后台刷新复用同一条路径。
-            if (deferRefresh && retainHistory != null) {
+            if (deferRefresh() && retainHistory != null) {
                 when (decideDeferredRefresh()) {
                     DeferredRefresh.Defer -> {
                         deferredRefreshScope.launch { runDeferredRefresh(state.config.pageSize) }
@@ -149,42 +152,49 @@ internal open class TimelineRemoteMediator(
                 }
             }
         }
-        if (deferRefresh && retainHistory != null && loadType != LoadType.REFRESH) {
+        if (deferRefresh() && retainHistory != null && loadType != LoadType.REFRESH) {
             // 后台刷新还在跑的时候，翻页先等它落地，避免两边同时改同一份续页游标。
             withTimeoutOrNull(deferredRefreshWaitMillis) {
                 deferredRefreshLock.withLock {}
             }
         }
-        return when {
-            retainHistory == null -> {
-                val home = retainedHome()
-                if (home != null && loadType == LoadType.PREPEND && refreshSharedHomeOnPrepend) {
-                    // Ordinary prepend sources use this boundary for their initial head refresh.
-                    when (val result = home.load(LoadType.REFRESH, state)) {
-                        is MediatorResult.Error -> {
-                            result
-                        }
+        val result =
+            when {
+                retainHistory == null -> {
+                    val home = retainedHome()
+                    if (home != null && loadType == LoadType.PREPEND && refreshSharedHomeOnPrepend) {
+                        // Ordinary prepend sources use this boundary for their initial head refresh.
+                        when (val result = home.load(LoadType.REFRESH, state)) {
+                            is MediatorResult.Error -> {
+                                result
+                            }
 
-                        is MediatorResult.Success -> {
-                            refreshSharedHomeOnPrepend = false
-                            MediatorResult.Success(true)
+                            is MediatorResult.Success -> {
+                                refreshSharedHomeOnPrepend = false
+                                MediatorResult.Success(true)
+                            }
                         }
-                    }
-                } else {
-                    (home?.load(loadType, state) ?: super.doLoad(loadType, state)).also {
-                        if (loadType == LoadType.PREPEND && it is MediatorResult.Success) refreshSharedHomeOnPrepend = false
+                    } else {
+                        (home?.load(loadType, state) ?: super.doLoad(loadType, state)).also {
+                            if (loadType == LoadType.PREPEND && it is MediatorResult.Success) refreshSharedHomeOnPrepend = false
+                        }
                     }
                 }
-            }
 
-            loadType == LoadType.REFRESH && refreshSession != null -> {
-                refreshSession.mutex.withLock { loadHomePage(loadType, state.config.pageSize) }
-            }
+                loadType == LoadType.REFRESH && refreshSession != null -> {
+                    refreshSession.mutex.withLock { loadHomePage(loadType, state.config.pageSize) }
+                }
 
-            else -> {
-                loadHomePage(loadType, state.config.pageSize)
+                else -> {
+                    loadHomePage(loadType, state.config.pageSize)
+                }
             }
+        if (loadType == LoadType.REFRESH) {
+            // 同步刷新也要记时间戳：否则紧随其后的 invalidation 刷新会被判定成
+            // 「可以 defer」，白白再跑一次后台取数（也就是「刷新 -> 写库 -> 再刷新」）。
+            lastRefreshFinishedAt = Clock.System.now().toEpochMilliseconds()
         }
+        return result
     }
 
     private enum class DeferredRefresh {

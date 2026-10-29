@@ -510,27 +510,39 @@ public struct StatusView: View {
             titleVisibility: .visible
         ) {
             Button {
-                manage { $0.pin(pinned: true) }
+                StatusManageActions.shared.pin(accountType: data.accountType, statusKey: data.statusKey, pinned: true)
             } label: {
                 Text("status_manage_pin", bundle: FlareAppleUILocalization.bundle)
             }
             Button {
-                manage { $0.pin(pinned: false) }
+                StatusManageActions.shared.pin(accountType: data.accountType, statusKey: data.statusKey, pinned: false)
             } label: {
                 Text("status_manage_unpin", bundle: FlareAppleUILocalization.bundle)
             }
             Button {
-                manage { $0.updateVisibility(visibility: .mutual) }
+                StatusManageActions.shared.updateVisibility(
+                    accountType: data.accountType,
+                    statusKey: data.statusKey,
+                    visibility: .mutual
+                )
             } label: {
                 Text("status_manage_visibility_mutual", bundle: FlareAppleUILocalization.bundle)
             }
             Button {
-                manage { $0.updateVisibility(visibility: .followers) }
+                StatusManageActions.shared.updateVisibility(
+                    accountType: data.accountType,
+                    statusKey: data.statusKey,
+                    visibility: .followers
+                )
             } label: {
                 Text("status_manage_visibility_followers", bundle: FlareAppleUILocalization.bundle)
             }
             Button {
-                manage { $0.updateVisibility(visibility: .`private`) }
+                StatusManageActions.shared.updateVisibility(
+                    accountType: data.accountType,
+                    statusKey: data.statusKey,
+                    visibility: .`private`
+                )
             } label: {
                 Text("status_manage_visibility_private", bundle: FlareAppleUILocalization.bundle)
             }
@@ -557,11 +569,6 @@ public struct StatusView: View {
                 Text("Cancel")
             }
         }
-    }
-
-    private func manage(_ action: (ManageStatusState) -> Void) {
-        let presenter = ManageStatusPresenter(accountType: data.accountType, statusKey: data.statusKey)
-        action(presenter.models.value)
     }
 
     /// 只在自己发的帖子右上角显示「更多」入口。
