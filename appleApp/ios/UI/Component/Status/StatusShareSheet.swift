@@ -75,7 +75,7 @@ struct StatusShareSheet: View {
 
                 Section {
                     // 截图放在最前面：这是这个面板的主功能。
-                    if let image {
+                    if let image, renderer.isFinal {
                         BackportShareLink(item: image) {
                             Label("share_screenshot", systemImage: "photo")
                         }
@@ -94,7 +94,7 @@ struct StatusShareSheet: View {
                     } label: {
                         Label("save_screenshot", systemImage: "arrow.down.circle")
                     }
-                    .disabled(image == nil)
+                    .disabled(image == nil || !renderer.isFinal)
 
                     Button {
                         showCommentPicker = true
@@ -153,7 +153,7 @@ struct StatusShareSheet: View {
                             Image(fontAwesome: .retweet)
                         }
                     }
-                    .disabled(image == nil)
+                    .disabled(image == nil || !renderer.isFinal)
 
                     if let url = URL(string: shareUrl) {
                         BackportShareLink(item: url) {
@@ -270,6 +270,22 @@ struct StatusShareSheet: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         showPreview = true
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        // 第一帧先让用户看到东西，配图还在补的时候给个小提示，
+                        // 免得他以为这就是最终效果。
+                        if !renderer.isFinal {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .scaleEffect(0.7)
+                                Text("share_screenshot_rendering")
+                                    .font(.caption2)
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(.thinMaterial, in: Capsule())
+                            .padding(8)
+                        }
                     }
             }
             .frame(maxWidth: .infinity)
@@ -501,6 +517,9 @@ private struct ScreenshotCommentPickerView: View {
 @MainActor
 private final class ScreenshotRenderCoordinator: ObservableObject {
     @Published private(set) var image: UIImage?
+    /// 图里的配图是不是都到位了。第一帧可能还有图没下下来，
+    /// 这时候允许保存就会存出一张缺图的截图。
+    @Published private(set) var isFinal = false
 
     private var task: Task<Void, Never>?
 
@@ -512,6 +531,7 @@ private final class ScreenshotRenderCoordinator: ObservableObject {
         urls: [URL]
     ) {
         task?.cancel()
+        isFinal = false
 
         // 第一帧的素材：纯内存查表，不碰网络。
         let cached = ScreenshotImageLoader.cached(urls: urls)
@@ -536,7 +556,11 @@ private final class ScreenshotRenderCoordinator: ObservableObject {
                 urls: urls,
                 skipping: Set(cached.keys)
             )
-            guard !Task.isCancelled, !missing.isEmpty else { return }
+            guard !Task.isCancelled else { return }
+            guard !missing.isEmpty else {
+                self.isFinal = true
+                return
+            }
             let merged = cached.merging(missing) { current, _ in current }
             let full = await Self.makeImage(
                 item: item,
@@ -545,8 +569,9 @@ private final class ScreenshotRenderCoordinator: ObservableObject {
                 colorScheme: colorScheme,
                 images: merged
             )
-            guard !Task.isCancelled, let full else { return }
-            self.image = full
+            guard !Task.isCancelled else { return }
+            if let full { self.image = full }
+            self.isFinal = true
         }
     }
 
