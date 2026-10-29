@@ -393,10 +393,7 @@ internal class VVODataSource(
         data: ComposeData,
         progress: () -> Unit,
     ) {
-        // 写操作不复用读路径缓存的 st：微博会把复用/过期的 st 当成异常请求，
-        // 返回「操作频繁」这类风控提示。发之前强制取一次新的 config。
-        service.invalidateConfigCache()
-        val st = ensureLogin()
+        val st = ensureWriteLogin()
 
         val mediaIds =
             data.medias.mapIndexed { index, (it, _) ->
@@ -495,7 +492,7 @@ internal class VVODataSource(
         )
 
     private suspend fun like(event: PostEvent.VVO.Like) {
-        val st = ensureLogin()
+        val st = ensureWriteLogin()
         if (event.liked) {
             service.unlikeStatus(id = event.postKey.id, st = st)
         } else {
@@ -504,7 +501,7 @@ internal class VVODataSource(
     }
 
     private suspend fun likeComment(event: PostEvent.VVO.LikeComment) {
-        val st = ensureLogin()
+        val st = ensureWriteLogin()
         if (event.liked) {
             service.likesDestroy(id = event.postKey.id, st = st)
         } else {
@@ -513,7 +510,7 @@ internal class VVODataSource(
     }
 
     private suspend fun favorite(event: PostEvent.VVO.Favorite) {
-        val st = ensureLogin()
+        val st = ensureWriteLogin()
         if (event.favorited) {
             service.unfavoriteStatus(id = event.postKey.id, st = st)
         } else {
@@ -653,6 +650,16 @@ internal class VVODataSource(
                 media = media.compressImage(imageCompressor, MEDIA_COMPRESSION),
             )
         return response.picID ?: throw Exception("upload failed")
+    }
+
+    /**
+     * 写操作专用：先续签 Cookie 再取 st。
+     * 微博的 SUB 只在 passport 的 SSO 跳转链里重新签名，旧 SUB 读接口还能用，
+     * 写接口会被风控直接拦下（「转发频繁」/「操作频繁」）。
+     */
+    private suspend fun ensureWriteLogin(): String {
+        service.refreshCredentialForWrite()
+        return ensureLogin()
     }
 
     private suspend fun ensureLogin(): String {

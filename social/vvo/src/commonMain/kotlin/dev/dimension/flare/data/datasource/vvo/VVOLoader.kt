@@ -74,7 +74,7 @@ internal class VVOLoader(
     }
 
     override suspend fun follow(userKey: MicroBlogKey) {
-        val st = ensureLogin()
+        val st = ensureWriteLogin()
         service.follow(
             st = st,
             uid = userKey.id,
@@ -82,7 +82,7 @@ internal class VVOLoader(
     }
 
     override suspend fun unfollow(userKey: MicroBlogKey) {
-        val st = ensureLogin()
+        val st = ensureWriteLogin()
         service.unfollow(
             st = st,
             uid = userKey.id,
@@ -149,7 +149,7 @@ internal class VVOLoader(
     }
 
     override suspend fun deleteStatus(statusKey: MicroBlogKey) {
-        val st = ensureLogin()
+        val st = ensureWriteLogin()
         val response =
             service.deleteStatus(
                 mid = statusKey.id,
@@ -173,7 +173,7 @@ internal class VVOLoader(
         statusKey: MicroBlogKey,
         pinned: Boolean,
     ) {
-        val st = ensureLogin()
+        val st = ensureWriteLogin()
         val response =
             service.setTopStatus(
                 id = statusKey.id,
@@ -189,7 +189,7 @@ internal class VVOLoader(
         statusKey: MicroBlogKey,
         visibility: UiTimelineV2.Post.Visibility,
     ) {
-        val st = ensureLogin()
+        val st = ensureWriteLogin()
         val response =
             service.updateVisibility(
                 id = statusKey.id,
@@ -199,6 +199,16 @@ internal class VVOLoader(
         if ((response.ok ?: 0L) == 0L) {
             throw Exception("微博修改可见范围失败：${response.msg ?: response.httpCode ?: "unknown"}")
         }
+    }
+
+    /**
+     * 写操作专用：先强制续签 Cookie 再取 st。
+     * 微博的 SUB 只在 passport 的 SSO 跳转链里重新签名，旧 SUB 读接口还能用，
+     * 写接口会被风控直接拦下（「转发频繁」/「操作频繁」）。
+     */
+    private suspend fun ensureWriteLogin(): String {
+        service.refreshCredentialForWrite()
+        return ensureLogin()
     }
 
     private suspend fun ensureLogin(): String {
