@@ -569,13 +569,49 @@ extension View {
         var scale: CGFloat = 3
         if targetSize.height * scale > 12_000 { scale = 2 }
         if targetSize.height * scale > 12_000 { scale = 1 }
+        // 极端情况（几十张图 / 超长文）直接放弃高倍率，宁可糊一点也别黑屏。
+        if targetSize.height * scale > 16_000 { scale = 0.5 }
 
         let format = UIGraphicsImageRendererFormat()
         format.scale = scale
         format.opaque = true
         let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
-        return renderer.image { _ in
+        let drawn = renderer.image { _ in
             view.drawHierarchy(in: view.bounds, afterScreenUpdates: true)
         }
+        if !Self.isBlank(drawn) { return drawn }
+
+        // drawHierarchy 在超高视图上会整张画成黑的，退回 layer 渲染再来一次。
+        let layered = renderer.image { context in
+            view.layer.render(in: context.cgContext)
+        }
+        return Self.isBlank(layered) ? drawn : layered
+    }
+
+    /// 采样几个点判断是不是整张黑（drawHierarchy 失败时的典型表现）。
+    static func isBlank(_ image: UIImage) -> Bool {
+        guard let cgImage = image.cgImage else { return true }
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0 else { return true }
+        guard let data = cgImage.dataProvider?.data,
+              let bytes = CFDataGetBytePtr(data)
+        else { return false }
+        let bytesPerRow = cgImage.bytesPerRow
+        let bytesPerPixel = max(cgImage.bitsPerPixel / 8, 1)
+        let points: [(Int, Int)] = [
+            (width / 2, height / 2),
+            (width / 2, height / 4),
+            (width / 2, height * 3 / 4),
+            (width / 4, height / 2),
+        ]
+        for (x, y) in points {
+            let offset = y * bytesPerRow + x * bytesPerPixel
+            guard offset + 2 < CFDataGetLength(data) else { continue }
+            if bytes[offset] > 12 || bytes[offset + 1] > 12 || bytes[offset + 2] > 12 {
+                return false
+            }
+        }
+        return true
     }
 }

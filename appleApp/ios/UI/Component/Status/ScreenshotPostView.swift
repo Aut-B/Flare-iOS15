@@ -22,16 +22,24 @@ extension EnvironmentValues {
 }
 
 enum ScreenshotImageLoader {
+    /// 解码上限：一张图最多 1200px。九宫格里单格只有 ~120pt，原图动辄 3000px，
+    /// 九张全尺寸解码能吃掉两三百 MB，渲染时直接黑图甚至被杀进程。
+    private static let maxPixelSize: CGFloat = 1200
+
     static func load(urls: [URL]) async -> [String: UIImage] {
         let unique = Array(Set(urls))
         guard !unique.isEmpty else { return [:] }
+        let size = CGSize(width: maxPixelSize, height: maxPixelSize)
         return await withTaskGroup(of: (String, UIImage?).self) { group in
             for url in unique {
                 group.addTask {
                     await withCheckedContinuation { (continuation: CheckedContinuation<(String, UIImage?), Never>) in
                         KingfisherManager.shared.retrieveImage(
                             with: url,
-                            options: [.backgroundDecode]
+                            options: [
+                                .processor(DownsamplingImageProcessor(size: size)),
+                                .cacheOriginalImage,
+                            ]
                         ) { result in
                             switch result {
                             case .success(let value):
@@ -77,8 +85,9 @@ struct ScreenshotPostView: View {
     }
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ScreenshotPostBlock(item: item, depth: 0)
+        let innerWidth = contentWidth - 32
+        return VStack(alignment: .leading, spacing: 14) {
+            ScreenshotPostBlock(item: item, depth: 0, contentWidth: innerWidth)
             if !comments.isEmpty {
                 Divider()
                 VStack(alignment: .leading, spacing: 12) {
@@ -105,6 +114,7 @@ struct ScreenshotPostView: View {
 private struct ScreenshotPostBlock: View {
     let item: UiTimelineV2
     let depth: Int
+    let contentWidth: CGFloat
 
     var body: some View {
         if let post = StatusShareSheet.postOf(item) {
@@ -115,10 +125,10 @@ private struct ScreenshotPostBlock: View {
                         .font(.system(size: depth > 0 ? 14 : 15))
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                ScreenshotMediaStack(images: Array(post.images))
+                ScreenshotMediaStack(images: Array(post.images), width: contentWidth)
                 if depth == 0 {
                     ForEach(0..<quotedPosts.count, id: \.self) { index in
-                        ScreenshotQuoteCard(post: quotedPosts[index])
+                        ScreenshotQuoteCard(post: quotedPosts[index], contentWidth: contentWidth - 24)
                     }
                 }
             }
@@ -196,59 +206,162 @@ private struct ScreenshotAvatar: View {
     }
 }
 
+/// 配图区：1 张按原比例整张显示，多张走九宫格（和微博本身一致）。
+/// 之前是每张图纵向整张排开，十张图就能拉到几千点高，离屏渲染直接黑屏。
 private struct ScreenshotMediaStack: View {
     let images: [any UiMedia]
+    let width: CGFloat
 
     @Environment(\.screenshotImages) private var loadedImages
 
-    var body: some View {
-        if !images.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(0..<images.count, id: \.self) { index in
-                    mediaView(images[index])
-                }
-            }
+    private let spacing: CGFloat = 4
+    private let maxVisible = 9
+
+    private var columnCount: Int {
+        switch images.count {
+        case 1: return 1
+        case 2, 4: return 2
+        default: return 3
         }
     }
 
+    private var cellSide: CGFloat {
+        let columns = CGFloat(columnCount)
+        return max((width - spacing * (columns - 1)) / columns, 1)
+    }
+
+    var body: some View {
+        if images.count == 1 {
+            mediaView(images[0], ratio: ratioOf(images[0]), corner: 12)
+        } else if !images.isEmpty {
+            grid
+        }
+    }
+
+    private var grid: some View {
+        let visible = Array(images.prefix(maxVisible))
+        let columns = columnCount
+        let rows = stride(from: 0, to: visible.count, by: columns).map {
+            Array(visible[$0..<min($0 + columns, visible.count)])
+        }
+        return VStack(spacing: spacing) {
+            ForEach(0..<rows.count, id: \.self) { rowIndex in
+                HStack(spacing: spacing) {
+                    ForEach(0..<rows[rowIndex].count, id: \.self) { columnIndex in
+                        let index = rowIndex * columns + columnIndex
+                        cell(
+                            rows[rowIndex][columnIndex],
+                            isLastVisible: index == visible.count - 1 && images.count > maxVisible
+                        )
+                    }
+                    // 最后一行不满时补位，保证每格等宽。
+                    ForEach(0..<(columns - rows[rowIndex].count), id: \.self) { _ in
+                        Color.clear
+                            .frame(width: cellSide, height: cellSide)
+                    }
+                }
+            }
+        }
+        .frame(width: width, alignment: .leading)
+    }
+
+    private func cell(_ media: any UiMedia, isLastVisible: Bool) -> some View {
+        mediaView(media, ratio: 1, corner: 8, fill: true)
+            .frame(width: cellSide, height: cellSide)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(alignment: .center) {
+                if isLastVisible {
+                    ZStack {
+                        Color.black.opacity(0.45)
+                        Text("+\(images.count - maxVisible)")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+    }
+
     @ViewBuilder
-    private func mediaView(_ media: any UiMedia) -> some View {
+    private func mediaView(
+        _ media: any UiMedia,
+        ratio: CGFloat,
+        corner: CGFloat,
+        fill: Bool = false
+    ) -> some View {
         switch onEnum(of: media) {
         case .image(let image):
             let source = image.url.isEmpty ? image.previewUrl : image.url
-            mediaImage(source: source, customHeaders: image.customHeaders, ratio: image.aspectRatio)
+            mediaImage(source: source, customHeaders: image.customHeaders, ratio: ratio, corner: corner, fill: fill)
         case .gif(let gif):
             let source = gif.url.isEmpty ? gif.previewUrl : gif.url
-            mediaImage(source: source, customHeaders: gif.customHeaders, ratio: gif.aspectRatio)
+            mediaImage(source: source, customHeaders: gif.customHeaders, ratio: ratio, corner: corner, fill: fill)
         case .video(let video):
-            ZStack {
-                mediaImage(source: video.thumbnailUrl, customHeaders: video.customHeaders, ratio: video.aspectRatio)
+            mediaImage(
+                source: video.thumbnailUrl,
+                customHeaders: video.customHeaders,
+                ratio: ratio,
+                corner: corner,
+                fill: fill
+            )
+            .overlay {
                 Image(fontAwesome: .circlePlay)
-                    .font(.system(size: 40))
+                    .font(.system(size: fill ? 28 : 40))
                     .foregroundStyle(.white.opacity(0.9))
                     .shadow(radius: 4)
             }
         case .ugoira(let ugoira):
-            mediaImage(source: ugoira.previewUrl, customHeaders: ugoira.customHeaders, ratio: ugoira.aspectRatio)
+            mediaImage(
+                source: ugoira.previewUrl,
+                customHeaders: ugoira.customHeaders,
+                ratio: ratio,
+                corner: corner,
+                fill: fill
+            )
         default:
-            EmptyView()
+            Color.clear
         }
     }
 
     @ViewBuilder
-    private func mediaImage(source: String, customHeaders: [String: String]?, ratio: Float) -> some View {
-        Group {
+    private func mediaImage(
+        source: String,
+        customHeaders: [String: String]?,
+        ratio: CGFloat,
+        corner: CGFloat,
+        fill: Bool
+    ) -> some View {
+        let content = Group {
             if let image = loadedImages[source] {
                 Image(uiImage: image)
                     .resizable()
-                    .scaledToFit()
+                    .aspectRatio(contentMode: fill ? .fill : .fit)
             } else {
-                NetworkImage(data: source, customHeader: customHeaders, contentMode: .fit)
+                NetworkImage(data: source, customHeader: customHeaders, contentMode: fill ? .fill : .fit)
             }
         }
-        .frame(maxWidth: .infinity)
-        .aspectRatio(Self.ratio(ratio), contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        if fill {
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+        } else {
+            content
+                .frame(maxWidth: .infinity)
+                .aspectRatio(ratio, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        }
+    }
+
+    private func ratioOf(_ media: any UiMedia) -> CGFloat {
+        let value: Float =
+            switch onEnum(of: media) {
+            case .image(let image): image.aspectRatio
+            case .gif(let gif): gif.aspectRatio
+            case .video(let video): video.aspectRatio
+            case .ugoira(let ugoira): ugoira.aspectRatio
+            default: 1
+            }
+        return Self.ratio(value)
     }
 
     /// 微博给的尺寸偶尔是 0，兜一个 1:1，避免除零把高度算成无穷大。
@@ -262,6 +375,7 @@ private struct ScreenshotMediaStack: View {
 
 private struct ScreenshotQuoteCard: View {
     let post: UiTimelineV2.Post
+    let contentWidth: CGFloat
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -271,7 +385,7 @@ private struct ScreenshotQuoteCard: View {
                     .font(.system(size: 14))
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
-            ScreenshotMediaStack(images: Array(post.images))
+            ScreenshotMediaStack(images: Array(post.images), width: contentWidth)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
