@@ -244,10 +244,16 @@ private struct ScreenshotAvatar: View {
     }
 }
 
-/// 配图区：1 张按原比例整张显示，多张走九宫格。
-/// 关键点：**每张图都按原始比例完整显示，不裁切**，而且不限张数——
-/// 用户要的是「什么图都要存全」，所以不做 9 格 +N 遮挡。
-/// 格子宽度固定为 1/3，高度跟着比例走，所以十张图也只有几百点高，不会黑屏。
+/// 配图区：1 张整行显示，多张走九宫格。
+///
+/// 比例优先取自**已经加载好的 UIImage**，而不是接口里的 `aspectRatio`：
+/// 微博的多图帖子经常不返回图片宽高，`UiMedia.aspectRatio` 就退化成 1:1，
+/// 于是竖图在九宫格里被排成正方形 —— 这正是「单图原比例、多图不是」的原因。
+/// 加载不到图时再退回接口给的字段。
+///
+/// 宽高都显式算出来（`frame(width:height:)`）：只给宽度再叠 `aspectRatio`
+/// 时，父视图提的是 nil 高度，SwiftUI 会退回子视图的 ideal size，比例不保证生效。
+/// 每张图按原比例完整显示，不裁切、不限张数 —— 用户要的是「什么图都存全」。
 private struct ScreenshotMediaStack: View {
     let images: [any UiMedia]
     let width: CGFloat
@@ -271,7 +277,7 @@ private struct ScreenshotMediaStack: View {
 
     var body: some View {
         if images.count == 1 {
-            mediaView(images[0], ratio: ratioOf(images[0]), corner: 12)
+            tile(images[0], side: width, corner: 12)
         } else if !images.isEmpty {
             grid
         }
@@ -286,7 +292,7 @@ private struct ScreenshotMediaStack: View {
             ForEach(0..<rows.count, id: \.self) { rowIndex in
                 HStack(alignment: .top, spacing: spacing) {
                     ForEach(0..<rows[rowIndex].count, id: \.self) { columnIndex in
-                        cell(rows[rowIndex][columnIndex])
+                        tile(rows[rowIndex][columnIndex], side: cellSide, corner: 8)
                     }
                     // 最后一行不满时补位，保证每格等宽。
                     ForEach(0..<(columns - rows[rowIndex].count), id: \.self) { _ in
@@ -299,54 +305,61 @@ private struct ScreenshotMediaStack: View {
         .frame(width: width, alignment: .leading)
     }
 
-    private func cell(_ media: any UiMedia) -> some View {
-        mediaView(media, ratio: ratioOf(media), corner: 8)
-            .frame(width: cellSide)
+    private func tile(_ media: any UiMedia, side: CGFloat, corner: CGFloat) -> some View {
+        let source = sourceOf(media)
+        let ratio = displayRatio(media, source: source)
+        return content(media, source: source, corner: corner)
+            .frame(width: side, height: max(side / ratio, 1))
     }
 
     @ViewBuilder
-    private func mediaView(
+    private func content(
         _ media: any UiMedia,
-        ratio: CGFloat,
+        source: String,
         corner: CGFloat
     ) -> some View {
-        switch onEnum(of: media) {
-        case .image(let image):
-            mediaImage(
-                source: resolvedSource(image.url, image.previewUrl),
-                customHeaders: image.customHeaders,
-                ratio: ratio,
-                corner: corner
-            )
-        case .gif(let gif):
-            mediaImage(
-                source: resolvedSource(gif.url, gif.previewUrl),
-                customHeaders: gif.customHeaders,
-                ratio: ratio,
-                corner: corner
-            )
-        case .video(let video):
-            mediaImage(
-                source: video.thumbnailUrl,
-                customHeaders: video.customHeaders,
-                ratio: ratio,
-                corner: corner
-            )
-            .overlay {
+        Group {
+            if let image = loadedImages[source] {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                NetworkImage(data: source, customHeader: headersOf(media), contentMode: .fit)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        .overlay {
+            if case .video(_) = onEnum(of: media) {
                 Image(fontAwesome: .circlePlay)
                     .font(.system(size: 28))
                     .foregroundStyle(.white.opacity(0.9))
                     .shadow(radius: 4)
             }
+        }
+    }
+
+    private func sourceOf(_ media: any UiMedia) -> String {
+        switch onEnum(of: media) {
+        case .image(let image):
+            return resolvedSource(image.url, image.previewUrl)
+        case .gif(let gif):
+            return resolvedSource(gif.url, gif.previewUrl)
+        case .video(let video):
+            return video.thumbnailUrl
         case .ugoira(let ugoira):
-            mediaImage(
-                source: resolvedSource(ugoira.previewUrl, ugoira.previewUrl),
-                customHeaders: ugoira.customHeaders,
-                ratio: ratio,
-                corner: corner
-            )
+            return resolvedSource(ugoira.previewUrl, ugoira.previewUrl)
         default:
-            Color.clear
+            return ""
+        }
+    }
+
+    private func headersOf(_ media: any UiMedia) -> [String: String]? {
+        switch onEnum(of: media) {
+        case .image(let image): return image.customHeaders
+        case .gif(let gif): return gif.customHeaders
+        case .video(let video): return video.customHeaders
+        case .ugoira(let ugoira): return ugoira.customHeaders
+        default: return nil
         }
     }
 
@@ -358,25 +371,14 @@ private struct ScreenshotMediaStack: View {
         return primary.isEmpty ? fallback : primary
     }
 
-    @ViewBuilder
-    private func mediaImage(
-        source: String,
-        customHeaders: [String: String]?,
-        ratio: CGFloat,
-        corner: CGFloat
-    ) -> some View {
-        Group {
-            if let image = loadedImages[source] {
-                Image(uiImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-            } else {
-                NetworkImage(data: source, customHeader: customHeaders, contentMode: .fit)
-            }
+    /// 真实比例优先。UIImage 的 size 已经包含 orientation，竖图不会算成横的。
+    private func displayRatio(_ media: any UiMedia, source: String) -> CGFloat {
+        if let image = loadedImages[source],
+           image.size.width > 0,
+           image.size.height > 0 {
+            return Self.ratio(Float(image.size.width / image.size.height))
         }
-        .frame(maxWidth: .infinity)
-        .aspectRatio(ratio, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        return ratioOf(media)
     }
 
     private func ratioOf(_ media: any UiMedia) -> CGFloat {
@@ -391,10 +393,11 @@ private struct ScreenshotMediaStack: View {
         return Self.ratio(value)
     }
 
-    /// 微博给的尺寸偶尔是 0，兜一个 1:1，避免除零把高度算成无穷大。
+    /// 微博给的尺寸偶尔是 0（多图帖尤其常见），兜一个 1:1，避免除零把高度算成无穷大。
+    /// 上下限同时防止超长图把整张截图撑到画不出来。
     private static func ratio(_ value: Float) -> CGFloat {
         guard value.isFinite, value > 0 else { return 1 }
-        return CGFloat(min(max(value, 0.15), 8))
+        return CGFloat(min(max(value, 0.1), 8))
     }
 }
 

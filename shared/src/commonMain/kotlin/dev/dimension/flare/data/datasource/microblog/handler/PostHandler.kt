@@ -133,6 +133,27 @@ public class PostHandler(
                 loader.updateStatusVisibility(postKey, visibility)
             }
         }
+
+    /**
+     * 与 [pin] 相同，但把异常抛给调用方。
+     *
+     * 右上角菜单需要「成功/失败」的即时反馈：`tryRun` 会把微博返回的
+     * 「操作频繁」「没有权限」之类的原因吞掉，用户点完只能干瞪眼。
+     */
+    public suspend fun pinStatus(
+        postKey: MicroBlogKey,
+        pinned: Boolean,
+    ) {
+        loader.pinStatus(postKey, pinned)
+    }
+
+    /** 与 [updateVisibility] 相同，但把异常抛给调用方。 */
+    public suspend fun updateStatusVisibility(
+        postKey: MicroBlogKey,
+        visibility: UiTimelineV2.Post.Visibility,
+    ) {
+        loader.updateStatusVisibility(postKey, visibility)
+    }
 }
 
 @HiddenFromObjC

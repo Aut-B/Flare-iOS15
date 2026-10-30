@@ -175,13 +175,19 @@ internal class VVOLoader(
     ) {
         val st = ensureWriteLogin()
         val response =
-            service.setTopStatus(
-                id = statusKey.id,
-                top = if (pinned) "1" else "0",
-                st = st,
-            )
+            try {
+                service.setTopStatus(
+                    id = statusKey.id,
+                    top = if (pinned) "1" else "0",
+                    st = st,
+                )
+            } catch (throwable: Throwable) {
+                // 把接口名带出来：解析失败/被重定向到登录页时，光看 "Unexpected JSON"
+                // 完全没法判断是哪一步出的问题。
+                throw Exception("置顶失败（profile/setTop）：${throwable.message ?: "网络异常"}", throwable)
+            }
         if ((response.ok ?: 0L) == 0L) {
-            throw Exception("微博置顶失败：${response.msg ?: response.httpCode ?: "unknown"}")
+            throw Exception("置顶失败：${response.msg ?: response.httpCode ?: "微博没有返回原因"}")
         }
     }
 
@@ -191,13 +197,20 @@ internal class VVOLoader(
     ) {
         val st = ensureWriteLogin()
         val response =
-            service.updateVisibility(
-                id = statusKey.id,
-                visibility = visibility.toVvoVisible(),
-                st = st,
-            )
+            try {
+                service.updateVisibility(
+                    id = statusKey.id,
+                    visibility = visibility.toVvoVisible(),
+                    st = st,
+                )
+            } catch (throwable: Throwable) {
+                throw Exception(
+                    "修改可见范围失败（statuses/updateVisibility）：${throwable.message ?: "网络异常"}",
+                    throwable,
+                )
+            }
         if ((response.ok ?: 0L) == 0L) {
-            throw Exception("微博修改可见范围失败：${response.msg ?: response.httpCode ?: "unknown"}")
+            throw Exception("修改可见范围失败：${response.msg ?: response.httpCode ?: "微博没有返回原因"}")
         }
     }
 

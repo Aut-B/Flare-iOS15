@@ -2,6 +2,7 @@ import UIKit
 import SwiftUI
 import KotlinSharedUI
 import FlareAppleCore
+import Drops
 
 /// UIKit port of the SwiftUI `StatusView`.
 ///
@@ -741,13 +742,18 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         return specific.accountKey.id == userKey.id && specific.accountKey.host == userKey.host
     }
 
+    /// 找最合适的展示者：先沿 responder 链找 VC，找不到就退回 window 的 root，
+    /// 再逐层取「最上层已展示」的那个 —— 从子 VC 上 present 时，
+    /// 如果它本身不在 window 里（例如被 SwiftUI 托管），alert 会静默失败。
     private var hostViewController: UIViewController? {
         var responder: UIResponder? = self
         while let current = responder {
-            if let controller = current as? UIViewController { return controller }
+            if let controller = current as? UIViewController {
+                return controller.topmostPresented
+            }
             responder = current.next
         }
-        return nil
+        return window?.rootViewController?.topmostPresented
     }
 
     private func presentManageMenu(for data: UiTimelineV2.Post) {
@@ -761,12 +767,35 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         let statusKey = data.statusKey
         sheet.addAction(
             UIAlertAction(title: String(localized: "status_manage_pin"), style: .default) { _ in
-                StatusManageActions.shared.pin(accountType: accountType, statusKey: statusKey, pinned: true)
+                StatusManageActions.shared.pin(
+                    accountType: accountType,
+                    statusKey: statusKey,
+                    pinned: true
+                ) { error in
+                    Self.showManageResult(error, success: String(localized: "status_manage_done_pin"))
+                }
             }
         )
         sheet.addAction(
             UIAlertAction(title: String(localized: "status_manage_unpin"), style: .default) { _ in
-                StatusManageActions.shared.pin(accountType: accountType, statusKey: statusKey, pinned: false)
+                StatusManageActions.shared.pin(
+                    accountType: accountType,
+                    statusKey: statusKey,
+                    pinned: false
+                ) { error in
+                    Self.showManageResult(error, success: String(localized: "status_manage_done_unpin"))
+                }
+            }
+        )
+        sheet.addAction(
+            UIAlertAction(title: String(localized: "status_manage_visibility_public"), style: .default) { _ in
+                StatusManageActions.shared.updateVisibility(
+                    accountType: accountType,
+                    statusKey: statusKey,
+                    visibility: .`public`
+                ) { error in
+                    Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
+                }
             }
         )
         sheet.addAction(
@@ -775,7 +804,9 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                     accountType: accountType,
                     statusKey: statusKey,
                     visibility: .mutual
-                )
+                ) { error in
+                    Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
+                }
             }
         )
         sheet.addAction(
@@ -784,7 +815,9 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                     accountType: accountType,
                     statusKey: statusKey,
                     visibility: .followers
-                )
+                ) { error in
+                    Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
+                }
             }
         )
         sheet.addAction(
@@ -793,7 +826,9 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                     accountType: accountType,
                     statusKey: statusKey,
                     visibility: .`private`
-                )
+                ) { error in
+                    Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
+                }
             }
         )
         sheet.addAction(
@@ -807,6 +842,31 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
             popover.sourceRect = CGRect(x: bounds.midX, y: bounds.midY, width: 1, height: 1)
         }
         host.present(sheet, animated: true)
+    }
+
+    /// 置顶 / 改可见范围都是网络请求，成败都要让用户看见：
+    /// 成功给个轻提示（列表要下拉刷新才会变），失败把微博返回的原因原样带出来。
+    private static func showManageResult(_ error: String?, success: String) {
+        DispatchQueue.main.async {
+            if let error, !error.isEmpty {
+                Drops.show(
+                    .init(
+                        title: String(localized: "status_manage_failed"),
+                        subtitle: error,
+                        subtitleNumberOfLines: 3,
+                        icon: UIImage(fontAwesome: .circleExclamation),
+                        duration: .seconds(5)
+                    )
+                )
+            } else {
+                Drops.show(
+                    .init(
+                        title: success,
+                        icon: UIImage(fontAwesome: .circleCheck)
+                    )
+                )
+            }
+        }
     }
 
     private func presentDeleteConfirm(for data: UiTimelineV2.Post) {
@@ -1738,5 +1798,16 @@ private extension UIView {
             current = view.superview
         }
         return nil
+    }
+}
+
+private extension UIViewController {
+    /// 一直找到最上层已展示的 VC，避免「已经 present 了别的东西」时弹不出来。
+    var topmostPresented: UIViewController {
+        var controller: UIViewController = self
+        while let presented = controller.presentedViewController, !presented.isBeingDismissed {
+            controller = presented
+        }
+        return controller
     }
 }

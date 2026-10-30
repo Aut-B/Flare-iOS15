@@ -510,12 +510,22 @@ public struct StatusView: View {
             titleVisibility: .visible
         ) {
             Button {
-                StatusManageActions.shared.pin(accountType: data.accountType, statusKey: data.statusKey, pinned: true)
+                StatusManageActions.shared.pin(
+                    accountType: data.accountType,
+                    statusKey: data.statusKey,
+                    pinned: true,
+                    onResult: { _ in }
+                )
             } label: {
                 Text("status_manage_pin", bundle: FlareAppleUILocalization.bundle)
             }
             Button {
-                StatusManageActions.shared.pin(accountType: data.accountType, statusKey: data.statusKey, pinned: false)
+                StatusManageActions.shared.pin(
+                    accountType: data.accountType,
+                    statusKey: data.statusKey,
+                    pinned: false,
+                    onResult: { _ in }
+                )
             } label: {
                 Text("status_manage_unpin", bundle: FlareAppleUILocalization.bundle)
             }
@@ -523,7 +533,18 @@ public struct StatusView: View {
                 StatusManageActions.shared.updateVisibility(
                     accountType: data.accountType,
                     statusKey: data.statusKey,
-                    visibility: .mutual
+                    visibility: .`public`,
+                    onResult: { _ in }
+                )
+            } label: {
+                Text("status_manage_visibility_public", bundle: FlareAppleUILocalization.bundle)
+            }
+            Button {
+                StatusManageActions.shared.updateVisibility(
+                    accountType: data.accountType,
+                    statusKey: data.statusKey,
+                    visibility: .mutual,
+                    onResult: { _ in }
                 )
             } label: {
                 Text("status_manage_visibility_mutual", bundle: FlareAppleUILocalization.bundle)
@@ -532,7 +553,8 @@ public struct StatusView: View {
                 StatusManageActions.shared.updateVisibility(
                     accountType: data.accountType,
                     statusKey: data.statusKey,
-                    visibility: .followers
+                    visibility: .followers,
+                    onResult: { _ in }
                 )
             } label: {
                 Text("status_manage_visibility_followers", bundle: FlareAppleUILocalization.bundle)
@@ -541,7 +563,8 @@ public struct StatusView: View {
                 StatusManageActions.shared.updateVisibility(
                     accountType: data.accountType,
                     statusKey: data.statusKey,
-                    visibility: .`private`
+                    visibility: .`private`,
+                    onResult: { _ in }
                 )
             } label: {
                 Text("status_manage_visibility_private", bundle: FlareAppleUILocalization.bundle)

@@ -680,7 +680,7 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
             height = max(height, 16)
         }
         if !manageButton.isHidden {
-            height = max(height, 16)
+            height = max(height, 18)
         }
         return ceil(height)
     }
@@ -817,7 +817,9 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
             items.append((insightButton, CGSize(width: 16, height: 16)))
         }
         if !manageButton.isHidden {
-            items.append((manageButton, CGSize(width: 18, height: 16)))
+            // 比图标本身宽一点：18pt 宽的可点区域在手机上很难点中，
+            // 用户会以为「点了没反应」。
+            items.append((manageButton, CGSize(width: 28, height: 18)))
         }
         return items
     }
