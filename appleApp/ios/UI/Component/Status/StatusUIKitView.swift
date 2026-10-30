@@ -756,6 +756,17 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         return window?.rootViewController?.topmostPresented
     }
 
+    /// 服务端支持「改正文」的平台。微博是隐藏接口、Bluesky 只能删了重发，
+    /// 都不在这里；毛象（含 Pleroma）和 Misskey 是全平台都带这个功能。
+    private func supportsEditing(_ data: UiTimelineV2.Post) -> Bool {
+        switch data.platformId.lowercased() {
+        case "mastodon", "misskey":
+            return true
+        default:
+            return false
+        }
+    }
+
     private func presentManageMenu(for data: UiTimelineV2.Post) {
         guard let host = hostViewController else { return }
         let sheet = UIAlertController(
@@ -765,72 +776,90 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         )
         let accountType = data.accountType
         let statusKey = data.statusKey
-        sheet.addAction(
-            UIAlertAction(title: String(localized: "status_manage_pin"), style: .default) { _ in
-                StatusManageActions.shared.pin(
-                    accountType: accountType,
-                    statusKey: statusKey,
-                    pinned: true
-                ) { error in
-                    Self.showManageResult(error, success: String(localized: "status_manage_done_pin"))
+        // 置顶 / 改可见范围是微博的接口，毛象和 Misskey 上点了一定报错，
+        // 干脆按平台分菜单，别让用户点了才发现不支持。
+        let isWeibo = data.platformId.lowercased() == "vvo"
+
+        if supportsEditing(data) {
+            sheet.addAction(
+                UIAlertAction(title: String(localized: "status_manage_edit"), style: .default) { [weak self] _ in
+                    guard let self, let host = self.hostViewController else { return }
+                    StatusEditPresenter.present(
+                        from: host,
+                        accountType: accountType,
+                        statusKey: statusKey
+                    )
                 }
-            }
-        )
-        sheet.addAction(
-            UIAlertAction(title: String(localized: "status_manage_unpin"), style: .default) { _ in
-                StatusManageActions.shared.pin(
-                    accountType: accountType,
-                    statusKey: statusKey,
-                    pinned: false
-                ) { error in
-                    Self.showManageResult(error, success: String(localized: "status_manage_done_unpin"))
+            )
+        }
+        if isWeibo {
+            sheet.addAction(
+                UIAlertAction(title: String(localized: "status_manage_pin"), style: .default) { _ in
+                    StatusManageActions.shared.pin(
+                        accountType: accountType,
+                        statusKey: statusKey,
+                        pinned: true
+                    ) { error in
+                        Self.showManageResult(error, success: String(localized: "status_manage_done_pin"))
+                    }
                 }
-            }
-        )
-        sheet.addAction(
-            UIAlertAction(title: String(localized: "status_manage_visibility_public"), style: .default) { _ in
-                StatusManageActions.shared.updateVisibility(
-                    accountType: accountType,
-                    statusKey: statusKey,
-                    visibility: .`public`
-                ) { error in
-                    Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
+            )
+            sheet.addAction(
+                UIAlertAction(title: String(localized: "status_manage_unpin"), style: .default) { _ in
+                    StatusManageActions.shared.pin(
+                        accountType: accountType,
+                        statusKey: statusKey,
+                        pinned: false
+                    ) { error in
+                        Self.showManageResult(error, success: String(localized: "status_manage_done_unpin"))
+                    }
                 }
-            }
-        )
-        sheet.addAction(
-            UIAlertAction(title: String(localized: "status_manage_visibility_mutual"), style: .default) { _ in
-                StatusManageActions.shared.updateVisibility(
-                    accountType: accountType,
-                    statusKey: statusKey,
-                    visibility: .mutual
-                ) { error in
-                    Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
+            )
+            sheet.addAction(
+                UIAlertAction(title: String(localized: "status_manage_visibility_public"), style: .default) { _ in
+                    StatusManageActions.shared.updateVisibility(
+                        accountType: accountType,
+                        statusKey: statusKey,
+                        visibility: .`public`
+                    ) { error in
+                        Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
+                    }
                 }
-            }
-        )
-        sheet.addAction(
-            UIAlertAction(title: String(localized: "status_manage_visibility_followers"), style: .default) { _ in
-                StatusManageActions.shared.updateVisibility(
-                    accountType: accountType,
-                    statusKey: statusKey,
-                    visibility: .followers
-                ) { error in
-                    Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
+            )
+            sheet.addAction(
+                UIAlertAction(title: String(localized: "status_manage_visibility_mutual"), style: .default) { _ in
+                    StatusManageActions.shared.updateVisibility(
+                        accountType: accountType,
+                        statusKey: statusKey,
+                        visibility: .mutual
+                    ) { error in
+                        Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
+                    }
                 }
-            }
-        )
-        sheet.addAction(
-            UIAlertAction(title: String(localized: "status_manage_visibility_private"), style: .default) { _ in
-                StatusManageActions.shared.updateVisibility(
-                    accountType: accountType,
-                    statusKey: statusKey,
-                    visibility: .`private`
-                ) { error in
-                    Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
+            )
+            sheet.addAction(
+                UIAlertAction(title: String(localized: "status_manage_visibility_followers"), style: .default) { _ in
+                    StatusManageActions.shared.updateVisibility(
+                        accountType: accountType,
+                        statusKey: statusKey,
+                        visibility: .followers
+                    ) { error in
+                        Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
+                    }
                 }
-            }
-        )
+            )
+            sheet.addAction(
+                UIAlertAction(title: String(localized: "status_manage_visibility_private"), style: .default) { _ in
+                    StatusManageActions.shared.updateVisibility(
+                        accountType: accountType,
+                        statusKey: statusKey,
+                        visibility: .`private`
+                    ) { error in
+                        Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
+                    }
+                }
+            )
+        }
         sheet.addAction(
             UIAlertAction(title: String(localized: "delete"), style: .destructive) { [weak self] _ in
                 self?.presentDeleteConfirm(for: data)
@@ -890,12 +919,14 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         guard let user = data.user else { return nil }
         let topEndView = resolvedTopEndView()
         let showsManage = isOwnPost(data) && !isQuote && !isDetail
+        let showsEdit = showsManage && supportsEditing(data)
         topEndView.configure(
             post: data,
             showPlatformLogo: appearance.showPlatformLogo,
             absoluteTimestamp: appearance.absoluteTimestamp,
             isDetail: isDetail,
             showAgentInsight: appearance.aiAgentEnabled && !isQuote,
+            showEditButton: showsEdit,
             showManageButton: showsManage,
             onInsightTapped: { [weak self] in
                 guard let self else { return }
@@ -906,6 +937,14 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                 if let url = URL(string: route.toUri()) {
                     self.openURL?(url)
                 }
+            },
+            onEditTapped: { [weak self] in
+                guard let self, let host = self.hostViewController else { return }
+                StatusEditPresenter.present(
+                    from: host,
+                    accountType: data.accountType,
+                    statusKey: data.statusKey
+                )
             },
             onManageTapped: { [weak self] in
                 self?.presentManageMenu(for: data)

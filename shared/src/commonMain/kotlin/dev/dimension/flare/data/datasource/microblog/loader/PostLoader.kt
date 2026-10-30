@@ -28,4 +28,23 @@ public interface PostLoader {
     ) {
         throw UnsupportedOperationException("visibility is not supported on this platform")
     }
+
+    /**
+     * 取帖子**可编辑的纯文本正文**，用来预填编辑框。
+     *
+     * 不能直接用 `post.content.original.raw`：Mastodon 那边拿到的是 HTML 源码，
+     * 塞进编辑框会满屏 `<p>`、`<br />`，编辑完再发出去就是一堆标签。
+     * 默认不支持，Mastodon / Misskey 各自覆盖。
+     */
+    public suspend fun editableContent(statusKey: MicroBlogKey): String {
+        throw UnsupportedOperationException("edit is not supported on this platform")
+    }
+
+    /** 用新正文覆盖已发布的帖子，默认不支持。 */
+    public suspend fun editStatus(
+        statusKey: MicroBlogKey,
+        content: String,
+    ) {
+        throw UnsupportedOperationException("edit is not supported on this platform")
+    }
 }

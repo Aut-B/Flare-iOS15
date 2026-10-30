@@ -51,6 +51,22 @@ public struct StatusView: View {
     @State private var overflowingTextIndexes: Set<Int> = []
     @State private var showManageMenu = false
     @State private var showDeleteConfirm = false
+    @State private var showEditSheet = false
+
+    /// 服务端支持改正文的平台：毛象（含 Pleroma）和 Misskey。
+    private var supportsEditing: Bool {
+        switch data.platformId.lowercased() {
+        case "mastodon", "misskey":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// 置顶 / 改可见范围是微博的接口，别的平台点了一定报错，按平台分菜单。
+    private var isWeibo: Bool {
+        data.platformId.lowercased() == "vvo"
+    }
 
     public init(
         data: UiTimelineV2.Post,
@@ -509,65 +525,74 @@ public struct StatusView: View {
             isPresented: $showManageMenu,
             titleVisibility: .visible
         ) {
-            Button {
-                StatusManageActions.shared.pin(
-                    accountType: data.accountType,
-                    statusKey: data.statusKey,
-                    pinned: true,
-                    onResult: { _ in }
-                )
-            } label: {
-                Text("status_manage_pin", bundle: FlareAppleUILocalization.bundle)
+            if supportsEditing {
+                Button {
+                    showEditSheet = true
+                } label: {
+                    Text("status_manage_edit", bundle: FlareAppleUILocalization.bundle)
+                }
             }
-            Button {
-                StatusManageActions.shared.pin(
-                    accountType: data.accountType,
-                    statusKey: data.statusKey,
-                    pinned: false,
-                    onResult: { _ in }
-                )
-            } label: {
-                Text("status_manage_unpin", bundle: FlareAppleUILocalization.bundle)
-            }
-            Button {
-                StatusManageActions.shared.updateVisibility(
-                    accountType: data.accountType,
-                    statusKey: data.statusKey,
-                    visibility: .`public`,
-                    onResult: { _ in }
-                )
-            } label: {
-                Text("status_manage_visibility_public", bundle: FlareAppleUILocalization.bundle)
-            }
-            Button {
-                StatusManageActions.shared.updateVisibility(
-                    accountType: data.accountType,
-                    statusKey: data.statusKey,
-                    visibility: .mutual,
-                    onResult: { _ in }
-                )
-            } label: {
-                Text("status_manage_visibility_mutual", bundle: FlareAppleUILocalization.bundle)
-            }
-            Button {
-                StatusManageActions.shared.updateVisibility(
-                    accountType: data.accountType,
-                    statusKey: data.statusKey,
-                    visibility: .followers,
-                    onResult: { _ in }
-                )
-            } label: {
-                Text("status_manage_visibility_followers", bundle: FlareAppleUILocalization.bundle)
-            }
-            Button {
-                StatusManageActions.shared.updateVisibility(
-                    accountType: data.accountType,
-                    statusKey: data.statusKey,
-                    visibility: .`private`,
-                    onResult: { _ in }
-                )
-            } label: {
-                Text("status_manage_visibility_private", bundle: FlareAppleUILocalization.bundle)
+            if isWeibo {
+                Button {
+                    StatusManageActions.shared.pin(
+                        accountType: data.accountType,
+                        statusKey: data.statusKey,
+                        pinned: true,
+                        onResult: { _ in }
+                    )
+                } label: {
+                    Text("status_manage_pin", bundle: FlareAppleUILocalization.bundle)
+                }
+                Button {
+                    StatusManageActions.shared.pin(
+                        accountType: data.accountType,
+                        statusKey: data.statusKey,
+                        pinned: false,
+                        onResult: { _ in }
+                    )
+                } label: {
+                    Text("status_manage_unpin", bundle: FlareAppleUILocalization.bundle)
+                }
+                Button {
+                    StatusManageActions.shared.updateVisibility(
+                        accountType: data.accountType,
+                        statusKey: data.statusKey,
+                        visibility: .`public`,
+                        onResult: { _ in }
+                    )
+                } label: {
+                    Text("status_manage_visibility_public", bundle: FlareAppleUILocalization.bundle)
+                }
+                Button {
+                    StatusManageActions.shared.updateVisibility(
+                        accountType: data.accountType,
+                        statusKey: data.statusKey,
+                        visibility: .mutual,
+                        onResult: { _ in }
+                    )
+                } label: {
+                    Text("status_manage_visibility_mutual", bundle: FlareAppleUILocalization.bundle)
+                }
+                Button {
+                    StatusManageActions.shared.updateVisibility(
+                        accountType: data.accountType,
+                        statusKey: data.statusKey,
+                        visibility: .followers,
+                        onResult: { _ in }
+                    )
+                } label: {
+                    Text("status_manage_visibility_followers", bundle: FlareAppleUILocalization.bundle)
+                }
+                Button {
+                    StatusManageActions.shared.updateVisibility(
+                        accountType: data.accountType,
+                        statusKey: data.statusKey,
+                        visibility: .`private`,
+                        onResult: { _ in }
+                    )
+                } label: {
+                    Text("status_manage_visibility_private", bundle: FlareAppleUILocalization.bundle)
+                }
             }
             Button(role: .destructive) {
                 showDeleteConfirm = true
@@ -577,6 +602,15 @@ public struct StatusView: View {
             Button(role: .cancel) {} label: {
                 Text("Cancel")
             }
+        }
+        .sheet(isPresented: $showEditSheet) {
+            StatusEditSheet(
+                accountType: data.accountType,
+                statusKey: data.statusKey,
+                onClose: { showEditSheet = false },
+                onSaved: { showEditSheet = false },
+                onFailed: { _ in }
+            )
         }
         .alert(
             Text("status_manage_delete_confirm", bundle: FlareAppleUILocalization.bundle),

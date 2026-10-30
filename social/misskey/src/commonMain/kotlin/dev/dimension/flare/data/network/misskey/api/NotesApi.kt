@@ -26,6 +26,7 @@ import dev.dimension.flare.data.network.misskey.api.model.NotesSearchRequest
 import dev.dimension.flare.data.network.misskey.api.model.NotesState200Response
 import dev.dimension.flare.data.network.misskey.api.model.NotesTranslateRequest
 import dev.dimension.flare.data.network.misskey.api.model.NotesUserListTimelineRequest
+import dev.dimension.flare.data.network.misskey.api.model.NotesUpdateRequest
 
 internal interface NotesApi {
     /**
@@ -409,6 +410,16 @@ internal interface NotesApi {
     suspend fun notesShow(
         @Body ipinRequest: IPinRequest,
     ): Note
+
+    /**
+     * notes/update
+     * 编辑已发布的笔记正文。**Credential required**: *Yes* / **Permission**: *write:notes*
+     * Misskey 2023.11 起才支持改正文，老实例会返回 `text is not allowed`。
+     */
+    @POST("notes/update")
+    suspend fun notesUpdate(
+        @Body notesUpdateRequest: NotesUpdateRequest,
+    ): Unit
 
     /**
      * notes/state

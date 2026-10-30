@@ -244,12 +244,15 @@ private struct ScreenshotAvatar: View {
     }
 }
 
-/// 配图区：1 张整行显示，多张走九宫格。
+/// 配图区：**每张图都单独占满整行宽度**，按原比例纵向依次排下来。
+///
+/// 之前多图走九宫格，三张竖图被压成三个窄条，图里的字根本看不清 ——
+/// 这正是「这能看清图里啥啊」。VVebo 的截图是多图也一张一张全宽铺开：
+/// 截图会很长，但每张图都保持原比例、都是能看清的。
 ///
 /// 比例优先取自**已经加载好的 UIImage**，而不是接口里的 `aspectRatio`：
 /// 微博的多图帖子经常不返回图片宽高，`UiMedia.aspectRatio` 就退化成 1:1，
-/// 于是竖图在九宫格里被排成正方形 —— 这正是「单图原比例、多图不是」的原因。
-/// 加载不到图时再退回接口给的字段。
+/// 竖图会被排成正方形。加载不到图时再退回接口给的字段。
 ///
 /// 宽高都显式算出来（`frame(width:height:)`）：只给宽度再叠 `aspectRatio`
 /// 时，父视图提的是 nil 高度，SwiftUI 会退回子视图的 ideal size，比例不保证生效。
@@ -260,56 +263,39 @@ private struct ScreenshotMediaStack: View {
 
     @Environment(\.screenshotImages) private var loadedImages
 
-    private let spacing: CGFloat = 4
+    private let spacing: CGFloat = 8
 
-    private var columnCount: Int {
-        switch images.count {
-        case 1: return 1
-        case 2, 4: return 2
-        default: return 3
-        }
-    }
-
-    private var cellSide: CGFloat {
-        let columns = CGFloat(columnCount)
-        return max((width - spacing * (columns - 1)) / columns, 1)
-    }
+    /// 整张截图的配图区最多这么高（pt）。九张 1:10 的超长图全宽铺开能到三万多 pt，
+    /// `UIGraphicsImageRenderer` 会画不出来，所以超过上限时把所有图等比缩窄。
+    private static let maxTotalHeight: CGFloat = 12000
 
     var body: some View {
-        if images.count == 1 {
-            tile(images[0], side: width, corner: 12)
-        } else if !images.isEmpty {
-            grid
-        }
-    }
-
-    private var grid: some View {
-        let columns = columnCount
-        let rows = stride(from: 0, to: images.count, by: columns).map {
-            Array(images[$0..<min($0 + columns, images.count)])
-        }
-        return VStack(alignment: .leading, spacing: spacing) {
-            ForEach(0..<rows.count, id: \.self) { rowIndex in
-                HStack(alignment: .top, spacing: spacing) {
-                    ForEach(0..<rows[rowIndex].count, id: \.self) { columnIndex in
-                        tile(rows[rowIndex][columnIndex], side: cellSide, corner: 8)
-                    }
-                    // 最后一行不满时补位，保证每格等宽。
-                    ForEach(0..<(columns - rows[rowIndex].count), id: \.self) { _ in
-                        Color.clear
-                            .frame(width: cellSide, height: 1)
-                    }
+        if !images.isEmpty {
+            VStack(alignment: .leading, spacing: spacing) {
+                ForEach(0..<images.count, id: \.self) { index in
+                    tile(images[index], width: itemWidth, corner: images.count == 1 ? 12 : 10)
                 }
             }
+            .frame(width: width, alignment: .leading)
         }
-        .frame(width: width, alignment: .leading)
     }
 
-    private func tile(_ media: any UiMedia, side: CGFloat, corner: CGFloat) -> some View {
+    /// 正常情况就是满宽。只有总高爆掉时才整体缩窄，保证还能画出来。
+    private var itemWidth: CGFloat {
+        guard images.count > 1 else { return width }
+        let total =
+            images.reduce(CGFloat(0)) { partial, media in
+                partial + width / displayRatio(media, source: sourceOf(media))
+            } + spacing * CGFloat(images.count - 1)
+        guard total.isFinite, total > Self.maxTotalHeight else { return width }
+        return max(width * (Self.maxTotalHeight / total), 40)
+    }
+
+    private func tile(_ media: any UiMedia, width: CGFloat, corner: CGFloat) -> some View {
         let source = sourceOf(media)
         let ratio = displayRatio(media, source: source)
         return content(media, source: source, corner: corner)
-            .frame(width: side, height: max(side / ratio, 1))
+            .frame(width: width, height: max(width / ratio, 1))
     }
 
     @ViewBuilder

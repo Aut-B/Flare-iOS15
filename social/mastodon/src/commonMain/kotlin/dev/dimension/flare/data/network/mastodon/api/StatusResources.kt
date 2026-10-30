@@ -5,6 +5,7 @@ import de.jensklingenberg.ktorfit.http.DELETE
 import de.jensklingenberg.ktorfit.http.Header
 import de.jensklingenberg.ktorfit.http.Multipart
 import de.jensklingenberg.ktorfit.http.POST
+import de.jensklingenberg.ktorfit.http.PUT
 import de.jensklingenberg.ktorfit.http.Path
 import dev.dimension.flare.data.network.mastodon.api.model.Poll
 import dev.dimension.flare.data.network.mastodon.api.model.PostStatus
@@ -72,6 +73,19 @@ internal interface StatusResources {
     @POST("api/v1/statuses")
     suspend fun post(
         @Header("Idempotency-Key") idempotencyKey: String,
+        @Body data: PostStatus,
+        @Header("Content-Type") contentType: String = "application/json",
+    ): Status
+
+    /**
+     * 编辑已发布的帖子（Mastodon 3.5+ / Pleroma 部分支持）。
+     *
+     * 只传 `status`：其余字段（可见范围、媒体、CW）省略时服务端会保留原值，
+     * 传了反而可能把没带上的字段清空，或者撞上「有投票不能改媒体」的限制。
+     */
+    @PUT("api/v1/statuses/{id}")
+    suspend fun edit(
+        @Path("id") id: String,
         @Body data: PostStatus,
         @Header("Content-Type") contentType: String = "application/json",
     ): Status

@@ -47,6 +47,47 @@ public object StatusManageActions {
         perform(accountType, onResult) { it.postHandler.updateStatusVisibility(statusKey, visibility) }
     }
 
+    /**
+     * 读回帖子可编辑的纯文本正文，用来预填编辑框。
+     *
+     * 回调第一个参数是正文，第二个是失败原因；两者必有且只有一个非空。
+     */
+    public fun editableContent(
+        accountType: AccountType,
+        statusKey: MicroBlogKey,
+        onResult: (String?, String?) -> Unit,
+    ) {
+        scope.launch {
+            try {
+                val source = sourceOf(accountType)
+                onResult(source.postHandler.editableContent(statusKey), null)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (throwable: Throwable) {
+                onResult(null, throwable.message?.takeIf { it.isNotBlank() } ?: "读取原文失败")
+            }
+        }
+    }
+
+    /** 用新正文覆盖已发布的帖子。`null` 表示成功，否则是失败原因。 */
+    public fun edit(
+        accountType: AccountType,
+        statusKey: MicroBlogKey,
+        content: String,
+        onResult: (String?) -> Unit,
+    ) {
+        perform(accountType, onResult) { it.postHandler.editStatus(statusKey, content) }
+    }
+
+    private suspend fun sourceOf(accountType: AccountType): PostDataSource =
+        accountServiceFlow(
+            accountType = accountType,
+            repository = accountRepository,
+        ).map {
+            require(it is PostDataSource) { "当前账号不支持这个操作" }
+            it
+        }.first()
+
     private fun perform(
         accountType: AccountType,
         onResult: (String?) -> Unit,
@@ -55,15 +96,7 @@ public object StatusManageActions {
         scope.launch {
             val error: String? =
                 try {
-                    val source =
-                        accountServiceFlow(
-                            accountType = accountType,
-                            repository = accountRepository,
-                        ).map {
-                            require(it is PostDataSource) { "当前账号不支持这个操作" }
-                            it
-                        }.first()
-                    block(source)
+                    block(sourceOf(accountType))
                     null
                 } catch (cancellation: CancellationException) {
                     throw cancellation

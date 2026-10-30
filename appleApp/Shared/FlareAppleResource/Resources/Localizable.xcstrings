@@ -1,6 +1,48 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "status_manage_edit": {
+      "localizations": {
+        "en": {"stringUnit": {"state": "translated", "value": "Edit post"}},
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "编辑帖子"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "編輯貼文"}}
+      }
+    },
+    "status_edit_title": {
+      "localizations": {
+        "en": {"stringUnit": {"state": "translated", "value": "Edit post"}},
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "编辑帖子"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "編輯貼文"}}
+      }
+    },
+    "status_edit_save": {
+      "localizations": {
+        "en": {"stringUnit": {"state": "translated", "value": "Save"}},
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "保存"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "儲存"}}
+      }
+    },
+    "status_edit_done": {
+      "localizations": {
+        "en": {"stringUnit": {"state": "translated", "value": "Post updated"}},
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "已更新，下拉刷新后可见"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "已更新，下拉重新整理後可見"}}
+      }
+    },
+    "status_edit_loading": {
+      "localizations": {
+        "en": {"stringUnit": {"state": "translated", "value": "Loading original text…"}},
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "正在读取原文…"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "正在讀取原文…"}}
+      }
+    },
+    "status_edit_hint": {
+      "localizations": {
+        "en": {"stringUnit": {"state": "translated", "value": "Only the text is changed. Visibility and media stay as they are."}},
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "只改正文，可见范围和附件保持原样"}},
+        "zh-Hant": {"stringUnit": {"state": "translated", "value": "只改正文，可見範圍和附件保持原樣"}}
+      }
+    },
     "settings_remember_home_timeline_position": {
     "localizations": {
       "en": {

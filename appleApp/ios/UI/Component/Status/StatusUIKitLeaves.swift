@@ -593,8 +593,10 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
     private var ipLabel: UILabel { platformColumn.ip }
     private let time = DateTimeUILabel()
     private let insightButton = UIButton(type: .system)
+    private let editButton = UIButton(type: .system)
     private let manageButton = UIButton(type: .system)
     private var onInsightTapped: (() -> Void)?
+    private var onEditTapped: (() -> Void)?
     private var onManageTapped: (() -> Void)?
 
     override init(frame: CGRect) {
@@ -619,7 +621,22 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         )
         insightButton.setContentHuggingPriority(.required, for: .horizontal)
         insightButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-        // 自己发的帖子：时间后面多一个「更多」，管置顶 / 可见范围 / 删除。
+        // 自己发的帖子：时间后面多一个「编辑」和「更多」。
+        // 编辑只有毛象 / Misskey 才有 —— 这两个平台的服务端支持改正文，
+        // 所有官方和第三方客户端都带，没有它打错字只能删了重发。
+        editButton.tintColor = .secondaryLabel
+        editButton.setImage(UIImage(fontAwesome: .penToSquare), for: .normal)
+        editButton.imageView?.contentMode = .scaleAspectFit
+        editButton.accessibilityLabel = String(localized: "status_manage_edit")
+        editButton.addAction(
+            UIAction { [weak self] _ in
+                self?.onEditTapped?()
+            },
+            for: .touchUpInside
+        )
+        editButton.setContentHuggingPriority(.required, for: .horizontal)
+        editButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        editButton.isHidden = true
         manageButton.tintColor = .secondaryLabel
         manageButton.setImage(UIImage(fontAwesome: .ellipsis), for: .normal)
         manageButton.imageView?.contentMode = .scaleAspectFit
@@ -638,6 +655,7 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         addSubview(platformColumn)
         addSubview(time)
         addSubview(insightButton)
+        addSubview(editButton)
         addSubview(manageButton)
     }
     required init(coder: NSCoder) { fatalError("init(coder:) not supported") }
@@ -679,6 +697,9 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         if !insightButton.isHidden {
             height = max(height, 16)
         }
+        if !editButton.isHidden {
+            height = max(height, 18)
+        }
         if !manageButton.isHidden {
             height = max(height, 18)
         }
@@ -703,11 +724,14 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         absoluteTimestamp: Bool,
         isDetail: Bool,
         showAgentInsight: Bool,
+        showEditButton: Bool = false,
         showManageButton: Bool = false,
         onInsightTapped: (() -> Void)?,
+        onEditTapped: (() -> Void)? = nil,
         onManageTapped: (() -> Void)? = nil
     ) {
         self.onInsightTapped = onInsightTapped
+        self.onEditTapped = onEditTapped
         self.onManageTapped = onManageTapped
         if let v = post.visibility {
             visibility.isHidden = false
@@ -751,6 +775,7 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
             time.set(data: post.createdAt)
         }
         insightButton.isHidden = !showAgentInsight
+        editButton.isHidden = !showEditButton
         manageButton.isHidden = !showManageButton
         invalidateIntrinsicContentSize()
         setNeedsLayout()
@@ -815,6 +840,10 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         }
         if !insightButton.isHidden {
             items.append((insightButton, CGSize(width: 16, height: 16)))
+        }
+        if !editButton.isHidden {
+            // 同上，热区放宽到 26×18。
+            items.append((editButton, CGSize(width: 26, height: 18)))
         }
         if !manageButton.isHidden {
             // 比图标本身宽一点：18pt 宽的可点区域在手机上很难点中，

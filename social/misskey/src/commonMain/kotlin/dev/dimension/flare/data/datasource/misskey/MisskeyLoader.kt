@@ -9,6 +9,7 @@ import dev.dimension.flare.data.network.misskey.MisskeyService
 import dev.dimension.flare.data.network.misskey.api.model.AdminAccountsDeleteRequest
 import dev.dimension.flare.data.network.misskey.api.model.IPinRequest
 import dev.dimension.flare.data.network.misskey.api.model.MuteCreateRequest
+import dev.dimension.flare.data.network.misskey.api.model.NotesUpdateRequest
 import dev.dimension.flare.data.network.misskey.api.model.UsersShowRequest
 import dev.dimension.flare.model.MicroBlogKey
 import dev.dimension.flare.ui.model.UiEmoji
@@ -58,6 +59,24 @@ internal class MisskeyLoader(
         service.notesDelete(
             IPinRequest(
                 noteId = statusKey.id,
+            ),
+        )
+    }
+
+    override suspend fun editableContent(statusKey: MicroBlogKey): String =
+        service
+            .notesShow(IPinRequest(noteId = statusKey.id))
+            .text
+            .orEmpty()
+
+    override suspend fun editStatus(
+        statusKey: MicroBlogKey,
+        content: String,
+    ) {
+        service.notesUpdate(
+            NotesUpdateRequest(
+                noteId = statusKey.id,
+                text = content,
             ),
         )
     }

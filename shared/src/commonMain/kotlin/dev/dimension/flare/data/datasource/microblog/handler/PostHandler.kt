@@ -154,6 +154,29 @@ public class PostHandler(
     ) {
         loader.updateStatusVisibility(postKey, visibility)
     }
+
+    /** 取可编辑的纯文本正文，用来预填编辑框。异常抛给调用方。 */
+    public suspend fun editableContent(postKey: MicroBlogKey): String = loader.editableContent(postKey)
+
+    /**
+     * 编辑已发布的帖子正文，成功后就地刷新本地缓存。
+     *
+     * 不刷新的话，改完切回列表看到的还是旧正文 —— 正文存在 `status` 表里，
+     * 所有时间线都是 join 这张表，所以重新存一遍这条就能让各处同时变新。
+     */
+    public suspend fun editStatus(
+        postKey: MicroBlogKey,
+        content: String,
+    ) {
+        loader.editStatus(postKey, content)
+        runCatching {
+            val result = loader.status(postKey)
+            database.connect {
+                val item = TimelinePagingMapper.toDb(result, "post_only_$postKey")
+                saveToDatabase(database, listOf(item))
+            }
+        }
+    }
 }
 
 @HiddenFromObjC
