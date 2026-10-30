@@ -34,24 +34,24 @@ final class InstagramService {
     // MARK: - 首页时间线
 
     func homeFeed(cursor: String?) async throws -> (items: [IGMedia], next: String?) {
-        // 这是 App 的接口，参数照抄一份；少一个 `reason` 就可能 400。
-        var query: [String] = [
-            "is_prefetch=false",
-            "feed_view_info=[]",
-            "phone_id=\(Self.deviceUUID)",
-            "battery_level=100",
-            "timezone_offset=28800",
-            "is_pull_to_refresh=false",
-            "is_charging=0",
-            "will_sound_on=1",
-            "is_dark_mode=0",
-            "reason=pull_to_refresh",
-        ]
-        if let cursor = cursor {
-            query.append("max_id=\(cursor)")
+        let params = Self.feedParams(cursor: cursor)
+        let query = params.map { "\($0.0)=\(Self.percentEncode($0.1))" }.joined(separator: "&")
+
+        var json: [String: Any]
+        do {
+            json = try await request("\(base)/api/v1/feed/timeline/?\(query)")
+        } catch let error as IGError {
+            // 网页端自己是用 POST + 表单体调的，GET 被拒时换一种姿势再试一次。
+            // 登录失效不重试，那是真的没登录。
+            if error.needLogin { throw error }
+            json = try await request(
+                "\(base)/api/v1/feed/timeline/",
+                method: "POST",
+                formBody: query
+            )
+        } catch {
+            throw error
         }
-        let url = "\(base)/api/v1/feed/timeline/?\(query.joined(separator: "&"))"
-        let json = try await request(url)
 
         var items: [IGMedia] = []
         for entry in IGJSON.array(json["feed_items"]) {
@@ -61,6 +61,30 @@ final class InstagramService {
             }
         }
         return (items, IGJSON.string(json["next_max_id"]))
+    }
+
+    private static func feedParams(cursor: String?) -> [(String, String)] {
+        // 这是 App 的接口，参数照抄一份；少一个 `reason` 就可能 400。
+        var params: [(String, String)] = [
+            ("is_prefetch", "false"),
+            ("feed_view_info", "[]"),
+            ("phone_id", deviceUUID),
+            ("battery_level", "100"),
+            ("timezone_offset", "28800"),
+            ("is_pull_to_refresh", "false"),
+            ("is_charging", "0"),
+            ("will_sound_on", "1"),
+            ("is_dark_mode", "0"),
+            ("reason", "pull_to_refresh"),
+        ]
+        if let cursor = cursor {
+            params.append(("max_id", cursor))
+        }
+        return params
+    }
+
+    private static func percentEncode(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value
     }
 
     // MARK: - 用户主页
@@ -108,28 +132,40 @@ final class InstagramService {
 
     // MARK: - 底层
 
-    private func request(_ url: String) async throws -> [String: Any] {
+    private func request(
+        _ url: String,
+        method: String = "GET",
+        formBody: String? = nil
+    ) async throws -> [String: Any] {
         guard let target = URL(string: url) else {
             throw IGError(message: "请求地址非法", needLogin: false)
         }
-        var request = URLRequest(url: target)
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue(appID, forHTTPHeaderField: "X-IG-App-ID")
-        request.setValue(asbdID, forHTTPHeaderField: "X-ASBD-ID")
-        request.setValue("0", forHTTPHeaderField: "X-IG-WWW-Claim")
-        request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
-        request.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
-        request.setValue("https://www.instagram.com/", forHTTPHeaderField: "Origin")
-        request.setValue("*/*", forHTTPHeaderField: "Accept")
-        request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
+        var urlRequest = URLRequest(url: target)
+        urlRequest.httpMethod = method
+        if let formBody = formBody {
+            urlRequest.httpBody = formBody.data(using: .utf8)
+            urlRequest.setValue(
+                "application/x-www-form-urlencoded",
+                forHTTPHeaderField: "Content-Type"
+            )
+        }
+        urlRequest.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        urlRequest.setValue(appID, forHTTPHeaderField: "X-IG-App-ID")
+        urlRequest.setValue(asbdID, forHTTPHeaderField: "X-ASBD-ID")
+        urlRequest.setValue("0", forHTTPHeaderField: "X-IG-WWW-Claim")
+        urlRequest.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+        urlRequest.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
+        urlRequest.setValue("https://www.instagram.com/", forHTTPHeaderField: "Origin")
+        urlRequest.setValue("*/*", forHTTPHeaderField: "Accept")
+        urlRequest.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
         if !cookie.isEmpty {
-            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+            urlRequest.setValue(cookie, forHTTPHeaderField: "Cookie")
         }
         if !csrfToken.isEmpty {
-            request.setValue(csrfToken, forHTTPHeaderField: "X-CSRFToken")
+            urlRequest.setValue(csrfToken, forHTTPHeaderField: "X-CSRFToken")
         }
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.data(for: urlRequest)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
 
         if status == 401 || status == 403 {
