@@ -287,6 +287,10 @@ enum Route: Hashable, Identifiable {
             RssScreen()
         case .weread:
             WereadShelfView()
+        case .instagram:
+            InstagramFeedView()
+        case .xiaohongshu:
+            XhsFeedView()
         case .draftBox:
             DraftBoxScreen { groupId in
                 onNavigate(.composeDraft(groupId))
@@ -375,6 +379,10 @@ enum Route: Hashable, Identifiable {
     case rssManagement
     /// 微信读书：独立页面，走网页版接口，不参与时间线。
     case weread
+    /// Instagram：网页版 cookie 登录，原生时间线。
+    case instagram
+    /// 小红书：网页版 cookie 登录 + 隐藏网页算签名，原生瀑布流。
+    case xiaohongshu
     case draftBox
     case secondaryMenu
 

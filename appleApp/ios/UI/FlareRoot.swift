@@ -310,6 +310,8 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
     case drafts
     case rssManagement
     case weread
+    case instagram
+    case xiaohongshu
     case localHistory
     case agentHistory
     case settings
@@ -322,6 +324,10 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
             return "route:rssManagement"
         case .weread:
             return "route:weread"
+        case .instagram:
+            return "route:instagram"
+        case .xiaohongshu:
+            return "route:xiaohongshu"
         case .localHistory:
             return "route:localHistory"
         case .agentHistory:
@@ -339,6 +345,10 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
             return .rssManagement
         case .weread:
             return .weread
+        case .instagram:
+            return .instagram
+        case .xiaohongshu:
+            return .xiaohongshu
         case .localHistory:
             return .localHostory
         case .agentHistory:
@@ -356,6 +366,10 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
             return "settings_rss_management_title"
         case .weread:
             return "微信读书"
+        case .instagram:
+            return "Instagram"
+        case .xiaohongshu:
+            return "小红书"
         case .localHistory:
             return "local_history_title"
         case .agentHistory:
@@ -373,6 +387,10 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
             return .squareRss
         case .weread:
             return .bookmark
+        case .instagram:
+            return .photoFilm
+        case .xiaohongshu:
+            return .image
         case .localHistory:
             return .clockRotateLeft
         case .agentHistory:
