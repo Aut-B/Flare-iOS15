@@ -3,6 +3,7 @@ import UIKit
 import KotlinSharedUI
 import FlareAppleCore
 import FlareAppleUI
+import Drops
 
 /// 从 UIKit 时间线弹出「编辑帖子」。
 ///
