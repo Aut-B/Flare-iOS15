@@ -10,6 +10,9 @@ jobs:
     # GitHub 官方 macOS 26 运行器，预装 Xcode 26.6（Swift 6.2）。
     # 上游用 xcode-27 标签（自托管/付费），免费账号用 macos-26 即可。
     runs-on: macos-26
+    # 全量编译（Kotlin/Native + 整个 Swift 模块）约 65-70 分钟，
+    # 给到 150 分钟留足余量；真卡死了也别烧满默认的 6 小时。
+    timeout-minutes: 150
 
     env:
       GRADLE_JVM_ARGS: "-Xmx12G -Dfile.encoding=UTF-8"

@@ -20,8 +20,10 @@ struct WereadShelfView: View {
         .navigationTitle("微信读书")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if store.isLoggedIn {
-                ToolbarItem(placement: .navigationBarTrailing) {
+            // iOS 15 的 ToolbarContentBuilder 没有 buildIf，不能在 .toolbar 里写 if，
+            // 所以条件放在 ToolbarItem 的 ViewBuilder 里面。
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if store.isLoggedIn {
                     Menu {
                         Button {
                             Task { await store.refreshShelf() }
