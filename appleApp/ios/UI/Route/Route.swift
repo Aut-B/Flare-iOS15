@@ -285,6 +285,8 @@ enum Route: Hashable, Identifiable {
             DMListScreen(accountType: accountType)
         case .rssManagement:
             RssScreen()
+        case .weread:
+            WereadShelfView()
         case .draftBox:
             DraftBoxScreen { groupId in
                 onNavigate(.composeDraft(groupId))
@@ -371,6 +373,8 @@ enum Route: Hashable, Identifiable {
     case allChannels(AccountType)
     case allDirectMessages(AccountType)
     case rssManagement
+    /// 微信读书：独立页面，走网页版接口，不参与时间线。
+    case weread
     case draftBox
     case secondaryMenu
 

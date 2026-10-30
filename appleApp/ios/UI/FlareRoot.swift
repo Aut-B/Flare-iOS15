@@ -309,6 +309,7 @@ private struct SidebarRouteScreen: View {
 private enum SecondarySidebarStaticRoute: CaseIterable {
     case drafts
     case rssManagement
+    case weread
     case localHistory
     case agentHistory
     case settings
@@ -319,6 +320,8 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
             return "route:drafts"
         case .rssManagement:
             return "route:rssManagement"
+        case .weread:
+            return "route:weread"
         case .localHistory:
             return "route:localHistory"
         case .agentHistory:
@@ -334,6 +337,8 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
             return .draftBox
         case .rssManagement:
             return .rssManagement
+        case .weread:
+            return .weread
         case .localHistory:
             return .localHostory
         case .agentHistory:
@@ -349,6 +354,8 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
             return "Drafts"
         case .rssManagement:
             return "settings_rss_management_title"
+        case .weread:
+            return "微信读书"
         case .localHistory:
             return "local_history_title"
         case .agentHistory:
@@ -364,6 +371,8 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
             return .penToSquare
         case .rssManagement:
             return .squareRss
+        case .weread:
+            return .bookmark
         case .localHistory:
             return .clockRotateLeft
         case .agentHistory:
