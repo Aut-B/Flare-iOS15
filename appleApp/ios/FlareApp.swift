@@ -23,6 +23,9 @@ struct FlareApp: App {
             swiftPlatformTextRenderer: PlatformTextRenderer.shared,
             swiftOnDeviceAI: FoundationModelOnDeviceAI.shared
         )
+        // 小红书的接口要 X-S / X-T，这两个值只能在网页里算。Kotlin 侧只定义了
+        // 协议，真正的请求还是走这边已经跑通的 XhsService（隐藏 WKWebView 签名）。
+        XhsBridgeHolder.shared.bridge = XhsSwiftBridge()
     }
     var body: some Scene {
         WindowGroup {

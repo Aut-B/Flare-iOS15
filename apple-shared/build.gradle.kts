@@ -26,6 +26,7 @@ kotlin {
             projects.social.bluesky,
             projects.social.fanbox,
             projects.social.instagram,
+            projects.social.xiaohongshu,
             projects.social.mastodon,
             projects.social.misskey,
             projects.social.pixiv,
@@ -66,6 +67,7 @@ kotlin {
                 api(projects.social.bluesky)
                 api(projects.social.fanbox)
                 api(projects.social.instagram)
+                api(projects.social.xiaohongshu)
                 api(projects.social.mastodon)
                 api(projects.social.misskey)
                 api(projects.social.pixiv)
