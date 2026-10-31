@@ -22,9 +22,22 @@ extension EnvironmentValues {
 }
 
 enum ScreenshotImageLoader {
-    /// 渲染时单张图最多用到 1200px。九宫格里单格只有 ~120pt，原图动辄 3000px，
-    /// 九张全尺寸解码能吃掉两三百 MB，渲染时直接黑图甚至被杀进程。
-    private static let maxPixelSize: CGFloat = 1200
+    /// 渲染时单张图的宽度上限。
+    ///
+    /// 截图是按满宽（约 358pt）显示的，最终输出宽度按 1080px 起算，所以这里
+    /// 留 1.3 倍余量取 1400 —— 二次缩放不会糊。之前取 1200 是按九宫格单格
+    /// 大小定的，改成满宽铺排后就不够了。
+    private static let maxPixelWidth: CGFloat = 1400
+
+    /// 单张图的高度上限。只对超长竖图（长截图、漫画条）生效，避免一张图
+    /// 就吃掉几十 MB。
+    private static let maxPixelHeight: CGFloat = 12000
+
+    /// 同时下载的图片数。
+    ///
+    /// 之前是几十张图一起打出去，TCP 连接互相抢带宽、解码线程也互相抢占，
+    /// 反而比排队慢，峰值内存还不可控。
+    private static let maxConcurrentLoads = 6
 
     /// **同步**从 Kingfisher 内存缓存里取图。
     ///
@@ -49,44 +62,83 @@ enum ScreenshotImageLoader {
     /// 处理器的标识，一旦加了处理器，时间线里已经下载过的图会全部 miss、
     /// 重新走一遍网络——这正是之前「图多的时候要渲染半天」的原因。
     /// 不加处理器时 key 就是 URL 本身，能和 `KFImage` 共用同一份磁盘缓存。
-    static func load(urls: [URL], skipping: Set<String> = []) async -> [String: UIImage] {
-        let unique = Set(urls).filter { !skipping.contains($0.absoluteString) }
+    ///
+    /// `headers` 按 URL 给请求加头（微博原图、毛象媒体都需要 Referer）。
+    /// 时间线里的 `KFImage` 一直带着这些头，截图这边之前漏了，导致原图
+    /// 请求被拒、只能退到 600px 的缩略图。
+    static func load(
+        urls: [URL],
+        skipping: Set<String> = [],
+        headers: [String: [String: String]] = [:]
+    ) async -> [String: UIImage] {
+        let unique = Array(Set(urls)).filter { !skipping.contains($0.absoluteString) }
         guard !unique.isEmpty else { return [:] }
-        return await withTaskGroup(of: (String, UIImage?).self) { group in
-            for url in unique {
-                group.addTask {
-                    await withCheckedContinuation { (continuation: CheckedContinuation<(String, UIImage?), Never>) in
-                        KingfisherManager.shared.retrieveImage(
-                            with: url,
-                            options: [.backgroundDecode]
-                        ) { result in
-                            switch result {
-                            case .success(let value):
-                                continuation.resume(returning: (url.absoluteString, value.image))
-                            case .failure:
-                                continuation.resume(returning: (url.absoluteString, nil))
-                            }
-                        }
-                    }
-                }
+
+        var images: [String: UIImage] = [:]
+        await withTaskGroup(of: (String, UIImage?).self) { group in
+            var next = 0
+            let initial = min(maxConcurrentLoads, unique.count)
+            for index in 0..<initial {
+                let url = unique[index]
+                group.addTask { await fetch(url, headers: headers[url.absoluteString]) }
             }
-            var images: [String: UIImage] = [:]
-            for await (key, image) in group {
+            next = initial
+
+            while let (key, image) = await group.next() {
                 if let image {
                     images[key] = downsampleIfNeeded(image)
                 }
+                if next < unique.count {
+                    let url = unique[next]
+                    next += 1
+                    group.addTask { await fetch(url, headers: headers[url.absoluteString]) }
+                }
             }
-            return images
+        }
+        return images
+    }
+
+    private static func fetch(
+        _ url: URL,
+        headers: [String: String]?
+    ) async -> (String, UIImage?) {
+        await withCheckedContinuation { (continuation: CheckedContinuation<(String, UIImage?), Never>) in
+            var options: KingfisherOptionsInfo = [.backgroundDecode]
+            if let headers, !headers.isEmpty {
+                let modifier = AnyModifier { request in
+                    var request = request
+                    for (key, value) in headers {
+                        request.setValue(value, forHTTPHeaderField: key)
+                    }
+                    return request
+                }
+                options.append(.requestModifier(modifier))
+            }
+            KingfisherManager.shared.retrieveImage(with: url, options: options) { result in
+                switch result {
+                case .success(let value):
+                    continuation.resume(returning: (url.absoluteString, value.image))
+                case .failure:
+                    continuation.resume(returning: (url.absoluteString, nil))
+                }
+            }
         }
     }
 
-    /// 超大图在内存里缩一次，避免九宫格把内存吃满。已经足够小的图原样返回。
+    /// 超大图在内存里缩一次。
+    ///
+    /// 按**宽度**约束而不是最长边：图在截图里是满宽铺开的，宽度才决定清晰度。
+    /// 之前按最长边算，3000×4000 的竖图被缩成 1050×1400，宽度反而不够输出
+    /// 1080px，白缩一次还更糊。
     private static func downsampleIfNeeded(_ image: UIImage) -> UIImage {
         let pixelWidth = image.size.width * image.scale
         let pixelHeight = image.size.height * image.scale
-        let longest = max(pixelWidth, pixelHeight)
-        guard longest.isFinite, longest > maxPixelSize * 1.5 else { return image }
-        let ratio = maxPixelSize / longest
+        guard pixelWidth.isFinite, pixelHeight.isFinite, pixelWidth > 0, pixelHeight > 0 else {
+            return image
+        }
+        let ratio = min(maxPixelWidth / pixelWidth, maxPixelHeight / pixelHeight, 1)
+        // 只缩一点点的话不值得重绘，直接原样用。
+        guard ratio < 0.85 else { return image }
         let target = CGSize(
             width: max((pixelWidth * ratio).rounded(), 1),
             height: max((pixelHeight * ratio).rounded(), 1)

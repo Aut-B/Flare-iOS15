@@ -244,13 +244,17 @@ struct StatusShareSheet: View {
     }
 
     private func render(data: UiTimelineV2) {
-        let urls = Self.imageURLs(of: data) + selectedComments.flatMap(Self.imageURLs(of:))
+        var sources = Self.sources(of: data)
+        for comment in selectedComments {
+            sources.merge(Self.sources(of: comment))
+        }
         renderer.render(
             item: data,
             comments: selectedComments,
             showsCard: previewStyle == .card,
             colorScheme: theme ?? colorScheme,
-            urls: urls
+            urls: sources.urls,
+            headers: sources.headers
         )
     }
 
@@ -343,28 +347,45 @@ extension StatusShareSheet {
         }
     }
 
-    static func imageURLs(of item: UiTimelineV2) -> [URL] {
+    /// 截图要预载的图片，以及它们各自需要的请求头。
+    ///
+    /// 微博原图、毛象媒体都校验 `Referer`：时间线里的 `KFImage` 一直带着这些头，
+    /// 截图这边之前直接裸请求，原图被拒 → 悄悄退回 600px 的缩略图 → 存出来糊。
+    struct ScreenshotSources {
         var urls: [URL] = []
+        var headers: [String: [String: String]] = [:]
 
-        func append(_ value: String?) {
+        mutating func append(_ value: String?, headers customHeaders: [String: String]?) {
             guard let value, let url = URL(string: value) else { return }
             urls.append(url)
+            if let customHeaders, !customHeaders.isEmpty {
+                headers[url.absoluteString] = customHeaders
+            }
         }
 
+        mutating func merge(_ other: ScreenshotSources) {
+            urls.append(contentsOf: other.urls)
+            headers.merge(other.headers) { current, _ in current }
+        }
+    }
+
+    static func sources(of item: UiTimelineV2) -> ScreenshotSources {
+        var result = ScreenshotSources()
+
         func walk(_ post: UiTimelineV2.Post) {
-            append(post.user?.avatar?.url)
+            result.append(post.user?.avatar?.url, headers: post.user?.avatar?.customHeaders)
             for media in post.images {
                 switch onEnum(of: media) {
                 case .image(let image):
-                    append(image.previewUrl)
-                    append(image.url)
+                    result.append(image.previewUrl, headers: image.customHeaders)
+                    result.append(image.url, headers: image.customHeaders)
                 case .gif(let gif):
-                    append(gif.previewUrl)
-                    append(gif.url)
+                    result.append(gif.previewUrl, headers: gif.customHeaders)
+                    result.append(gif.url, headers: gif.customHeaders)
                 case .video(let video):
-                    append(video.thumbnailUrl)
+                    result.append(video.thumbnailUrl, headers: video.customHeaders)
                 case .ugoira(let ugoira):
-                    append(ugoira.previewUrl)
+                    result.append(ugoira.previewUrl, headers: ugoira.customHeaders)
                 default:
                     break
                 }
@@ -380,7 +401,7 @@ extension StatusShareSheet {
                 walk(quote)
             }
         }
-        return urls
+        return result
     }
 
     static func preload(urls: [URL]) async {
@@ -529,7 +550,8 @@ private final class ScreenshotRenderCoordinator: ObservableObject {
         comments: [UiTimelineV2],
         showsCard: Bool,
         colorScheme: ColorScheme,
-        urls: [URL]
+        urls: [URL],
+        headers: [String: [String: String]] = [:]
     ) {
         task?.cancel()
         isFinal = false
@@ -544,23 +566,31 @@ private final class ScreenshotRenderCoordinator: ObservableObject {
 
         task = Task { [weak self] in
             guard let self else { return }
+
+            // 下载和第一帧渲染**同时**开始。
+            // 之前是先画完 quick frame 才去发请求，白白多等一次完整布局的时间；
+            // 图多的时候这一下就是好几秒，用户感觉「点了没反应」。
+            async let pending = ScreenshotImageLoader.load(
+                urls: urls,
+                skipping: Set(cached.keys),
+                headers: headers
+            )
+
             if showsQuickFrame {
                 let quick = await Self.makeImage(
                     item: item,
                     comments: comments,
                     showsCard: showsCard,
                     colorScheme: colorScheme,
-                    images: cached
+                    images: cached,
+                    fastPreview: true
                 )
                 guard !Task.isCancelled else { return }
                 if let quick { self.image = quick }
             }
 
             // 第二帧：补齐缓存里没有的图。没有缺失就不必再渲染一次。
-            let missing = await ScreenshotImageLoader.load(
-                urls: urls,
-                skipping: Set(cached.keys)
-            )
+            let missing = await pending
             guard !Task.isCancelled else { return }
             if !showsQuickFrame || !missing.isEmpty {
                 let merged = cached.merging(missing) { current, _ in current }
@@ -583,7 +613,8 @@ private final class ScreenshotRenderCoordinator: ObservableObject {
         comments: [UiTimelineV2],
         showsCard: Bool,
         colorScheme: ColorScheme,
-        images: [String: UIImage]
+        images: [String: UIImage],
+        fastPreview: Bool = false
     ) async -> UIImage? {
         await ScreenshotPostView(
             item: item,
@@ -593,7 +624,37 @@ private final class ScreenshotRenderCoordinator: ObservableObject {
         )
         .environment(\.screenshotImages, images)
         .environment(\.colorScheme, colorScheme)
-        .snapshot(colorScheme: colorScheme)
+        .snapshot(
+            colorScheme: colorScheme,
+            // 第一帧只是让用户先看到东西，1x 渲染快一个数量级（像素少 7 倍）。
+            // 原图到位后第二帧才按 2.8x 出成品。
+            delay: fastPreview ? 0.01 : 0.05,
+            scaleOverride: fastPreview ? 1 : nil
+        )
+    }
+}
+
+/// 截图输出倍率的计算。
+private enum ScreenshotRenderMetrics {
+    /// 目标输出宽度（像素）。1080 是社交平台通用的清晰度门槛，
+    /// 低于这个数在原尺寸下看就会觉得糊。
+    private static let targetWidthPixels: CGFloat = 1080
+
+    /// 位图内存预算。9 张图的 3:4 长截图按 2.8x 渲染约 120MB，这里给到
+    /// 160MB 留余量；6s 这类 2GB 内存的机器也不至于被系统杀掉。
+    private static let pixelBudget: CGFloat = 160 * 1024 * 1024 / 4
+
+    static func scale(for size: CGSize) -> CGFloat {
+        guard size.width > 0, size.height > 0 else { return 2 }
+        // 390pt 宽 → 1080/390 ≈ 2.77，和屏幕 3x 基本一致，最锐利。
+        let preferred = min(max(targetWidthPixels / size.width, 1), 3)
+        var scale = preferred
+        while scale > 1, size.width * scale * size.height * scale > pixelBudget {
+            scale -= 0.25
+        }
+        // 最低 1x：再往下就真看不清了。极端长图宁可让 drawHierarchy 失败后
+        // 走 layer 兜底，也不要把整张图的字全糊掉。
+        return max(scale, 1)
     }
 }
 
@@ -601,7 +662,8 @@ extension View {
     @MainActor
     func snapshot(
         colorScheme: ColorScheme,
-        delay: TimeInterval = 0.05
+        delay: TimeInterval = 0.05,
+        scaleOverride: CGFloat? = nil
     ) async -> UIImage? {
         let controller = UIHostingController(rootView: self.edgesIgnoringSafeArea(.top))
         controller.overrideUserInterfaceStyle = colorScheme == .dark ? .dark : .light
@@ -663,12 +725,13 @@ extension View {
         view.layoutIfNeeded()
         CATransaction.flush()
 
-        // 超长微博降采样，避免 3x 渲染长图时爆内存。
-        var scale: CGFloat = 3
-        if targetSize.height * scale > 12_000 { scale = 2 }
-        if targetSize.height * scale > 12_000 { scale = 1 }
-        // 极端情况（几十张图 / 超长文）直接放弃高倍率，宁可糊一点也别黑屏。
-        if targetSize.height * scale > 16_000 { scale = 0.5 }
+        // 输出倍率：先保宽度清晰度，再按位图内存预算退让。
+        //
+        // 之前是按「像素高度超过 12000 就降倍率」砍的，9 张 3:4 竖图铺开约
+        // 9700pt，9700×3 = 29000 超了 → 降到 2 → 还超 → 直接砍到 1x，
+        // 390pt 宽的截图只剩 390px，原图里的水印和小字全糊。
+        // 真正该限制的是位图内存，不是高度 —— 长图本来就该长。
+        let scale = scaleOverride ?? ScreenshotRenderMetrics.scale(for: targetSize)
 
         let format = UIGraphicsImageRendererFormat()
         format.scale = scale
