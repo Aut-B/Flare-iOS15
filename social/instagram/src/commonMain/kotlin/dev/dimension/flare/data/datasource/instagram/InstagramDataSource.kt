@@ -2,8 +2,11 @@ package dev.dimension.flare.data.datasource.instagram
 
 import dev.dimension.flare.data.datasource.microblog.AuthenticatedMicroblogDataSource
 import dev.dimension.flare.data.datasource.microblog.ProfileTab
+import dev.dimension.flare.data.datasource.microblog.datasource.UserDataSource
+import dev.dimension.flare.data.datasource.microblog.handler.UserHandler
 import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
 import dev.dimension.flare.data.datasource.microblog.paging.notSupported
+import dev.dimension.flare.data.network.instagram.INSTAGRAM_HOST
 import dev.dimension.flare.data.network.instagram.InstagramCredential
 import dev.dimension.flare.data.network.instagram.InstagramService
 import dev.dimension.flare.model.MicroBlogKey
@@ -25,8 +28,22 @@ import kotlinx.coroutines.flow.Flow
 internal class InstagramDataSource(
     override val accountKey: MicroBlogKey,
     private val credentialFlow: Flow<InstagramCredential>,
-) : AuthenticatedMicroblogDataSource {
+) : AuthenticatedMicroblogDataSource,
+    UserDataSource {
     private val service = InstagramService()
+
+    // 账号页要按 accountKey.id 取一次资料，没有 UserDataSource 就会直接报
+    // 「Account service is not authenticated user data source」。
+    override val userHandler: UserHandler =
+        UserHandler(
+            host = INSTAGRAM_HOST,
+            loader =
+                InstagramLoader(
+                    accountKey = accountKey,
+                    service = service,
+                    credentialFlow = credentialFlow,
+                ),
+        )
 
     override fun homeTimeline(): RemoteLoader<UiTimelineV2> =
         InstagramHomeTimelineLoader(

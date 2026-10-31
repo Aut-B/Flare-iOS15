@@ -26,6 +26,9 @@ struct FlareApp: App {
         // 小红书的接口要 X-S / X-T，这两个值只能在网页里算。Kotlin 侧只定义了
         // 协议，真正的请求还是走这边已经跑通的 XhsService（隐藏 WKWebView 签名）。
         XhsBridgeHolder.shared.bridge = XhsSwiftBridge()
+        // 微信读书在「添加账号」里登录成功后，cookie 要交给原生的 WereadStore，
+        // 书架页才会立刻变成已登录状态。
+        WeReadBridgeHolder.shared.bridge = WereadSwiftBridge()
     }
     var body: some Scene {
         WindowGroup {

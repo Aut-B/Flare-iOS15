@@ -97,6 +97,46 @@ internal fun JsonObject.toUiPost(accountKey: MicroBlogKey): UiTimelineV2.Post? {
     )
 }
 
+/**
+ * 没有头像 / 昵称时用的占位资料。
+ *
+ * 小红书「按 id 取用户」的接口要 `X-S` 签名，而宿主那边（`XhsBridge`）只实现了
+ * 笔记相关的几个请求。账号页只需要有个能渲染的资料，先给这个 —— 至少不会整页报错。
+ */
+internal fun placeholderProfile(
+    id: String,
+    name: String,
+    accountKey: MicroBlogKey,
+): UiProfile {
+    val userKey = MicroBlogKey(id, XHS_HOST)
+    val display = name.ifBlank { "小红书" }
+    return UiProfile(
+        key = userKey,
+        handle = UiHandle(raw = display, host = XHS_HOST),
+        avatar = null,
+        nameInternal = display.toUiPlainText(),
+        platformId = XHS_PLATFORM_ID,
+        platformIcon = UiIcon.World,
+        clickEvent =
+            ClickEvent.Deeplink(
+                DeeplinkRoute.Profile.User(
+                    accountType = AccountType.Specific(accountKey),
+                    userKey = userKey,
+                ),
+            ),
+        banner = null,
+        description = null,
+        matrices =
+            UiProfile.Matrices(
+                fansCount = 0,
+                followsCount = 0,
+                statusesCount = 0,
+            ),
+        mark = persistentListOf(),
+        bottomContent = null,
+    )
+}
+
 internal fun JsonObject.toUiProfile(accountKey: MicroBlogKey): UiProfile? {
     val id = xhsString("id") ?: return null
     val name = xhsString("name") ?: return null

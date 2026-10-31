@@ -2,8 +2,11 @@ package dev.dimension.flare.data.datasource.xiaohongshu
 
 import dev.dimension.flare.data.datasource.microblog.AuthenticatedMicroblogDataSource
 import dev.dimension.flare.data.datasource.microblog.ProfileTab
+import dev.dimension.flare.data.datasource.microblog.datasource.UserDataSource
+import dev.dimension.flare.data.datasource.microblog.handler.UserHandler
 import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
 import dev.dimension.flare.data.datasource.microblog.paging.notSupported
+import dev.dimension.flare.data.network.xiaohongshu.XHS_HOST
 import dev.dimension.flare.data.network.xiaohongshu.XhsCredential
 import dev.dimension.flare.model.MicroBlogKey
 import dev.dimension.flare.ui.model.UiHashtag
@@ -22,8 +25,21 @@ import kotlinx.coroutines.flow.Flow
 internal class XhsDataSource(
     override val accountKey: MicroBlogKey,
     private val credentialFlow: Flow<XhsCredential>,
-) : AuthenticatedMicroblogDataSource {
+) : AuthenticatedMicroblogDataSource,
+    UserDataSource {
     private val service = XhsService()
+
+    // 账号页要按 accountKey.id 取一次资料，缺了就会报
+    // 「Account service is not authenticated user data source」。
+    override val userHandler: UserHandler =
+        UserHandler(
+            host = XHS_HOST,
+            loader =
+                XhsLoader(
+                    accountKey = accountKey,
+                    credentialFlow = credentialFlow,
+                ),
+        )
 
     override fun homeTimeline(): RemoteLoader<UiTimelineV2> =
         XhsHomeTimelineLoader(

@@ -16,9 +16,12 @@ public data class InstagramCredential(
     public val userName: String = "",
 ) {
     public companion object {
+        /** 判断有没有登录态的那一项。只贴了值没贴名字时按它补。 */
+        public const val PRIMARY_KEY: String = "sessionid"
+
         /** 从浏览器 cookie 串里挑出需要的几项，顺便补齐 header 要用的值。 */
         public fun fromCookie(raw: String): InstagramCredential {
-            val map = parseCookiePairs(raw)
+            val map = parseCookiePairs(normalize(raw))
             return InstagramCredential(
                 // 重新拼一遍而不是直接用原文：粘贴进来的串里经常带换行 / 制表符，
                 // 塞进 HTTP header 就是非法值，Instagram 会直接回 400。
@@ -29,23 +32,21 @@ public data class InstagramCredential(
         }
 
         /**
-         * 把各种粘贴姿势都归一成 `k=v; k=v`：
-         * - 浏览器扩展常带的 `Cookie:` 前缀
-         * - 一行一条（用换行分隔）
-         * - 首尾的引号、多余空格
+         * 把各种粘贴姿势都归一成 `k=v; k=v`。
+         *
+         * 只贴了 `sessionid` 后面那串值（没带名字）时按 `sessionid=` 补上；
+         * 但 Instagram 还需要 `ds_user_id` 才能建账号，所以纯值通常还是不够 ——
+         * 调用方会给出对应的提示。
          */
-        internal fun parseCookiePairs(raw: String): Map<String, String> {
-            var text = raw.trim().trim('"').trim()
-            if (text.startsWith("Cookie:", ignoreCase = true)) {
-                text = text.substring("Cookie:".length)
-            }
-            text =
-                text
-                    .replace("\r\n", "; ")
-                    .replace("\n", "; ")
-                    .replace("\r", "; ")
-                    .replace("\t", " ")
+        public fun normalize(raw: String): String {
+            val text = clean(raw)
+            if (text.isEmpty()) return ""
+            if (!text.contains('=')) return "$PRIMARY_KEY=$text"
             return text
+        }
+
+        internal fun parseCookiePairs(raw: String): Map<String, String> =
+            clean(raw)
                 .split(";")
                 .mapNotNull { part ->
                     val index = part.indexOf('=')
@@ -54,6 +55,24 @@ public data class InstagramCredential(
                     val value = part.substring(index + 1).trim().trim('"')
                     if (name.isEmpty()) null else name to value
                 }.toMap()
+
+        /**
+         * 归一化：去 `Cookie:` 前缀、去首尾引号、把换行 / 制表符压成 `; `。
+         *
+         * 换行是必须去掉的：cookie 里带 `\r\n` 会让 HTTP header 非法，服务端直接 400。
+         */
+        private fun clean(raw: String): String {
+            var text = raw.trim().trim('"').trim()
+            if (text.startsWith("Cookie:", ignoreCase = true)) {
+                text = text.substring("Cookie:".length)
+            }
+            return text
+                .replace("\r\n", "; ")
+                .replace("\n", "; ")
+                .replace("\r", "; ")
+                .replace("\t", " ")
+                .trim()
+                .trim(';', ' ')
         }
     }
 }

@@ -91,7 +91,7 @@ private class XhsWebCookieLoginHandler(
     override suspend fun resume(value: String) {
         _state.value = state(loading = true)
         runCatching {
-            require(value.contains("web_session=")) {
+            require(XhsCredential.normalize(value).contains("web_session=")) {
                 "没有拿到小红书的登录 cookie，请确认网页里已经登录成功"
             }
             val credential = XhsCredential.fromCookie(value)
@@ -112,7 +112,8 @@ private class XhsWebCookieLoginHandler(
         }
     }
 
-    override fun canResume(value: String): Boolean = value.contains("web_session=")
+    override fun canResume(value: String): Boolean =
+        XhsCredential.normalize(value).contains("web_session=")
 
     override fun clear() {
         _state.value = state()

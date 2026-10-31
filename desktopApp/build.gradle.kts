@@ -20,6 +20,7 @@ dependencies {
     implementation(projects.social.fanbox)
     implementation(projects.social.instagram)
     implementation(projects.social.xiaohongshu)
+    implementation(projects.social.weread)
     implementation(projects.social.mastodon)
     implementation(projects.social.misskey)
     implementation(projects.social.nostr)

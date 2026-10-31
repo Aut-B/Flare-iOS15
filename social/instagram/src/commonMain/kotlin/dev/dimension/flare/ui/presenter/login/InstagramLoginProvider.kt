@@ -98,7 +98,7 @@ private class InstagramWebCookieLoginHandler(
         _state.value = state(loading = true)
         runCatching {
             val parsed = InstagramCredential.fromCookie(value)
-            require(parsed.cookie.contains("sessionid=")) {
+            require(InstagramCredential.normalize(value).contains("sessionid=")) {
                 "没有拿到 Instagram 的登录 cookie，请确认网页里已经登录成功"
             }
             // 网页里的 cookie 只是「可能登录了」，再问一次接口确认身份，顺便拿用户名。
@@ -109,7 +109,10 @@ private class InstagramWebCookieLoginHandler(
                 (user?.igMediaId() ?: parsed.userId)
                     .orEmpty()
                     .takeIf { it.isNotBlank() }
-                    ?: throw IllegalStateException("Cookie 里没有 ds_user_id，请确认复制的是完整 Cookie")
+                    ?: throw IllegalStateException(
+                        "Cookie 里缺少 ds_user_id。只贴 sessionid 的值不够，" +
+                            "请把整段 Cookie 一起复制（至少含 sessionid 与 ds_user_id）。",
+                    )
             val credential =
                 parsed.copy(
                     userId = userId,
@@ -132,7 +135,8 @@ private class InstagramWebCookieLoginHandler(
         }
     }
 
-    override fun canResume(value: String): Boolean = value.contains("sessionid=")
+    override fun canResume(value: String): Boolean =
+        InstagramCredential.normalize(value).contains("sessionid=")
 
     override fun clear() {
         _state.value = state()

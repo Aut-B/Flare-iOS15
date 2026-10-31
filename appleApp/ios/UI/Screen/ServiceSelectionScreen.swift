@@ -16,14 +16,16 @@ struct CookieLoginHint {
     let platformName: String
     /// 必须包含的 cookie 名，用来给出能看懂的失败原因。
     let requiredKeys: String
+    /// 判断「有没有登录态」的那一项。只贴了值没贴名字时，按它补上。
+    let primaryKey: String
     let example: String
 
     var instruction: String {
-        "iOS 15 的 WebView 无法完成 \(platformName) 网页登录。请在手机浏览器或电脑上登录 \(platformName)，复制会话 Cookie（需含 \(requiredKeys)）后，点下方「从剪贴板读取并登录」即可。"
+        "iOS 15 的 WebView 无法完成 \(platformName) 网页登录。请在手机浏览器或电脑上登录 \(platformName)，把 Cookie 复制过来（需要 \(requiredKeys)）。只复制 \(primaryKey) 后面那串值也可以，会自动补上名字。"
     }
 
     var placeholder: String {
-        "粘贴 \(platformName) 会话 Cookie（形如 \(example)）"
+        "整行粘贴，或只贴 \(primaryKey) 的值（形如 \(example)）"
     }
 
     var actionTitle: String {
@@ -31,7 +33,42 @@ struct CookieLoginHint {
     }
 
     var invalidMessage: String {
-        "Cookie 无效：请确认包含 \(requiredKeys)，且未过期。"
+        "Cookie 无效：没有找到 \(requiredKeys)。请确认复制的是登录后的 Cookie，且没有过期。"
+    }
+
+    /// 把用户可能贴进来的各种形态归一成 `k=v; k=v`。
+    ///
+    /// 最常见的错误是只复制了 `web_session` 后面那串值 —— 少了 `web_session=`
+    /// 前缀，校验就找不到登录态。这里直接补上，别让人卡在格式上。
+    func normalize(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return text }
+        if text.lowercased().hasPrefix("cookie:") {
+            text = String(text.dropFirst("cookie:".count))
+        }
+        // 一行一条的粘贴方式：先按行拼回一行。
+        text = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "; ")
+        text = text.trimmingCharacters(in: CharacterSet(charactersIn: "; "))
+
+        if !text.contains("=") {
+            // DevTools 里按列复制会得到「web_session: xxxx」这种冒号形式。
+            if let colon = text.range(of: ":") {
+                let head = text[text.startIndex..<colon.lowerBound]
+                    .trimmingCharacters(in: .whitespaces)
+                let value = text[colon.upperBound...]
+                    .trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty, head.isEmpty || head == primaryKey {
+                    return "\(primaryKey)=\(value)"
+                }
+            }
+            // 纯值：直接补上名字。
+            return "\(primaryKey)=\(text)"
+        }
+        return text
     }
 
     /// 按平台决定要不要显示粘贴框。返回 nil 的平台还是走原来的网页登录。
@@ -42,21 +79,32 @@ struct CookieLoginHint {
             return CookieLoginHint(
                 platformName: "X",
                 requiredKeys: "auth_token 与 ct0",
+                primaryKey: "auth_token",
                 example: "auth_token=...; ct0=..."
             )
         }
         if p.contains("instagram") || h.contains("instagram") {
             return CookieLoginHint(
                 platformName: "Instagram",
-                requiredKeys: "sessionid",
-                example: "sessionid=...; csrftoken=..."
+                requiredKeys: "sessionid 与 ds_user_id",
+                primaryKey: "sessionid",
+                example: "sessionid=...; ds_user_id=..."
             )
         }
         if p.contains("xiaohongshu") || h.contains("xiaohongshu") {
             return CookieLoginHint(
                 platformName: "小红书",
                 requiredKeys: "web_session",
+                primaryKey: "web_session",
                 example: "web_session=...; a1=..."
+            )
+        }
+        if p.contains("weread") || h.contains("weread") {
+            return CookieLoginHint(
+                platformName: "微信读书",
+                requiredKeys: "wr_vid 与 wr_skey",
+                primaryKey: "wr_vid",
+                example: "wr_vid=...; wr_skey=..."
             )
         }
         return nil
@@ -508,12 +556,13 @@ private struct LoginFlowView: View {
                         .autocorrectionDisabled()
                         .textFieldStyle(.roundedBorder)
                     Button {
-                        let cookie = pasteCookie.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let cookie = hint.normalize(pasteCookie)
                         pasteError = nil
                         guard !cookie.isEmpty else {
                             pasteError = "请先粘贴 Cookie 字符串。"
                             return
                         }
+                        pasteCookie = cookie
                         if presenter.state.canResume(value: cookie) {
                             presenter.state.resume(value: cookie)
                         } else {
@@ -525,7 +574,8 @@ private struct LoginFlowView: View {
                     .buttonStyle(.borderedProminent)
                     .frame(maxWidth: .infinity)
                     Button {
-                        let cookie = (UIPasteboard.general.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let raw = UIPasteboard.general.string ?? ""
+                        let cookie = hint.normalize(raw)
                         pasteError = nil
                         guard !cookie.isEmpty else {
                             pasteError = "剪贴板为空，请先在别处复制 Cookie。"
