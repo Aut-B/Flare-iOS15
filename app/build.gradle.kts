@@ -135,6 +135,7 @@ dependencies {
     implementation(projects.shared)
     implementation(projects.social.bluesky)
     implementation(projects.social.fanbox)
+    implementation(projects.social.instagram)
     implementation(projects.social.mastodon)
     implementation(projects.social.misskey)
     implementation(projects.social.nostr)
