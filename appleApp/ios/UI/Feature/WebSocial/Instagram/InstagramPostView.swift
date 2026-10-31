@@ -1,12 +1,19 @@
 import SwiftUI
 import UIKit
 
-/// 帖子详情：正文不截断，多图纵向铺开（跟截图导出那套版式一致）。
+/// 帖子详情：正文不截断，多图纵向铺开，视频直接播。
+/// 底部带网页版那套交互：点赞、评论、转发、保存图片。
 struct InstagramPostView: View {
     let media: IGMedia
 
     @Environment(\.dismiss) private var dismiss
     @State private var detail: IGMedia?
+    @State private var comments: [IGComment] = []
+    @State private var isLoadingComments = false
+    @State private var commentText = ""
+    @State private var sending = false
+    @State private var commentError: String?
+    @FocusState private var commentFocused: Bool
 
     private var current: IGMedia { detail ?? media }
 
@@ -15,14 +22,18 @@ struct InstagramPostView: View {
             VStack(alignment: .leading, spacing: 0) {
                 userHeader
                 mediaStack
+                IGActionBar(media: current, onComment: { commentFocused = true })
                 statsRow
                 if !current.caption.isEmpty {
                     Text(current.caption)
                         .font(.system(size: 14))
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 14)
-                        .padding(.top, 12)
+                        .padding(.top, 4)
                 }
+                Divider()
+                    .padding(.top, 14)
+                commentsSection
                 openInBrowser
             }
             .padding(.bottom, 24)
@@ -36,8 +47,10 @@ struct InstagramPostView: View {
         }
         .task {
             // 时间线里的字段是精简过的，进详情再拉一次拿全量（含视频地址）。
-            guard detail == nil else { return }
-            detail = try? await InstagramService.shared.media(pk: media.id)
+            if detail == nil {
+                detail = try? await InstagramService.shared.media(pk: media.id)
+            }
+            await loadComments()
         }
     }
 
@@ -59,30 +72,131 @@ struct InstagramPostView: View {
         .padding(.vertical, 10)
     }
 
+    @ViewBuilder
     private var mediaStack: some View {
-        VStack(spacing: 2) {
-            ForEach(Array(current.images.enumerated()), id: \.offset) { _, url in
-                IGImageView(url: url)
-                    .aspectRatio(current.aspect, contentMode: .fit)
-                    .frame(maxWidth: .infinity)
-                    .clipped()
+        if let video = current.videoURL, !current.isCarousel {
+            IGVideoPlayer(url: video)
+                .aspectRatio(current.aspect, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .clipped()
+        } else {
+            VStack(spacing: 2) {
+                ForEach(Array(current.images.enumerated()), id: \.offset) { _, url in
+                    IGImageView(url: url)
+                        .aspectRatio(current.aspect, contentMode: .fit)
+                        .frame(maxWidth: .infinity)
+                        .clipped()
+                }
             }
         }
     }
 
     private var statsRow: some View {
         HStack(spacing: 16) {
-            Label("\(current.likeCount)", systemImage: "heart")
-            Label("\(current.commentCount)", systemImage: "bubble.right")
+            Text("\(current.likeCount) 次赞")
+            Text("\(current.commentCount) 条评论")
             Spacer(minLength: 0)
             if current.isVideo {
                 Label("视频", systemImage: "play.rectangle")
             }
         }
-        .font(.system(size: 12))
+        .font(.system(size: 12, weight: .semibold))
         .foregroundStyle(.secondary)
         .padding(.horizontal, 14)
+        .padding(.top, 8)
+    }
+
+    // MARK: - 评论
+
+    private var commentsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("评论")
+                    .font(.system(size: 14, weight: .semibold))
+                if isLoadingComments {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                }
+                Spacer(minLength: 0)
+            }
+
+            if comments.isEmpty, !isLoadingComments {
+                Text(commentError ?? "还没有评论，来抢第一条")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+            ForEach(comments) { comment in
+                HStack(alignment: .top, spacing: 8) {
+                    IGImageView(url: comment.avatar)
+                        .frame(width: 26, height: 26)
+                        .clipShape(Circle())
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(comment.displayName)
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(comment.text)
+                            .font(.system(size: 13))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+
+            HStack(spacing: 8) {
+                TextField("写评论…", text: $commentText)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($commentFocused)
+                    .submitLabel(.send)
+                    .onSubmit { sendComment() }
+                Button {
+                    sendComment()
+                } label: {
+                    if sending {
+                        ProgressView()
+                    } else {
+                        Text("发送")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(sending || commentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(.horizontal, 14)
         .padding(.top, 12)
+    }
+
+    private func loadComments() async {
+        isLoadingComments = true
+        commentError = nil
+        defer { isLoadingComments = false }
+        do {
+            comments = try await InstagramService.shared.comments(mediaId: current.id)
+        } catch {
+            commentError = error.localizedDescription
+        }
+    }
+
+    private func sendComment() {
+        let text = commentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !sending else { return }
+        sending = true
+        Task {
+            do {
+                let created = try await InstagramService.shared.addComment(
+                    mediaId: current.id,
+                    text: text
+                )
+                commentText = ""
+                commentFocused = false
+                if let created = created {
+                    comments.append(created)
+                }
+                IGToast.success("评论已发送")
+            } catch {
+                IGToast.error(error.localizedDescription)
+            }
+            sending = false
+        }
     }
 
     @ViewBuilder
@@ -153,6 +267,17 @@ struct InstagramProfileView: View {
                                         .aspectRatio(1, contentMode: .fill)
                                         .frame(maxWidth: .infinity)
                                         .clipped()
+                                        .overlay(alignment: .topTrailing) {
+                                            if item.isVideo {
+                                                Image(systemName: "play.fill")
+                                                    .font(.system(size: 9))
+                                                    .foregroundStyle(.white)
+                                                    .padding(4)
+                                                    .background(Color.black.opacity(0.4))
+                                                    .clipShape(Circle())
+                                                    .padding(4)
+                                            }
+                                        }
                                 }
                                 .buttonStyle(.plain)
                             }

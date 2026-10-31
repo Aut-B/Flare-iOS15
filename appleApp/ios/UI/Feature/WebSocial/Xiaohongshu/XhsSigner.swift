@@ -1,11 +1,12 @@
 import Foundation
+import UIKit
 import WebKit
 
 /// 小红书的接口签名。
 ///
 /// `edith.xiaohongshu.com` 的每个请求都要带 `X-S` / `X-T`，这对值由网页里的
 /// `window._webmsxyw(path, data)` 算出来 —— 是混淆过的 JS，硬啃不划算。
-/// 所以这里常驻一个**隐藏的 WKWebView** 打开小红书网页版，需要签名时直接在
+/// 所以这里常驻一个隐藏的 WKWebView 打开小红书网页版，需要签名时直接在
 /// 页面上下文里调用它，拿回签名和 body 字符串。
 ///
 /// body 必须和参与签名的字符串逐字节一致，所以 JSON 也交给页面 `JSON.stringify`
@@ -14,6 +15,11 @@ final class XhsSigner {
     static let shared = XhsSigner()
 
     private var webView: WKWebView?
+    /// 承载隐藏页面的容器，挂在 key window 上（不可见、不吃点击）。
+    ///
+    /// 不挂在窗口上的 WKWebView 会被当成不可见页面：`requestAnimationFrame`
+    /// 不跑、定时器被降频，页面里的签名脚本可能一直算不出结果。
+    private var host: UIView?
     /// 当前登录 cookie；隐藏页面加载 / 重载时先灌进 WKWebsiteDataStore。
     private var cookieHeader: String = ""
     /// 已经灌进签名页的 cookie，避免每次取数都 reload。
@@ -29,54 +35,53 @@ final class XhsSigner {
         let body: String
     }
 
+    /// 内部失败原因，最后统一翻译成 `XhsError`。
+    private enum Failure: Error {
+        /// `_webmsxyw` 还没出现（页面没跑完 / 被跳去登录页）。
+        case notReady
+        /// 脚本在，但调用返回空 / 抛异常。
+        case call(String)
+        /// 返回值形状不认识。
+        case shape(String)
+    }
+
     // MARK: - 对外
 
     func sign(path: String, payload: [String: Any]) async throws -> Signature {
-        try await prepareIfNeeded()
-
         let payloadJSON = try Self.jsonLiteral(payload)
-        let script = """
-        (function(){
-          try {
-            if (typeof window._webmsxyw !== 'function') {
-              return JSON.stringify({error: 'missing'});
-            }
-            var data = \(payloadJSON);
-            var body = JSON.stringify(data);
-            var result = window._webmsxyw("\(path)", data);
-            if (!result) { return JSON.stringify({error: 'empty'}); }
-            return JSON.stringify({xs: result['X-s'], xt: result['X-t'], body: body});
-          } catch (e) {
-            return JSON.stringify({error: String(e)});
-          }
-        })()
-        """
+        var lastFailure: Failure = .notReady
 
-        let raw = try await evaluate(script)
-        guard
-            let data = raw.data(using: .utf8),
-            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else {
-            throw XhsError.signFailed
+        // 页面偶尔会卡在「脚本在、算不出来」的半死状态，重载一次基本都能恢复。
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                await reloadPage()
+            }
+            do {
+                try await waitUntilReady(timeout: attempt == 0 ? 16 : 14)
+                return try await signOnce(path: path, payloadJSON: payloadJSON)
+            } catch let failure as Failure {
+                lastFailure = failure
+                if case .notReady = failure {
+                    continue
+                }
+                // 算签名失败：给页面一点时间（可能是 cookie 刚写进去还没生效）。
+                try? await Task.sleep(nanoseconds: 800_000_000)
+            } catch {
+                lastFailure = .call(error.localizedDescription)
+                try? await Task.sleep(nanoseconds: 800_000_000)
+            }
         }
-        if let error = json["error"] as? String {
-            throw error == "missing" ? XhsError.signerUnavailable : XhsError.signFailed
+
+        if case .notReady = lastFailure {
+            throw XhsError.signerUnavailable
         }
-        guard
-            let xs = json["xs"] as? String,
-            let xt = json["xt"] as? String,
-            let body = json["body"] as? String,
-            !xs.isEmpty
-        else {
-            throw XhsError.signFailed
-        }
-        return Signature(xs: xs, xt: xt, body: body)
+        throw XhsError.signFailed
     }
 
     /// 重新加载页面，签名脚本崩了的时候用。
     func reset() {
         DispatchQueue.main.async {
-            let view = self.ensureWebView()
+            guard let view = self.webView else { return }
             let cookies = Self.cookies(fromHeader: self.cookieHeader)
             if cookies.isEmpty {
                 view.reload()
@@ -91,37 +96,50 @@ final class XhsSigner {
     /// `_webmsxyw` 会读页面里的 `a1` / `webId`，只在请求头里带 cookie 时，
     /// 隐藏页面仍然是匿名会话，算出来的签名会被服务端判无效。cookie 没变
     /// 就什么都不做，翻页时不会反复 reload。
-    func applyCookies(_ header: String) {
+    func applyCookies(_ header: String, force: Bool = false) {
         let normalized = header.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return }
         DispatchQueue.main.async {
-            guard self.appliedCookieHeader != normalized else { return }
+            if !force, self.appliedCookieHeader == normalized { return }
             self.appliedCookieHeader = normalized
             self.cookieHeader = normalized
             let cookies = Self.cookies(fromHeader: normalized)
             guard !cookies.isEmpty else { return }
             self.write(cookies) {
-                self.webView?.reload()
+                guard let view = self.webView else { return }
+                // 页面正在加载时别 reload，否则会把 bundle 打断，签名永远好不了。
+                if view.isLoading { return }
+                view.reload()
             }
         }
     }
 
     // MARK: - 页面准备
 
-    private func prepareIfNeeded() async throws {
-        // `webView` 是懒创建的：之前这里只轮询 `isSignerReady()`，
-        // 但 `ensureWebView()` 从来没被调用过，`webView` 永远是 nil，
-        // 每次请求都白等 16 秒再报「网页签名脚本没加载出来」。
-        // 必须先在主线程把隐藏页面建出来。
+    private func waitUntilReady(timeout: TimeInterval) async throws {
         await MainActor.run {
             _ = self.ensureWebView()
         }
-        // 最多等 16 秒，小红书首屏要跑完一大坨 bundle 才会有 `_webmsxyw`。
-        for _ in 0..<40 {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
             if await isSignerReady() { return }
             try? await Task.sleep(nanoseconds: 400_000_000)
         }
-        throw XhsError.signerUnavailable
+        throw Failure.notReady
+    }
+
+    private func reloadPage() async {
+        await MainActor.run {
+            let view = self.ensureWebView()
+            let cookies = Self.cookies(fromHeader: self.cookieHeader)
+            if cookies.isEmpty {
+                view.reload()
+            } else {
+                self.write(cookies) { view.reload() }
+            }
+        }
+        // 等新页面开始跑 bundle，避免刚 reload 就判定「没准备好」。
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
     }
 
     private func isSignerReady() async -> Bool {
@@ -130,6 +148,71 @@ final class XhsSigner {
             return text == "true" || text == "1"
         }
         return false
+    }
+
+    private func signOnce(path: String, payloadJSON: String) async throws -> Signature {
+        let script = """
+        (function(){
+          try {
+            if (typeof window._webmsxyw !== 'function') {
+              return JSON.stringify({error: 'missing'});
+            }
+            var data = \(payloadJSON);
+            var body = JSON.stringify(data);
+            var result = window._webmsxyw("\(path)", data);
+            if (typeof result === 'string') {
+              try { result = JSON.parse(result); } catch (e) {}
+            }
+            if (!result) { return JSON.stringify({error: 'empty'}); }
+            function pick(obj, names) {
+              for (var i = 0; i < names.length; i++) {
+                var value = obj[names[i]];
+                if (typeof value === 'string' && value.length > 0) { return value; }
+              }
+              return null;
+            }
+            var xs = null;
+            var xt = null;
+            if (typeof result === 'object') {
+              xs = pick(result, ['X-s', 'x-s', 'xs', 'X-S']);
+              xt = pick(result, ['X-t', 'x-t', 'xt', 'X-T']);
+              if (!xs && Object.prototype.toString.call(result) === '[object Array]') {
+                xs = result[0];
+                xt = result[1];
+              }
+            }
+            if (!xs) {
+              return JSON.stringify({error: 'shape:' + Object.prototype.toString.call(result)});
+            }
+            return JSON.stringify({xs: xs, xt: xt || '', body: body});
+          } catch (e) {
+            return JSON.stringify({error: 'exception:' + String(e)});
+          }
+        })()
+        """
+
+        let raw = try await evaluate(script)
+        guard
+            let data = raw.data(using: .utf8),
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else {
+            throw Failure.shape(String(raw.prefix(120)))
+        }
+        if let error = json["error"] as? String {
+            if error == "missing" {
+                throw Failure.notReady
+            }
+            throw Failure.call(error)
+        }
+        guard
+            let xs = json["xs"] as? String,
+            !xs.isEmpty,
+            let body = json["body"] as? String
+        else {
+            throw Failure.shape(String(raw.prefix(120)))
+        }
+        let xt = json["xt"] as? String ?? ""
+        return Signature(xs: xs, xt: xt, body: body)
     }
 
     /// 在页面里跑一段脚本，返回值统一转成字符串（布尔会变成 `"true"`）。
@@ -176,13 +259,15 @@ final class XhsSigner {
         if let webView = webView { return webView }
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.allowsInlineMediaPlayback = true
         let view = WKWebView(
             frame: CGRect(x: 0, y: 0, width: 390, height: 844),
             configuration: configuration
         )
         view.customUserAgent = Self.desktopUserAgent
-        view.isHidden = true
+        view.isUserInteractionEnabled = false
         webView = view
+        attachToWindow(view)
         // `load` 会作为 `() -> Void` 传出去；不写类型会被推断成 `() -> WKNavigation?`。
         let load: () -> Void = {
             _ = view.load(URLRequest(url: URL(string: "https://www.xiaohongshu.com/explore")!))
@@ -194,6 +279,30 @@ final class XhsSigner {
             write(cookies, completion: load)
         }
         return view
+    }
+
+    /// 把隐藏页面塞进当前窗口的最底层。
+    ///
+    /// 尺寸保持 390x844（页面按桌面版渲染），但外层容器只有 2x2 且几乎透明，
+    /// 用户看不到也点不到；窗口切到后台再回来时，JS 也不会被系统冻住。
+    private func attachToWindow(_ view: WKWebView) {
+        guard host == nil else { return }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        guard
+            let window = scene?.windows.first(where: { $0.isKeyWindow }) ?? scene?.windows.first
+        else {
+            return
+        }
+        let container = UIView(frame: CGRect(x: -4, y: -4, width: 2, height: 2))
+        container.clipsToBounds = true
+        container.alpha = 0.02
+        container.isUserInteractionEnabled = false
+        view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        container.addSubview(view)
+        window.addSubview(container)
+        window.sendSubviewToBack(container)
+        host = container
     }
 
     /// `Cookie:` 头 → `HTTPCookie`。域名统一写成 `.xiaohongshu.com`，

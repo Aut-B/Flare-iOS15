@@ -32,6 +32,8 @@ struct IGMedia: Identifiable, Hashable {
     let commentCount: Int
     let isVideo: Bool
     let isCarousel: Bool
+    /// 当前账号有没有点过赞。网页版接口里叫 `has_liked`。
+    let hasLiked: Bool
     /// 首图宽高比（宽 / 高）。接口给了尺寸，拿来定版式高度，
     /// 免得图片加载前后列表跳动。
     let aspect: CGFloat
@@ -40,6 +42,17 @@ struct IGMedia: Identifiable, Hashable {
 
     /// 帖子链接，长按/分享时用。
     var webURL: String { "https://www.instagram.com/p/\(shortcode)/" }
+}
+
+/// 一条评论。
+struct IGComment: Identifiable, Hashable {
+    let id: String
+    let userName: String
+    let avatar: String?
+    let text: String
+    let createdAt: Date
+
+    var displayName: String { userName.isEmpty ? "instagram" : userName }
 }
 
 /// Instagram 接口出错。
@@ -181,7 +194,22 @@ enum IGJSON {
             commentCount: int(object["comment_count"]),
             isVideo: mediaType == 2 || videoURL != nil,
             isCarousel: mediaType == 8 || !carousel.isEmpty,
+            hasLiked: (object["has_liked"] as? Bool) ?? (int(object["has_liked"]) == 1),
             aspect: aspect
+        )
+    }
+
+    static func comment(_ value: Any?) -> IGComment? {
+        guard let object = object(value) else { return nil }
+        guard let text = string(object["text"]) else { return nil }
+        let user = object(object["user"]) ?? [:]
+        let id = identifier(object["pk"]) ?? identifier(object["id"]) ?? UUID().uuidString
+        return IGComment(
+            id: id,
+            userName: string(user["username"]) ?? "",
+            avatar: string(user["profile_pic_url"]),
+            text: text,
+            createdAt: date(object["created_at"])
         )
     }
 

@@ -159,6 +159,38 @@ final class InstagramService {
         return media
     }
 
+    // MARK: - 互动
+
+    /// 点赞 / 取消点赞。
+    ///
+    /// 网页版走的就是这两个接口，只要 `X-CSRFToken`（cookie 里的 `csrftoken`）
+    /// 和 `X-Instagram-AJAX`，不需要额外的签名。
+    func setLiked(_ liked: Bool, mediaId: String) async throws {
+        let action = liked ? "like" : "unlike"
+        _ = try await request(
+            "\(base)/api/v1/web/likes/\(mediaId)/\(action)/",
+            method: "POST",
+            formBody: "media_id=\(mediaId)"
+        )
+    }
+
+    func comments(mediaId: String) async throws -> [IGComment] {
+        let json = try await request(
+            "\(base)/api/v1/media/\(mediaId)/comments/?can_support_threading=true&permalink_enabled=false"
+        )
+        return IGJSON.array(json["comments"]).compactMap { IGJSON.comment($0) }
+    }
+
+    @discardableResult
+    func addComment(mediaId: String, text: String) async throws -> IGComment? {
+        let json = try await request(
+            "\(base)/api/v1/web/comments/add/\(mediaId)/",
+            method: "POST",
+            formBody: "comment_text=\(Self.percentEncode(text))"
+        )
+        return IGJSON.comment(json["comment"])
+    }
+
     // MARK: - 底层
 
     private func request(

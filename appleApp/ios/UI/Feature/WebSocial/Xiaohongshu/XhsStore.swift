@@ -78,6 +78,13 @@ final class XhsStore: ObservableObject {
         return true
     }
 
+    /// 重新登录时登录页会先把旧 cookie 清掉；用户中途取消的话，
+    /// 隐藏的签名页面就变成匿名会话了。这里把已保存的 cookie 强行灌回去。
+    func restoreSignerCookies() {
+        guard !cookie.isEmpty else { return }
+        XhsSigner.shared.applyCookies(cookie, force: true)
+    }
+
     func logout() {
         defaults.removeObject(forKey: cookieKey)
         pushCredentials()

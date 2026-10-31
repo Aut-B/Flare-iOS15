@@ -44,7 +44,7 @@ struct XhsError: LocalizedError {
         needLogin: true
     )
     static let signFailed = XhsError(
-        message: "签名没拿到，网页可能没加载完，稍后重试",
+        message: "签名没拿到，网页可能还没加载完。再点一次「重试」；连续失败就点「重新登录」重新灌一次 cookie",
         needLogin: false
     )
     static let signerUnavailable = XhsError(

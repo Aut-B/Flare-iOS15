@@ -304,24 +304,33 @@ struct HomeTimelineScreen: View {
     @ToolbarContentBuilder
     private var leadingToolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
-            StateView(state: activeAccountPresenter.state.user) { user in
-                if user.avatar == nil {
-                    Image(fontAwesome: .gear)
-                } else {
-                    if #available(iOS 26.0, *) {
-                        AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
-                    } else {
-                        AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
-                            .frame(width: 24, height: 24)
-                    }
-                }
-            } errorContent: { _ in
-                Image(fontAwesome: .gear)
-            } loadingContent: {
-                Image(fontAwesome: .gear)
-            }.onTapGesture {
+            // 以前这里用 `onTapGesture` 挂在 `StateView` 上：头像一旦加载出来，
+            // `AvatarView` 内部的图片会把点击吃掉，工具栏就再也点不动了。
+            // 换成 `Button` 并让内容不参与命中测试，整个 24x24 区域都能点。
+            Button {
                 toSecondaryMenu()
+            } label: {
+                StateView(state: activeAccountPresenter.state.user) { user in
+                    if user.avatar == nil {
+                        Image(fontAwesome: .gear)
+                    } else {
+                        if #available(iOS 26.0, *) {
+                            AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                        } else {
+                            AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                                .frame(width: 24, height: 24)
+                        }
+                    }
+                } errorContent: { _ in
+                    Image(fontAwesome: .gear)
+                } loadingContent: {
+                    Image(fontAwesome: .gear)
+                }
+                .allowsHitTesting(false)
+                .frame(width: 30, height: 30)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .accessibilityLabel(Text("open_navigation_menu"))
         }
     }

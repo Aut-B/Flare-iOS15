@@ -312,6 +312,8 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
     case weread
     case instagram
     case xiaohongshu
+    case douyin
+    case tiktok
     case localHistory
     case agentHistory
     case settings
@@ -328,6 +330,10 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
             return "route:instagram"
         case .xiaohongshu:
             return "route:xiaohongshu"
+        case .douyin:
+            return "route:douyin"
+        case .tiktok:
+            return "route:tiktok"
         case .localHistory:
             return "route:localHistory"
         case .agentHistory:
@@ -349,6 +355,10 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
             return .instagram
         case .xiaohongshu:
             return .xiaohongshu
+        case .douyin:
+            return .douyin
+        case .tiktok:
+            return .tiktok
         case .localHistory:
             return .localHostory
         case .agentHistory:
@@ -370,6 +380,10 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
             return "Instagram"
         case .xiaohongshu:
             return "小红书"
+        case .douyin:
+            return "抖音"
+        case .tiktok:
+            return "TikTok"
         case .localHistory:
             return "local_history_title"
         case .agentHistory:
@@ -391,6 +405,10 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
             return .photoFilm
         case .xiaohongshu:
             return .image
+        case .douyin:
+            return .circlePlay
+        case .tiktok:
+            return .play
         case .localHistory:
             return .clockRotateLeft
         case .agentHistory:

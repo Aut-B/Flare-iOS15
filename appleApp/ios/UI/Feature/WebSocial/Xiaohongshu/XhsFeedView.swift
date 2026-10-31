@@ -56,7 +56,11 @@ struct XhsFeedView: View {
                 title: "登录小红书",
                 userAgent: XhsSigner.desktopUserAgent,
                 requiredCookieName: "web_session",
-                cookieDomainSuffix: "xiaohongshu.com"
+                cookieDomainSuffix: "xiaohongshu.com",
+                // 重新登录必须先把旧会话清掉：不清的话网页认为「已经登录」，
+                // 直接跳回首页，永远拿不到新的 web_session，sheet 就会一开一关。
+                clearCookies: true,
+                onCancel: { store.restoreSignerCookies() }
             ) { cookies in
                 store.adopt(cookies: cookies)
                 Task { await store.refresh() }

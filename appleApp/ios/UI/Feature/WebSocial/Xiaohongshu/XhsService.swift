@@ -92,7 +92,16 @@ final class XhsService {
     // MARK: - 底层
 
     private func post(_ path: String, payload: [String: Any]) async throws -> [String: Any] {
-        let signature = try await XhsSigner.shared.sign(path: path, payload: payload)
+        let signature: XhsSigner.Signature
+        do {
+            signature = try await XhsSigner.shared.sign(path: path, payload: payload)
+        } catch {
+            // 签名页偶尔会停在「脚本在、算不出来」的状态。重载一次再算，
+            // 比直接把「签名没拿到」丢给用户要好。
+            XhsSigner.shared.reset()
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            signature = try await XhsSigner.shared.sign(path: path, payload: payload)
+        }
 
         guard let url = URL(string: host + path) else {
             throw XhsError(message: "请求地址非法", needLogin: false)
@@ -153,7 +162,7 @@ final class XhsService {
             // 签名跟隐藏页面的状态有关：cookie 换了 / 页面过期都会算错。
             // 重新加载签名页让下一次请求重算，别当成掉登录把用户踢出去。
             XhsSigner.shared.reset()
-            throw XhsError(message: "小红书签名失效，已自动刷新，请重试一次", needLogin: false)
+            throw XhsError(message: "小红书签名失效，已自动刷新，请再点一次重试", needLogin: false)
         }
         if code == 461 {
             throw XhsError(

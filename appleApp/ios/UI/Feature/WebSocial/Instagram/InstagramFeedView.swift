@@ -87,12 +87,9 @@ struct InstagramFeedView: View {
                     errorState(message)
                 } else {
                     ForEach(store.feed) { media in
-                        Button {
+                        IGMediaCard(media: media) {
                             selected = media
-                        } label: {
-                            IGMediaCard(media: media)
                         }
-                        .buttonStyle(.plain)
                         Divider()
                     }
                     if store.feed.isEmpty {
@@ -179,11 +176,14 @@ struct InstagramFeedView: View {
 
 struct IGMediaCard: View {
     let media: IGMedia
+    /// 点图片 / 用户名 / 评论 / 更多都进详情。
+    var onOpen: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            IGMediaCarousel(media: media)
+            IGMediaCarousel(media: media, onOpen: onOpen)
+            IGActionBar(media: media, onComment: onOpen, onMore: onOpen)
             footer
         }
         .padding(.bottom, 12)
@@ -205,27 +205,23 @@ struct IGMediaCard: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onOpen)
     }
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 14) {
-                Label("\(media.likeCount)", systemImage: "heart")
-                Label("\(media.commentCount)", systemImage: "bubble.right")
-                Spacer(minLength: 0)
-            }
-            .font(.system(size: 12))
-            .foregroundStyle(.secondary)
-
             if !media.caption.isEmpty {
                 Text(media.caption)
                     .font(.system(size: 13))
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onOpen)
             }
         }
         .padding(.horizontal, 12)
-        .padding(.top, 10)
+        .padding(.top, 2)
     }
 
     static func relative(_ date: Date) -> String {
@@ -240,17 +236,43 @@ struct IGMediaCard: View {
     }
 }
 
-/// 轮播 / 单图。多图用 `TabView` 的翻页样式，圆点在下面。
+/// 轮播 / 单图 / 单视频。
+///
+/// 视频帖先在原地放封面 + 播放键，点了直接在这个位置播（不跳页），
+/// 右上角的小叉可以退回封面。
 struct IGMediaCarousel: View {
     let media: IGMedia
+    var onOpen: () -> Void = {}
+
     @State private var index = 0
+    @State private var playing = false
+
+    /// 只有「单条视频」才原地播；多图轮播里混的视频进详情看。
+    private var canPlayInline: Bool {
+        media.videoURL != nil && media.images.count <= 1
+    }
 
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
             let height = max(width / max(media.aspect, 0.1), 120)
             ZStack(alignment: .bottom) {
-                if media.images.count > 1 {
+                if playing, let video = media.videoURL {
+                    IGVideoPlayer(url: video)
+                        .frame(width: width, height: height)
+                        .overlay(alignment: .topTrailing) {
+                            Button {
+                                playing = false
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 20))
+                                    .foregroundStyle(.white.opacity(0.9))
+                                    .shadow(radius: 3)
+                                    .padding(8)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                } else if media.images.count > 1 {
                     TabView(selection: $index) {
                         ForEach(Array(media.images.enumerated()), id: \.offset) { offset, url in
                             IGImageView(url: url)
@@ -267,15 +289,28 @@ struct IGMediaCarousel: View {
                     IGImageView(url: media.cover)
                         .frame(width: width, height: height)
                         .clipped()
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: onOpen)
                 }
 
-                if media.isVideo {
-                    // 没有播放器，只标一下这是视频帖，避免用户以为图挂了。
+                if canPlayInline, !playing {
+                    Button {
+                        playing = true
+                    } label: {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 44))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .shadow(radius: 6)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if media.isVideo, !playing, media.images.count > 1 {
+                    // 轮播里的视频：标一下，点开详情播。
                     Image(systemName: "play.circle.fill")
                         .font(.system(size: 34))
                         .foregroundStyle(.white.opacity(0.9))
                         .shadow(radius: 4)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .allowsHitTesting(false)
                 }
             }
             .frame(width: width, height: height)

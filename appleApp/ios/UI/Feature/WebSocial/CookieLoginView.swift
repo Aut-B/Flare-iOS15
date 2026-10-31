@@ -5,7 +5,10 @@ import WebKit
 ///
 /// Instagram、小红书这类没有开放 API 的平台，网页版登录后 cookie 就是全部凭证。
 /// 这里负责把用户扔进真正的登录页（桌面 UA，否则会被引导去下载 App），
-/// 轮询 cookie 仓库，一旦出现目标 cookie 就回调并自动关闭。
+/// 轮询 cookie 仓库，一旦出现**新的**目标 cookie 就回调并自动关闭。
+///
+/// 「新的」很关键：重新登录时数据仓库里还留着上一次的 `web_session`，
+/// 只要判断「存在就完成」就会一打开就立刻关掉 —— 表现就是「网页弹一下就退回去」。
 struct CookieLoginView: View {
     let url: String
     let title: String
@@ -15,6 +18,11 @@ struct CookieLoginView: View {
     let requiredCookieName: String
     /// 只取这个域名下的 cookie。
     let cookieDomainSuffix: String
+    /// 打开前先清掉该域名的旧 cookie。重新登录时必须开，
+    /// 否则网页会认为「已经登录」，直接跳回首页，永远拿不到新会话。
+    var clearCookies: Bool = false
+    /// 用户点取消时回调（用来把旧 cookie 灌回隐藏页面，避免签名页变成匿名）。
+    var onCancel: (() -> Void)? = nil
     let onCookies: ([HTTPCookie]) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -25,7 +33,8 @@ struct CookieLoginView: View {
                 url: url,
                 userAgent: userAgent,
                 requiredCookieName: requiredCookieName,
-                cookieDomainSuffix: cookieDomainSuffix
+                cookieDomainSuffix: cookieDomainSuffix,
+                clearCookies: clearCookies
             ) { cookies in
                 onCookies(cookies)
                 dismiss()
@@ -34,7 +43,10 @@ struct CookieLoginView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button("取消") {
+                        onCancel?()
+                        dismiss()
+                    }
                 }
             }
         }
@@ -47,6 +59,7 @@ private struct CookieWebContainer: UIViewRepresentable {
     let userAgent: String
     let requiredCookieName: String
     let cookieDomainSuffix: String
+    let clearCookies: Bool
     let onCookies: ([HTTPCookie]) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -63,10 +76,8 @@ private struct CookieWebContainer: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.customUserAgent = userAgent
         webView.navigationDelegate = context.coordinator
-        if let target = URL(string: url) {
-            webView.load(URLRequest(url: target))
-        }
-        context.coordinator.startPolling()
+        // 先记录「打开前的会话」，再决定要不要清 cookie、要不要加载。
+        context.coordinator.begin(webView: webView, url: url, clearCookies: clearCookies)
         return webView
     }
 
@@ -82,6 +93,12 @@ private struct CookieWebContainer: UIViewRepresentable {
         private let onCookies: ([HTTPCookie]) -> Void
         private var timer: Timer?
         private var finished = false
+        private weak var webView: WKWebView?
+        private var loginURL: String = ""
+        private var clearCookies = false
+        /// 打开登录页之前仓库里的会话值。只有出现**不同**的值才算登录成功。
+        private var baseline: String?
+        private var baselineReady = false
 
         init(
             requiredCookieName: String,
@@ -91,6 +108,35 @@ private struct CookieWebContainer: UIViewRepresentable {
             self.requiredCookieName = requiredCookieName
             self.cookieDomainSuffix = cookieDomainSuffix
             self.onCookies = onCookies
+        }
+
+        func begin(webView: WKWebView, url: String, clearCookies: Bool) {
+            self.webView = webView
+            self.loginURL = url
+            self.clearCookies = clearCookies
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { [weak self] cookies in
+                guard let self = self else { return }
+                let existing = cookies.first {
+                    $0.name == self.requiredCookieName && $0.domain.contains(self.cookieDomainSuffix)
+                }
+                self.baseline = existing?.value
+                self.baselineReady = true
+                if clearCookies {
+                    CookieJar.clear(domainSuffix: self.cookieDomainSuffix) {
+                        // 清完旧会话，baseline 也就不作数了。
+                        self.baseline = nil
+                        self.load()
+                    }
+                } else {
+                    self.load()
+                }
+            }
+            startPolling()
+        }
+
+        private func load() {
+            guard let webView = webView, let target = URL(string: loginURL) else { return }
+            webView.load(URLRequest(url: target))
         }
 
         func startPolling() {
@@ -109,15 +155,19 @@ private struct CookieWebContainer: UIViewRepresentable {
         }
 
         private func checkCookies() {
-            guard !finished else { return }
+            guard !finished, baselineReady else { return }
             WKWebsiteDataStore.default().httpCookieStore.getAllCookies { [weak self] cookies in
                 guard let self = self, !self.finished else { return }
                 let matched = cookies.filter { $0.domain.contains(self.cookieDomainSuffix) }
                 guard
-                    matched.contains(where: {
+                    let session = matched.first(where: {
                         $0.name == self.requiredCookieName && !$0.value.isEmpty
                     })
                 else {
+                    return
+                }
+                // 值没变 = 还是打开前那套会话，说明用户还没真正登录成功。
+                if let baseline = self.baseline, baseline == session.value {
                     return
                 }
                 self.finished = true
@@ -158,6 +208,24 @@ enum CookieJar {
             }
         }
         return nil
+    }
+
+    /// 删掉某个域名下的全部 cookie（重新登录前用）。
+    static func clear(domainSuffix: String, completion: @escaping () -> Void) {
+        let store = WKWebsiteDataStore.default().httpCookieStore
+        store.getAllCookies { cookies in
+            let targets = cookies.filter { $0.domain.contains(domainSuffix) }
+            guard !targets.isEmpty else {
+                DispatchQueue.main.async(execute: completion)
+                return
+            }
+            let group = DispatchGroup()
+            for cookie in targets {
+                group.enter()
+                store.delete(cookie) { group.leave() }
+            }
+            group.notify(queue: .main, execute: completion)
+        }
     }
 
     /// 把 WKWebView 里的 cookie 灌进 URLSession 的共享仓库，
