@@ -1,7 +1,6 @@
 package dev.dimension.flare.ui.presenter.login
 
 import dev.dimension.flare.data.network.weread.WEREAD_HOST
-import dev.dimension.flare.data.network.weread.WEREAD_LOGIN_URL
 import dev.dimension.flare.data.network.weread.WEREAD_PLATFORM_ID
 import dev.dimension.flare.data.network.weread.WeReadBridgeHolder
 import dev.dimension.flare.data.network.weread.WeReadCredential
@@ -76,6 +75,9 @@ public data object WeReadLoginProvider : LoginPlatformProvider {
 private class WeReadWebCookieLoginHandler(
     private val context: LoginContext,
 ) : LoginMethodHandler {
+    // 必须声明在 `_state` 之前：`_state` 的初始化会调用 state()，
+    // 而 state() 会读这个字段。放到后面就变成「读未初始化的字段」。
+    private var cookieInput: String = ""
     private val _state = MutableStateFlow(state())
     private val _effects = MutableSharedFlow<LoginEffect>(extraBufferCapacity = 1)
 
@@ -85,11 +87,29 @@ private class WeReadWebCookieLoginHandler(
     override fun updateField(
         id: String,
         value: String,
-    ) = Unit
+    ) {
+        if (id == COOKIE_FIELD) {
+            cookieInput = value
+            // 输入框里的内容变了，错误提示就该消失，否则改了半天还在报旧错。
+            if (_state.value.error != null) {
+                _state.value = state()
+            }
+        }
+    }
 
+    /**
+     * 这里**不再打开网页**。
+     *
+     * weread.qq.com 在 WebView 里给的是「下载 App」页，没有扫码入口，
+     * 点进去只会看到一个「去下载」，白跑一趟。所以直接读输入框里的 cookie。
+     */
     override suspend fun perform(actionId: String) {
         if (actionId != LOGIN_ACTION) return
-        _effects.emit(LoginEffect.OpenWebCookieLogin(url = WEREAD_LOGIN_URL))
+        if (cookieInput.isBlank()) {
+            _state.value = state(error = "请先粘贴 Cookie（需要包含 wr_vid 与 wr_skey）")
+            return
+        }
+        resume(cookieInput)
     }
 
     override suspend fun resume(value: String) {
@@ -97,7 +117,7 @@ private class WeReadWebCookieLoginHandler(
         runCatching {
             val normalized = WeReadCredential.normalize(value)
             require(normalized.contains("wr_vid=")) {
-                "没有拿到微信读书的登录 cookie，请确认网页里已经扫码成功"
+                "没有拿到微信读书的登录 cookie，请确认包含 wr_vid 与 wr_skey"
             }
             val credential = WeReadCredential.fromCookie(normalized)
             val bridge =
@@ -116,6 +136,7 @@ private class WeReadWebCookieLoginHandler(
         WeReadCredential.normalize(value).contains("wr_vid=")
 
     override fun clear() {
+        cookieInput = ""
         _state.value = state()
     }
 
@@ -124,6 +145,25 @@ private class WeReadWebCookieLoginHandler(
         error: String? = null,
     ): LoginFlowState =
         LoginFlowState(
+            fields =
+                listOf(
+                    LoginField(
+                        id = HINT_FIELD,
+                        type = LoginFieldType.DisplayText,
+                        label = UiStrings.WebCookieLogin,
+                        value =
+                            "微信读书的网页版在 App 内只给「下载 App」，没有扫码入口。" +
+                                "请用电脑或手机浏览器登录 weread.qq.com，把 Cookie 复制到下面" +
+                                "（需要包含 wr_vid 与 wr_skey）。",
+                    ),
+                    LoginField(
+                        id = COOKIE_FIELD,
+                        type = LoginFieldType.TextInput,
+                        label = UiStrings.WebCookieLogin,
+                        value = cookieInput,
+                        readOnly = loading,
+                    ),
+                ),
             actions =
                 listOf(
                     LoginAction(
@@ -135,4 +175,9 @@ private class WeReadWebCookieLoginHandler(
             loading = loading,
             error = error,
         )
+
+    private companion object {
+        const val COOKIE_FIELD = "cookie"
+        const val HINT_FIELD = "hint"
+    }
 }

@@ -11,6 +11,7 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
+import io.ktor.http.encodeURLParameter
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -53,14 +54,21 @@ internal class InstagramService {
         credential: InstagramCredential,
         maxId: String?,
     ): InstagramPage {
+        // 参数照抄网页端的那一份。少一个都可能被回 400 —— 尤其是
+        // `feed_view_info` 和 `is_pull_to_refresh`，缺了服务端会认为请求不完整。
         val params =
             buildList {
                 add("is_prefetch" to "false")
-                add("reason" to "pull_to_refresh")
-                add("phone_id" to phoneId())
+                add("feed_view_info" to "%5B%5D")
+                add("phone_id" to phoneId)
                 add("battery_level" to "100")
                 add("timezone_offset" to "28800")
-                maxId?.takeIf { it.isNotBlank() }?.let { add("max_id" to it) }
+                add("is_pull_to_refresh" to "false")
+                add("is_charging" to "0")
+                add("will_sound_on" to "1")
+                add("is_dark_mode" to "0")
+                add("reason" to "pull_to_refresh")
+                maxId?.takeIf { it.isNotBlank() }?.let { add("max_id" to it.encodeURLParameter()) }
             }
         // 网页端这个接口收的是 **表单体**，不是 JSON。之前发 application/json
         // 会被直接打回 400（而且 body 是空的，看错误信息也看不出原因）。
@@ -201,7 +209,7 @@ internal class InstagramService {
             if (status == 401 || status == 403 || looksLikeHtml) {
                 throw InstagramException("Instagram 登录已失效，请重新登录", needLogin = true)
             }
-            val detail = errorMessage(text)
+            val detail = errorMessage(text) ?: bodySnippet(text)
             throw InstagramException(
                 if (detail != null) {
                     "Instagram 请求被拒绝（HTTP $status：$detail）"
@@ -225,6 +233,19 @@ internal class InstagramService {
         runCatching {
             json.parseToJsonElement(text).jsonObject["message"]?.jsonPrimitive?.content
         }.getOrNull()?.takeIf { it.isNotBlank() && it != "null" }
+
+    /**
+     * 服务端不返回 `message` 时，把 body 前一小段带进错误信息。
+     *
+     * 之前 400 的 body 是空的，界面上只有一句「请求失败（HTTP 400）」，
+     * 既不知道哪个接口，也没法判断原因。带一点原文至少能定位。
+     */
+    private fun bodySnippet(text: String): String? {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return null
+        val oneLine = trimmed.replace("\n", " ").replace("\r", " ")
+        return oneLine.take(120).let { if (oneLine.length > 120) "$it…" else it }
+    }
 
     private fun extractUser(text: String): JsonObject? {
         val root = runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return null
@@ -264,7 +285,30 @@ internal class InstagramService {
     private fun JsonPrimitive.contentOrNullSafe(): String? =
         runCatching { content }.getOrNull()?.takeIf { it.isNotBlank() && it != "null" }
 
-    private fun phoneId(): String = "android-${(1000..9999).random()}"
+    /**
+     * 接口要一个设备 id。
+     *
+     * **必须是 UUID 格式**：以前给的是 `android-1234` 这种随便拼的字符串，
+     * 服务端会判定参数非法，直接回 400（body 为空，看不出原因）。
+     * 这里造一个 UUID，进程内固定 —— 每次请求都换反而更像异常客户端。
+     */
+    private val phoneId: String by lazy { randomUuid() }
+
+    private fun randomUuid(): String {
+        val hex = "0123456789abcdef"
+        val raw = buildString { repeat(32) { append(hex.random()) } }
+        return buildString {
+            append(raw.substring(0, 8))
+            append('-')
+            append(raw.substring(8, 12))
+            append('-')
+            append(raw.substring(12, 16))
+            append('-')
+            append(raw.substring(16, 20))
+            append('-')
+            append(raw.substring(20, 32))
+        }
+    }
 }
 
 internal class InstagramException(

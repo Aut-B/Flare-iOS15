@@ -57,6 +57,20 @@ public data class InstagramCredential(
                 }.toMap()
 
         /**
+         * 从 `sessionid` 里抠出用户 id。
+         *
+         * `sessionid` 的格式是 `<userId>%3A<token>%3A<数字>`（冒号常被编码成 `%3A`），
+         * 所以第一段就是用户 id。`ds_user_id` 缺失时用它兜底 ——
+         * 否则会出现「网页明明登录成功了，却因为少一个 cookie 建不了账号」。
+         */
+        public fun userIdFromSession(sessionId: String): String? {
+            if (sessionId.isBlank()) return null
+            val decoded = sessionId.replace("%3A", ":", ignoreCase = true)
+            val head = decoded.substringBefore(":").trim()
+            return head.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
+        }
+
+        /**
          * 归一化：去 `Cookie:` 前缀、去首尾引号、把换行 / 制表符压成 `; `。
          *
          * 换行是必须去掉的：cookie 里带 `\r\n` 会让 HTTP header 非法，服务端直接 400。

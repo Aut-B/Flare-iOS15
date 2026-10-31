@@ -2,17 +2,29 @@ package dev.dimension.flare.data.datasource.instagram
 
 import dev.dimension.flare.data.datasource.microblog.AuthenticatedMicroblogDataSource
 import dev.dimension.flare.data.datasource.microblog.ProfileTab
+import dev.dimension.flare.data.datasource.microblog.datasource.RelationDataSource
+import dev.dimension.flare.data.datasource.microblog.datasource.TimelineTabConfigurationDataSource
 import dev.dimension.flare.data.datasource.microblog.datasource.UserDataSource
+import dev.dimension.flare.data.datasource.microblog.handler.RelationHandler
 import dev.dimension.flare.data.datasource.microblog.handler.UserHandler
+import dev.dimension.flare.data.datasource.microblog.loader.RelationActionType
 import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
 import dev.dimension.flare.data.datasource.microblog.paging.notSupported
+import dev.dimension.flare.data.model.IconType
+import dev.dimension.flare.data.model.tab.ShortcutSpec
+import dev.dimension.flare.data.model.tab.TimelineCandidate
+import dev.dimension.flare.data.model.tab.TimelineSpec
 import dev.dimension.flare.data.network.instagram.INSTAGRAM_HOST
 import dev.dimension.flare.data.network.instagram.InstagramCredential
 import dev.dimension.flare.data.network.instagram.InstagramService
+import dev.dimension.flare.data.platform.CommonTimelineSpecs
+import dev.dimension.flare.model.AccountType
 import dev.dimension.flare.model.MicroBlogKey
 import dev.dimension.flare.ui.model.UiHashtag
+import dev.dimension.flare.ui.model.UiIcon
 import dev.dimension.flare.ui.model.UiProfile
 import dev.dimension.flare.ui.model.UiStrings
+import dev.dimension.flare.ui.model.UiText
 import dev.dimension.flare.ui.model.UiTimelineV2
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
@@ -29,7 +41,9 @@ internal class InstagramDataSource(
     override val accountKey: MicroBlogKey,
     private val credentialFlow: Flow<InstagramCredential>,
 ) : AuthenticatedMicroblogDataSource,
-    UserDataSource {
+    UserDataSource,
+    RelationDataSource,
+    TimelineTabConfigurationDataSource {
     private val service = InstagramService()
 
     // 账号页要按 accountKey.id 取一次资料，没有 UserDataSource 就会直接报
@@ -44,6 +58,39 @@ internal class InstagramDataSource(
                     credentialFlow = credentialFlow,
                 ),
         )
+
+    /** 个人主页会读这个字段，缺了 `ProfilePresenter` 会直接抛异常闪退。 */
+    override val relationHandler: RelationHandler by lazy {
+        RelationHandler(
+            accountType = AccountType.Specific(accountKey),
+            dataSource = InstagramRelationLoader,
+        )
+    }
+
+    override val supportedRelationTypes: Set<RelationActionType> = InstagramRelationLoader.supportedTypes
+
+    /** 新账号登录后自动落一个「主页」标签页，否则标签栏里看不到这个平台。 */
+    override val defaultTabs: ImmutableList<TimelineCandidate<*>> by lazy {
+        persistentListOf(
+            CommonTimelineSpecs.home.candidate(
+                data = TimelineSpec.AccountBasedData(accountKey),
+                icon = IconType.Material(UiIcon.World),
+                title = UiText.Raw("Instagram"),
+            ),
+        )
+    }
+
+    override val builtInTimelineTabs: ImmutableList<TimelineCandidate<*>> by lazy {
+        persistentListOf(
+            CommonTimelineSpecs.home.candidate(
+                data = TimelineSpec.AccountBasedData(accountKey),
+                icon = IconType.Material(UiIcon.World),
+                title = UiText.Raw("Instagram"),
+            ),
+        )
+    }
+
+    override val shortcuts: ImmutableList<ShortcutSpec> = persistentListOf()
 
     override fun homeTimeline(): RemoteLoader<UiTimelineV2> =
         InstagramHomeTimelineLoader(

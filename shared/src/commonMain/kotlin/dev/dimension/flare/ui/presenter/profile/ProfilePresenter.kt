@@ -86,7 +86,10 @@ public class ProfilePresenter(
 
     private val relationStateFlow by lazy {
         serviceFlow.flatMapLatest { service ->
-            require(service is RelationDataSource)
+            // 不是所有平台都接了「关系」能力（小红书 / Instagram 现在就没有）。
+            // 以前这里是 `require(service is RelationDataSource)`，等于进个人主页必崩。
+            val relationSource = service as? RelationDataSource
+                ?: return@flatMapLatest flowOf(UiState.Success(UiRelation()))
             val actualUserKey =
                 userKey ?: if (service is AuthenticatedMicroblogDataSource) {
                     service.accountKey
@@ -95,7 +98,7 @@ public class ProfilePresenter(
                 } ?: run {
                     throw NoActiveAccountException
                 }
-            (service as RelationDataSource).relationHandler.relation(actualUserKey).toUi()
+            relationSource.relationHandler.relation(actualUserKey).toUi()
         }
     }
 

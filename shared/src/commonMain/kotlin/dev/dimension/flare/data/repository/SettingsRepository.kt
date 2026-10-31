@@ -185,6 +185,12 @@ public class SettingsRepository internal constructor(
             tabs.findById(id)
         }
 
+    /** 当前配置的标签页槽位（未解析成 UI 模型）。补建默认标签页时要读一次。 */
+    internal suspend fun currentHomeSlots(): List<TimelineSlot> {
+        ensureTabSettingsMigrated()
+        return tabSettingsV2Store.data.first().homeSlots
+    }
+
     internal suspend fun updateTabSettingsV2(block: TabSettingsV2.() -> TabSettingsV2) {
         ensureTabSettingsMigrated()
         val before =

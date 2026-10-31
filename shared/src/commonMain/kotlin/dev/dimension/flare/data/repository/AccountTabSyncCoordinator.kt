@@ -31,6 +31,9 @@ internal class AccountTabSyncCoordinator(
             removeTabsForDeletedAccounts()
         }
         coroutineScope.launch {
+            ensureTabsForExistingAccounts()
+        }
+        coroutineScope.launch {
             accountRepository.onAdded.collect { account ->
                 addDefaultTabs(account)
             }
@@ -41,6 +44,47 @@ internal class AccountTabSyncCoordinator(
             }
         }
     }
+
+    /**
+     * 给「已经添加、但标签栏里什么都没有」的账号补一个默认标签页。
+     *
+     * `addDefaultTabs` 只在账号新增的那一刻触发。小红书 / Instagram 是先加了账号、
+     * 后来才补上 `defaultTabs` 的，所以老账号永远等不到那一次 —— 表现就是
+     * 账号在，但标签栏里没有这个平台，等于没法刷。这里在启动时补一次，幂等。
+     */
+    private suspend fun ensureTabsForExistingAccounts() {
+        val accounts = accountRepository.allAccounts.first()
+        if (accounts.isEmpty()) return
+        val existingSlots = settingsRepository.currentHomeSlots()
+        val missing =
+            accounts.filter { account ->
+                existingSlots.none { slot -> slot.containsAccount(account.accountKey) }
+            }
+        if (missing.isEmpty()) return
+        val extraSlots =
+            missing
+                .flatMap { account ->
+                    (accountRepository.getOrCreateDataSource(account) as? TimelineTabConfigurationDataSource)
+                        ?.defaultTabs
+                        .orEmpty()
+                }.map(timelineResolver::toSlot)
+        if (extraSlots.isEmpty()) return
+        settingsRepository.updateTabSettingsV2 {
+            val newSlots =
+                (homeSlots + extraSlots)
+                    .distinctBy { it.id }
+                    .normalizeSystemHomeMixedTimeline(
+                        enabled = homeSlots.anySystemHomeMixedTimeline(),
+                    )
+            if (newSlots == homeSlots) this else copy(homeSlots = newSlots)
+        }
+    }
+
+    private fun TimelineSlot.containsAccount(accountKey: MicroBlogKey): Boolean =
+        when (val slotContent = content) {
+            is TimelineSlotContent.Source -> timelineResolver.resolveAccountKey(this) == accountKey
+            is TimelineSlotContent.Group -> slotContent.children.any { it.containsAccount(accountKey) }
+        }
 
     private suspend fun removeTabsForDeletedAccounts() {
         val existingAccounts =

@@ -129,11 +129,15 @@ internal class InstagramLoader(
 
     override suspend fun userById(id: String): UiProfile {
         val credential = credentialFlow.first()
-        val raw =
-            service.userInfoById(credential, id)
-                ?: throw IllegalStateException("Instagram 用户不存在：$id")
-        return raw.toUiProfile(accountKey)
-            ?: throw IllegalStateException("Instagram 用户解析失败")
+        // 探测接口失败不要整页报错：账号页只要有个能渲染的资料。
+        // 头像 / 昵称拿不到时退化成占位资料，至少账号能看见、能进主页。
+        val raw = runCatching { service.userInfoById(credential, id) }.getOrNull()
+        return raw?.toUiProfile(accountKey)
+            ?: instagramPlaceholderProfile(
+                id = id,
+                userName = credential.userName,
+                accountKey = accountKey,
+            )
     }
 
     // 关注 / 拉黑 / 静音都要写操作接口，先不开放，UI 上也就不会出现这些按钮。

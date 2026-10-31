@@ -99,14 +99,9 @@ struct CookieLoginHint {
                 example: "web_session=...; a1=..."
             )
         }
-        if p.contains("weread") || h.contains("weread") {
-            return CookieLoginHint(
-                platformName: "微信读书",
-                requiredKeys: "wr_vid 与 wr_skey",
-                primaryKey: "wr_vid",
-                example: "wr_vid=...; wr_skey=..."
-            )
-        }
+        // 微信读书不在这里给粘贴框：它的登录表单里已经自带 Cookie 输入框
+        // （Kotlin 侧 WeReadLoginProvider 直接给了一个输入框 + 说明），
+        // 再给一个就重复了。
         return nil
     }
 }

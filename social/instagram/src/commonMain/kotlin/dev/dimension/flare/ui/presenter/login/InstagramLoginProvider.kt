@@ -105,13 +105,18 @@ private class InstagramWebCookieLoginHandler(
             // 这一步只是锦上添花：cookie 里本来就有 ds_user_id，探测接口 400 / 超时
             // 不该把人挡在登录外面 —— 否则就变成「明明登录成功了却加不上账号」。
             val user = runCatching { InstagramService().currentUser(parsed) }.getOrNull()
+            // ds_user_id 没复制到也没关系：sessionid 的第一段就是用户 id。
+            val sessionId =
+                InstagramCredential
+                    .parseCookiePairs(parsed.cookie)["sessionid"]
+                    .orEmpty()
             val userId =
                 (user?.igMediaId() ?: parsed.userId)
-                    .orEmpty()
+                    .ifBlank { InstagramCredential.userIdFromSession(sessionId).orEmpty() }
                     .takeIf { it.isNotBlank() }
                     ?: throw IllegalStateException(
-                        "Cookie 里缺少 ds_user_id。只贴 sessionid 的值不够，" +
-                            "请把整段 Cookie 一起复制（至少含 sessionid 与 ds_user_id）。",
+                        "Cookie 里缺少 sessionid。请把整段 Cookie 一起复制" +
+                            "（至少含 sessionid），只贴别的内容识别不出来。",
                     )
             val credential =
                 parsed.copy(

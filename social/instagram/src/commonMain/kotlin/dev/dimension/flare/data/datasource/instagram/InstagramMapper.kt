@@ -188,3 +188,43 @@ internal fun JsonObject.toUiProfile(accountKey: MicroBlogKey): UiProfile? {
 
 /** 把 `JsonElement` 数组里的条目取成 `JsonObject`，过滤掉非对象项。 */
 internal fun JsonElement?.asJsonObjectOrNull(): JsonObject? = this as? JsonObject
+
+/**
+ * 接口拿不到资料时的占位资料。
+ *
+ * 账号页只是要一个能渲染的 `UiProfile`。探测接口失败（400 / 掉登录 / 超时）
+ * 不该让整行变成错误 —— 之前就是这里一抛异常，账号页那条 Instagram 显示「错误」。
+ */
+internal fun instagramPlaceholderProfile(
+    id: String,
+    userName: String,
+    accountKey: MicroBlogKey,
+): UiProfile {
+    val userKey = MicroBlogKey(id, INSTAGRAM_HOST)
+    val display = userName.ifBlank { id.ifBlank { "Instagram" } }
+    return UiProfile(
+        key = userKey,
+        handle = UiHandle(raw = display, host = INSTAGRAM_HOST),
+        avatar = null,
+        nameInternal = display.toUiPlainText(),
+        platformId = INSTAGRAM_PLATFORM_ID,
+        platformIcon = UiIcon.World,
+        clickEvent =
+            ClickEvent.Deeplink(
+                DeeplinkRoute.Profile.User(
+                    accountType = AccountType.Specific(accountKey),
+                    userKey = userKey,
+                ),
+            ),
+        banner = null,
+        description = null,
+        matrices =
+            UiProfile.Matrices(
+                fansCount = 0,
+                followsCount = 0,
+                statusesCount = 0,
+            ),
+        mark = persistentListOf(),
+        bottomContent = null,
+    )
+}
