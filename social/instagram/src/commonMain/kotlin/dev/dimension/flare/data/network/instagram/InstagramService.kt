@@ -26,7 +26,7 @@ internal data class InstagramPage(
 /**
  * Instagram 网页接口。
  *
- * 只用 `www.instagram.com/api/v1/*` 这套：鉴权靠 cookie + `X-IG-App-ID`，
+ * 只用 `www.instagram.com/api/v1/...` 这套：鉴权靠 cookie + `X-IG-App-ID`，
  * 不需要 GraphQL 那种天天变的 `doc_id`。响应体直接按 `JsonObject` 读，
  * 不写几十个 data class —— 这些接口的字段经常增删，写死反而更容易崩。
  */
