@@ -183,8 +183,9 @@ final class XhsSigner {
         view.customUserAgent = Self.desktopUserAgent
         view.isHidden = true
         webView = view
-        let load = {
-            view.load(URLRequest(url: URL(string: "https://www.xiaohongshu.com/explore")!))
+        // `load` 会作为 `() -> Void` 传出去；不写类型会被推断成 `() -> WKNavigation?`。
+        let load: () -> Void = {
+            _ = view.load(URLRequest(url: URL(string: "https://www.xiaohongshu.com/explore")!))
         }
         let cookies = Self.cookies(fromHeader: cookieHeader)
         if cookies.isEmpty {
