@@ -20,21 +20,39 @@ public data class XhsCredential(
 ) {
     public companion object {
         public fun fromCookie(raw: String): XhsCredential {
-            val map =
-                raw.split(";")
-                    .mapNotNull { part ->
-                        val index = part.indexOf('=')
-                        if (index <= 0) return@mapNotNull null
-                        part.substring(0, index).trim() to part.substring(index + 1).trim()
-                    }.toMap()
+            val map = parseCookiePairs(raw)
             val id =
                 map["webId"]?.takeIf { it.isNotBlank() }
                     ?: map["a1"]?.takeIf { it.isNotBlank() }
                     ?: "web"
             return XhsCredential(
-                cookie = raw,
+                // 重新拼一遍：粘贴进来的串经常带换行，塞进 HTTP header 就是非法值。
+                cookie = map.entries.joinToString("; ") { "${it.key}=${it.value}" },
                 userId = id,
             )
+        }
+
+        /** 兼容 `Cookie:` 前缀、一行一条的粘贴方式、首尾引号。 */
+        internal fun parseCookiePairs(raw: String): Map<String, String> {
+            var text = raw.trim().trim('"').trim()
+            if (text.startsWith("Cookie:", ignoreCase = true)) {
+                text = text.substring("Cookie:".length)
+            }
+            text =
+                text
+                    .replace("\r\n", "; ")
+                    .replace("\n", "; ")
+                    .replace("\r", "; ")
+                    .replace("\t", " ")
+            return text
+                .split(";")
+                .mapNotNull { part ->
+                    val index = part.indexOf('=')
+                    if (index <= 0) return@mapNotNull null
+                    val name = part.substring(0, index).trim()
+                    val value = part.substring(index + 1).trim().trim('"')
+                    if (name.isEmpty()) null else name to value
+                }.toMap()
         }
     }
 }

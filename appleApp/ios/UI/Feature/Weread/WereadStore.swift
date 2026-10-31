@@ -63,6 +63,27 @@ final class WereadStore: ObservableObject {
         }
     }
 
+    /// 直接吃一段**原始 cookie 串**（用户从浏览器里复制出来的）。
+    ///
+    /// 6s 这类老机器上 WKWebView 打不开微信读书的扫码页，只能给一条
+    /// 「别处登录好，把 cookie 贴进来」的通道。返回是否被接受。
+    @discardableResult
+    func adopt(cookieHeader raw: String) -> Bool {
+        // 从 DevTools / 扩展里复制出来的经常带换行，先摊平。
+        let header =
+            raw
+                .replacingOccurrences(of: "\n", with: "")
+                .replacingOccurrences(of: "\r", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard header.contains("wr_vid=") else { return false }
+        defaults.set(header, forKey: cookieKey)
+        DispatchQueue.main.async {
+            self.isLoggedIn = true
+            self.errorMessage = nil
+        }
+        return true
+    }
+
     func logout() {
         defaults.removeObject(forKey: cookieKey)
         defaults.removeObject(forKey: nameKey)

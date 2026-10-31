@@ -18,18 +18,42 @@ public data class InstagramCredential(
     public companion object {
         /** 从浏览器 cookie 串里挑出需要的几项，顺便补齐 header 要用的值。 */
         public fun fromCookie(raw: String): InstagramCredential {
-            val map =
-                raw.split(";")
-                    .mapNotNull { part ->
-                        val index = part.indexOf('=')
-                        if (index <= 0) return@mapNotNull null
-                        part.substring(0, index).trim() to part.substring(index + 1).trim()
-                    }.toMap()
+            val map = parseCookiePairs(raw)
             return InstagramCredential(
-                cookie = raw,
+                // 重新拼一遍而不是直接用原文：粘贴进来的串里经常带换行 / 制表符，
+                // 塞进 HTTP header 就是非法值，Instagram 会直接回 400。
+                cookie = map.entries.joinToString("; ") { "${it.key}=${it.value}" },
                 csrfToken = map["csrftoken"].orEmpty(),
                 userId = map["ds_user_id"].orEmpty(),
             )
+        }
+
+        /**
+         * 把各种粘贴姿势都归一成 `k=v; k=v`：
+         * - 浏览器扩展常带的 `Cookie:` 前缀
+         * - 一行一条（用换行分隔）
+         * - 首尾的引号、多余空格
+         */
+        internal fun parseCookiePairs(raw: String): Map<String, String> {
+            var text = raw.trim().trim('"').trim()
+            if (text.startsWith("Cookie:", ignoreCase = true)) {
+                text = text.substring("Cookie:".length)
+            }
+            text =
+                text
+                    .replace("\r\n", "; ")
+                    .replace("\n", "; ")
+                    .replace("\r", "; ")
+                    .replace("\t", " ")
+            return text
+                .split(";")
+                .mapNotNull { part ->
+                    val index = part.indexOf('=')
+                    if (index <= 0) return@mapNotNull null
+                    val name = part.substring(0, index).trim()
+                    val value = part.substring(index + 1).trim().trim('"')
+                    if (name.isEmpty()) null else name to value
+                }.toMap()
         }
     }
 }
@@ -40,8 +64,16 @@ public object InstagramConstants {
     /** 网页端公开的 app id，所有 web 接口都要带。 */
     public const val APP_ID: String = "936619743392459"
     public const val ASBD_ID: String = "129477"
+
+    /**
+     * 必须用桌面 Chrome 的 UA。
+     *
+     * `X-IG-App-ID` 就是桌面网页版那一份，UA 自称 iPhone 时部分接口（尤其是
+     * `/api/v1/accounts/...` 这一族）会判定为「客户端和 app id 不匹配」，
+     * 回一个没有 body 的 400 —— 这正是之前网页登录后卡在 400 的原因。
+     */
     public const val USER_AGENT: String =
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 }
 
 /**

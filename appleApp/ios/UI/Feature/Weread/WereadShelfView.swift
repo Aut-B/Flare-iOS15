@@ -151,7 +151,7 @@ struct WereadShelfView: View {
                 .foregroundStyle(.secondary)
             Text("登录微信读书")
                 .font(.headline)
-            Text("扫码登录后可以看自己的书架，读到哪里会同步回账号。")
+            Text("扫码登录后可以看自己的书架，读到哪里会同步回账号。网页打不开的话，也可以在登录页里选「粘贴 Cookie」。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -159,7 +159,7 @@ struct WereadShelfView: View {
             Button {
                 showLogin = true
             } label: {
-                Text("扫码登录")
+                Text("登录")
                     .font(.system(size: 15, weight: .semibold))
                     .frame(maxWidth: 220)
                     .padding(.vertical, 12)

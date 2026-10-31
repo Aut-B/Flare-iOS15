@@ -7,6 +7,62 @@ import WebKit
 import UIKit
 import FlareAppleCore
 
+/// 「粘贴 Cookie 登录」的文案与校验提示。
+///
+/// iOS 15 的 WebView 在 6s 这类老机器上连 X / Instagram / 小红书的登录页都
+/// 加载不出来，所以所有 cookie 类平台都额外给一条「从别处复制 Cookie 贴进来」
+/// 的通道 —— 和网页登录等价，只是把抓 cookie 这一步放到外面做。
+struct CookieLoginHint {
+    let platformName: String
+    /// 必须包含的 cookie 名，用来给出能看懂的失败原因。
+    let requiredKeys: String
+    let example: String
+
+    var instruction: String {
+        "iOS 15 的 WebView 无法完成 \(platformName) 网页登录。请在手机浏览器或电脑上登录 \(platformName)，复制会话 Cookie（需含 \(requiredKeys)）后，点下方「从剪贴板读取并登录」即可。"
+    }
+
+    var placeholder: String {
+        "粘贴 \(platformName) 会话 Cookie（形如 \(example)）"
+    }
+
+    var actionTitle: String {
+        "用 Cookie 登录 \(platformName)"
+    }
+
+    var invalidMessage: String {
+        "Cookie 无效：请确认包含 \(requiredKeys)，且未过期。"
+    }
+
+    /// 按平台决定要不要显示粘贴框。返回 nil 的平台还是走原来的网页登录。
+    static func forPlatform(platformId: String, host: String) -> CookieLoginHint? {
+        let p = platformId.lowercased()
+        let h = host.lowercased()
+        if p.contains("twitter") || p == "x" || h.contains("twitter") || h.contains("x.com") {
+            return CookieLoginHint(
+                platformName: "X",
+                requiredKeys: "auth_token 与 ct0",
+                example: "auth_token=...; ct0=..."
+            )
+        }
+        if p.contains("instagram") || h.contains("instagram") {
+            return CookieLoginHint(
+                platformName: "Instagram",
+                requiredKeys: "sessionid",
+                example: "sessionid=...; csrftoken=..."
+            )
+        }
+        if p.contains("xiaohongshu") || h.contains("xiaohongshu") {
+            return CookieLoginHint(
+                platformName: "小红书",
+                requiredKeys: "web_session",
+                example: "web_session=...; a1=..."
+            )
+        }
+        return nil
+    }
+}
+
 private enum ServiceSelectionAnimation {
     static let standard: Animation = .easeInOut(duration: 0.22)
     static let panel: AnyTransition = .asymmetric(
@@ -187,9 +243,10 @@ struct ServiceSelectionScreen: View {
                             redirectUri: nil,
                         )
                     },
-                    isTwitter: node.host.lowercased().contains("twitter")
-                        || node.host.lowercased().contains("x.com")
-                        || node.platformId.lowercased().contains("twitter")
+                    cookieHint: CookieLoginHint.forPlatform(
+                        platformId: node.platformId,
+                        host: node.host
+                    )
                 )
                     .id("\(key)-\(selectedMethod)")
                     .transition(ServiceSelectionAnimation.panel)
@@ -371,8 +428,10 @@ struct ReloginScreen: View {
                     handler: {
                         state.createLoginHandler(methodType: selectedMethod)
                     },
-                    isTwitter: target.accountKey.host.lowercased().contains("twitter")
-                        || target.accountKey.host.lowercased().contains("x.com")
+                    cookieHint: CookieLoginHint.forPlatform(
+                        platformId: target.platformId,
+                        host: target.accountKey.host
+                    )
                 )
                     .id("\(target.accountKey)-\(selectedMethod)")
 
@@ -386,17 +445,17 @@ private struct LoginFlowView: View {
     @StateObject private var presenter: KotlinPresenter<LoginFlowPresenterState>
     @State private var qrContent: String?
     @State private var webCookieUrl: String?
-    /// X（twitter/x.com）在 iOS 15 的 WebView 上无法走完登录（缺 FedCM 等现代
-    /// Web 身份 API，系统 Safari 同样卡住）。这里提供「粘贴会话 Cookie」的替代入口：
-    /// 用户在 Reynard 或桌面浏览器登录 x.com，导出 Cookie 后粘贴进来，直接喂给既有
-    /// 的 `canResume` / `resume`，等价于 WebView 自动抓到的 cookie。
+    /// cookie 类平台（X / Instagram / 小红书）在 iOS 15 的 WebView 上走不完登录
+    /// —— 6s 这类老机器连登录页都加载不出来。这里提供「粘贴会话 Cookie」的替代入口：
+    /// 用户在别处登录后导出 Cookie 贴进来，直接喂给既有的 `canResume` / `resume`，
+    /// 等价于 WebView 自动抓到的 cookie。
     @State private var pasteCookie = ""
     @State private var pasteError: String?
-    let isTwitter: Bool
+    let cookieHint: CookieLoginHint?
 
-    init(handler: @escaping () -> LoginMethodHandler, isTwitter: Bool = false) {
+    init(handler: @escaping () -> LoginMethodHandler, cookieHint: CookieLoginHint? = nil) {
         self._presenter = .init(wrappedValue: .init(presenter: LoginFlowPresenter(handler: handler())))
-        self.isTwitter = isTwitter
+        self.cookieHint = cookieHint
     }
 
     var body: some View {
@@ -437,14 +496,14 @@ private struct LoginFlowView: View {
             LoginErrorText(message: presenter.state.flowState.error)
                 .transition(ServiceSelectionAnimation.inline)
 
-            if isTwitter {
+            if let hint = cookieHint {
                 Divider()
                 VStack(spacing: 10) {
-                    Text("iOS 15 的 WebView 无法完成 X 网页登录。请在 Reynard 或桌面浏览器登录 x.com，复制会话 Cookie（含 auth_token 与 ct0）后，点下方「从剪贴板读取并登录」即可。")
+                    Text(hint.instruction)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
-                    TextField("粘贴 X 会话 Cookie（形如 auth_token=...; ct0=...）", text: $pasteCookie)
+                    TextField(hint.placeholder, text: $pasteCookie)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .textFieldStyle(.roundedBorder)
@@ -458,10 +517,10 @@ private struct LoginFlowView: View {
                         if presenter.state.canResume(value: cookie) {
                             presenter.state.resume(value: cookie)
                         } else {
-                            pasteError = "Cookie 无效：请确认包含 auth_token 与 ct0，且未过期。"
+                            pasteError = hint.invalidMessage
                         }
                     } label: {
-                        Text("用 Cookie 登录 X")
+                        Text(hint.actionTitle)
                     }
                     .buttonStyle(.borderedProminent)
                     .frame(maxWidth: .infinity)
@@ -469,14 +528,14 @@ private struct LoginFlowView: View {
                         let cookie = (UIPasteboard.general.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         pasteError = nil
                         guard !cookie.isEmpty else {
-                            pasteError = "剪贴板为空，请先在 Reynard/桌面复制 Cookie。"
+                            pasteError = "剪贴板为空，请先在别处复制 Cookie。"
                             return
                         }
                         pasteCookie = cookie
                         if presenter.state.canResume(value: cookie) {
                             presenter.state.resume(value: cookie)
                         } else {
-                            pasteError = "剪贴板内容不是有效 Cookie：请确认包含 auth_token 与 ct0，且未过期。"
+                            pasteError = hint.invalidMessage
                         }
                     } label: {
                         Text("从剪贴板读取并登录")

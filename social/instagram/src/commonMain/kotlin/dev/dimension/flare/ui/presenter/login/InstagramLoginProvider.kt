@@ -101,18 +101,19 @@ private class InstagramWebCookieLoginHandler(
             require(parsed.cookie.contains("sessionid=")) {
                 "没有拿到 Instagram 的登录 cookie，请确认网页里已经登录成功"
             }
-            // 网页里的 cookie 只是「可能登录了」，还要问一次接口确认身份，
-            // 顺便拿到用户 id 和用户名。
-            val service = InstagramService()
-            val user = service.currentUser(parsed) ?: throw IllegalStateException("Instagram 登录态校验失败，请重新登录")
+            // 网页里的 cookie 只是「可能登录了」，再问一次接口确认身份，顺便拿用户名。
+            // 这一步只是锦上添花：cookie 里本来就有 ds_user_id，探测接口 400 / 超时
+            // 不该把人挡在登录外面 —— 否则就变成「明明登录成功了却加不上账号」。
+            val user = runCatching { InstagramService().currentUser(parsed) }.getOrNull()
             val userId =
-                user.igMediaId()?.takeIf { it.isNotBlank() }
-                    ?: parsed.userId.takeIf { it.isNotBlank() }
-                    ?: throw IllegalStateException("没有拿到 Instagram 用户 id")
+                (user?.igMediaId() ?: parsed.userId)
+                    .orEmpty()
+                    .takeIf { it.isNotBlank() }
+                    ?: throw IllegalStateException("Cookie 里没有 ds_user_id，请确认复制的是完整 Cookie")
             val credential =
                 parsed.copy(
                     userId = userId,
-                    userName = user.igString("username").orEmpty(),
+                    userName = user?.igString("username").orEmpty(),
                 )
             val accountKey = MicroBlogKey(userId, INSTAGRAM_HOST)
             context.requireReloginAccount(accountKey)

@@ -18,8 +18,10 @@ final class InstagramService {
     private let base = "https://www.instagram.com"
     private let appID = "936619743392459"
     private let asbdID = "129477"
+    /// 必须用桌面 Chrome 的 UA：`X-IG-App-ID` 是桌面网页版那一份，UA 自称 iPhone
+    /// 时 `/api/v1/accounts/...` 会判定「客户端与 app id 不匹配」，回一个空 body 的 400。
     private let userAgent =
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
     private init() {
         let configuration = URLSessionConfiguration.default
