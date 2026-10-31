@@ -48,7 +48,7 @@ struct FlareRoot: View {
                         let items = data.data.cast(SecondaryTabsPresenter.Item.self)
                         ForEach(items, id: \.accountKey) { item in
                             let tabs = item.tabs.compactMap { tab in
-                                route(for: tab).map { (tab: tab, route: $0) }
+                                route(for: tab, accountKey: item.accountKey).map { (tab: tab, route: $0) }
                             }
                             TabSection {
                                 ForEach(tabs, id: \.tab) { destination in

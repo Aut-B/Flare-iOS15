@@ -1,9 +1,11 @@
 package dev.dimension.flare.data.platform
 
 import dev.dimension.flare.data.datasource.microblog.MicroblogDataSource
+import dev.dimension.flare.data.datasource.weread.WeReadDataSource
 import dev.dimension.flare.data.model.tab.TimelineSpec
 import dev.dimension.flare.data.network.weread.WEREAD_HOST
 import dev.dimension.flare.data.network.weread.WEREAD_PLATFORM_ID
+import dev.dimension.flare.data.network.weread.WeReadCredential
 import dev.dimension.flare.model.MicroBlogKey
 import dev.dimension.flare.model.PlatformDataSourceContext
 import dev.dimension.flare.model.PlatformDeepLink
@@ -19,9 +21,9 @@ import kotlin.native.HiddenFromObjC
 /**
  * 微信读书平台。
  *
- * 它只参与**登录**，不参与时间线：书架是原生页面（Swift 侧 `WereadStore`），
- * 登录成功后 cookie 直接交给宿主，不会在账号列表里多出一个空账号。
- * 所以 [createDataSource] / [guestDataSource] 都是不支持 —— 正常路径不会走到。
+ * 它不参与时间线：书架是原生页面（Swift 侧 `WereadStore`）。但账号列表、
+ * 侧边栏和「我」入口要求一个 `UserDataSource`，所以 [createDataSource]
+ * 返回一个只有占位资料的账号壳，真正的书架仍走原生页。
  */
 @HiddenFromObjC
 public data object WeReadPlatformSpec :
@@ -46,7 +48,10 @@ public data object WeReadPlatformSpec :
         persistentListOf()
 
     override fun createDataSource(context: PlatformDataSourceContext): MicroblogDataSource =
-        throw UnsupportedOperationException("微信读书没有时间线，书架走原生页面")
+        WeReadDataSource(
+            accountKey = context.accountKey,
+            credentialFlow = context.credentialFlow(WeReadCredential.serializer()),
+        )
 
     override fun guestDataSource(
         host: String,

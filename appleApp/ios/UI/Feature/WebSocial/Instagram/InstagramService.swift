@@ -41,16 +41,17 @@ final class InstagramService {
 
         var json: [String: Any]
         do {
-            json = try await request("\(base)/api/v1/feed/timeline/?\(query)")
-        } catch let error as IGError {
-            // 网页端自己是用 POST + 表单体调的，GET 被拒时换一种姿势再试一次。
-            // 登录失效不重试，那是真的没登录。
-            if error.needLogin { throw error }
+            // 网页端首页实际走 POST + 表单体；先按网页端的姿势来。
             json = try await request(
                 "\(base)/api/v1/feed/timeline/",
                 method: "POST",
                 formBody: query
             )
+        } catch let error as IGError {
+            // 还有一批账号只认 GET 的 query 参数，POST 被拒时换一种姿势再试一次。
+            // 登录失效不重试，那是真的没登录。
+            if error.needLogin { throw error }
+            json = try await request("\(base)/api/v1/feed/timeline/?\(query)")
         } catch {
             throw error
         }
@@ -121,6 +122,32 @@ final class InstagramService {
         return (items, IGJSON.string(json["next_max_id"]))
     }
 
+    // MARK: - 当前账号
+
+    /// 用 cookie 里已有的登录态问一次「我是谁」。
+    ///
+    /// 登录页只保证 cookie 拿到了，用户名要另外补；原生页的「我」和侧边栏
+    /// 账号行都靠它显示，不再把 `ds_user_id` 的数字当名字。
+    func currentUser() async throws -> (id: String, userName: String)? {
+        let endpoints = [
+            "\(base)/api/v1/accounts/edit/web_form_data/",
+            "\(base)/api/v1/users/\(userId)/info/",
+        ]
+        for endpoint in endpoints {
+            guard let json = try? await request(endpoint) else { continue }
+            if let form = IGJSON.object(json["form_data"]) ?? IGJSON.object(json["user"]) {
+                if let userName = IGJSON.string(form["username"]) ?? IGJSON.string(form["user_name"]) {
+                    let id = IGJSON.identifier(form["pk"]) ?? IGJSON.identifier(form["id"]) ?? userId
+                    return (id, userName)
+                }
+            }
+            if let user = IGJSON.user(json["user"]) {
+                return (user.id, user.userName)
+            }
+        }
+        return nil
+    }
+
     // MARK: - 单条帖子
 
     func media(pk: String) async throws -> IGMedia {
@@ -155,11 +182,19 @@ final class InstagramService {
         urlRequest.setValue(appID, forHTTPHeaderField: "X-IG-App-ID")
         urlRequest.setValue(asbdID, forHTTPHeaderField: "X-ASBD-ID")
         urlRequest.setValue("0", forHTTPHeaderField: "X-IG-WWW-Claim")
+        urlRequest.setValue("1", forHTTPHeaderField: "X-Instagram-AJAX")
         urlRequest.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
         urlRequest.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
         urlRequest.setValue("https://www.instagram.com/", forHTTPHeaderField: "Origin")
         urlRequest.setValue("*/*", forHTTPHeaderField: "Accept")
         urlRequest.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
+        urlRequest.setValue("zh_CN", forHTTPHeaderField: "X-IG-App-Locale")
+        urlRequest.setValue("zh_CN", forHTTPHeaderField: "X-IG-Device-Locale")
+        urlRequest.setValue("zh_CN", forHTTPHeaderField: "X-IG-Mapped-Locale")
+        urlRequest.setValue("28800", forHTTPHeaderField: "X-IG-Time-Zone-Offset")
+        urlRequest.setValue("3brTvw==", forHTTPHeaderField: "X-IG-Capabilities")
+        urlRequest.setValue("WIFI", forHTTPHeaderField: "X-IG-Connection-Type")
+        urlRequest.setValue("Liger", forHTTPHeaderField: "X-FB-HTTP-Engine")
         if !cookie.isEmpty {
             urlRequest.setValue(cookie, forHTTPHeaderField: "Cookie")
         }
@@ -169,8 +204,14 @@ final class InstagramService {
 
         let (data, response) = try await session.data(for: urlRequest)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let text = String(data: data, encoding: .utf8) ?? ""
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let looksLikeHTML = trimmed.hasPrefix("<")
 
-        if status == 401 || status == 403 {
+        // 401 才是明确的未登录；403 不一定是掉登录 —— POST 少了 csrftoken、
+        // 或者被风控拦一下都会 403。先看 body，只有登录页 / login_required
+        // 才判定失效，其它 403 交给上层重试 GET。
+        if status == 401 {
             throw IGError.notLoggedIn
         }
         // Instagram 出错时也给 JSON，先把 message 捞出来再判断。
@@ -178,6 +219,18 @@ final class InstagramService {
         let message = IGJSON.string(json["message"]) ?? ""
         if message == "login_required" || message == "checkpoint_required" {
             throw IGError.notLoggedIn
+        }
+        if looksLikeHTML {
+            // 只有真的是登录 / 验证码页才算掉登录；其它 HTML 多半是风控页，
+            // 不要把用户踢回登录界面。
+            let lower = trimmed.lowercased()
+            if lower.contains("/accounts/login") || lower.contains("loginform") || lower.contains("checkpoint") {
+                throw IGError.notLoggedIn
+            }
+            throw IGError(
+                message: "Instagram 返回了网页而不是数据（HTTP \(status)），可能被风控拦截，请稍后再试或切换网络",
+                needLogin: false
+            )
         }
         guard (200..<300).contains(status) else {
             throw IGError(

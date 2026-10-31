@@ -5,6 +5,46 @@ import FlareAppleCore
 import UIKit
 import Combine
 
+/// 这几个平台的「时间线」实际由原生页面渲染：
+/// - 微信读书只有书架，Kotlin 侧没有时间线；
+/// - Instagram / 小红书要独立的网页 cookie / 签名，Kotlin 那套在真机上容易被风控。
+private enum NativeSocialTab {
+    case instagram
+    case xiaohongshu
+    case weread
+}
+
+private func nativeSocialTab(for tab: UiTimelineTabItem) -> NativeSocialTab? {
+    // `tab.id` 是 `home:<accountKey>`，accountKey 里带 host；比标题可靠，
+    // 用户改过标签名也认得出来。老版本标签页再用标题兜底。
+    let key = tab.id.lowercased()
+    if key.contains("instagram.com") { return .instagram }
+    if key.contains("xiaohongshu.com") { return .xiaohongshu }
+    if key.contains("weread.qq.com") { return .weread }
+    switch tab.title.text {
+    case "Instagram":
+        return .instagram
+    case "小红书":
+        return .xiaohongshu
+    case "微信读书":
+        return .weread
+    default:
+        return nil
+    }
+}
+
+@ViewBuilder
+private func nativeSocialView(for tab: NativeSocialTab) -> some View {
+    switch tab {
+    case .instagram:
+        InstagramFeedView()
+    case .xiaohongshu:
+        XhsFeedView()
+    case .weread:
+        WereadShelfView()
+    }
+}
+
 struct HomeTimelineScreen: View {
     let toServiceSelect: () -> Void
     let toCompose: () -> Void
@@ -100,14 +140,22 @@ struct HomeTimelineScreen: View {
                         let resolvedTimelineAppearance =
                             tab.resolveTimelineAppearance(base: timelineAppearance)
                         ZStack {
-                            TimelineScreen(
-                                tabItem: tab,
-                                allowGalleryMode: true,
-                                isHomeTimeline: true,
-                                accessoryItems: resolvedTimelineAppearance.timelineDisplayMode == .gallery
-                                    ? []
-                                    : changeLogAccessoryItems
-                            )
+                            // Instagram / 小红书 / 微信读书的标签直接渲染原生页，
+                            // 数据源和登录态都由 WebSocial / Weread 那套自己管。
+                            Group {
+                                if let nativeTab = nativeSocialTab(for: tab) {
+                                    nativeSocialView(for: nativeTab)
+                                } else {
+                                    TimelineScreen(
+                                        tabItem: tab,
+                                        allowGalleryMode: true,
+                                        isHomeTimeline: true,
+                                        accessoryItems: resolvedTimelineAppearance.timelineDisplayMode == .gallery
+                                            ? []
+                                            : changeLogAccessoryItems
+                                    )
+                                }
+                            }
                                 .id("\(tab.id):\(tab.contentSourceKey)")
                         }
                         .safeAreaInset(edge: .top, spacing: 0) {
@@ -451,7 +499,13 @@ private struct DeckTimelineColumnRoot: View {
     let toTabSetting: () -> Void
 
     var body: some View {
-        TimelineScreen(tabItem: tabItem, allowGalleryMode: true, isHomeTimeline: true)
+        Group {
+            if let nativeTab = nativeSocialTab(for: tabItem) {
+                nativeSocialView(for: nativeTab)
+            } else {
+                TimelineScreen(tabItem: tabItem, allowGalleryMode: true, isHomeTimeline: true)
+            }
+        }
             .safeAreaInset(edge: .bottom) {
                 Label {
                     TimelineTabTitle(title: tabItem.title)

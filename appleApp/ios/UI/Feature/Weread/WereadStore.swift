@@ -25,7 +25,7 @@ final class WereadStore: ObservableObject {
 
     private init() {
         let cookie = defaults.string(forKey: cookieKey) ?? ""
-        isLoggedIn = !cookie.isEmpty
+        isLoggedIn = Self.looksLoggedIn(cookie)
         nickname = defaults.string(forKey: nameKey) ?? ""
     }
 
@@ -53,14 +53,16 @@ final class WereadStore: ObservableObject {
             .joined(separator: "; ")
     }
 
-    func adopt(cookies: [HTTPCookie]) {
+    @discardableResult
+    func adopt(cookies: [HTTPCookie]) -> Bool {
         let header = Self.cookieHeader(from: cookies)
-        guard header.contains("wr_vid=") else { return }
+        guard Self.looksLoggedIn(header) else { return false }
         defaults.set(header, forKey: cookieKey)
         DispatchQueue.main.async {
             self.isLoggedIn = true
             self.errorMessage = nil
         }
+        return true
     }
 
     /// 直接吃一段**原始 cookie 串**（用户从浏览器里复制出来的）。
@@ -69,19 +71,29 @@ final class WereadStore: ObservableObject {
     /// 「别处登录好，把 cookie 贴进来」的通道。返回是否被接受。
     @discardableResult
     func adopt(cookieHeader raw: String) -> Bool {
-        // 从 DevTools / 扩展里复制出来的经常带换行，先摊平。
+        // 从 DevTools / 扩展里复制出来的经常带换行，先摊平成 `k=v; k=v`。
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.lowercased().hasPrefix("cookie:") {
+            text = String(text.dropFirst("cookie:".count))
+        }
         let header =
-            raw
-                .replacingOccurrences(of: "\n", with: "")
-                .replacingOccurrences(of: "\r", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard header.contains("wr_vid=") else { return false }
+            text
+                .replacingOccurrences(of: "\r\n", with: "; ")
+                .replacingOccurrences(of: "\n", with: "; ")
+                .replacingOccurrences(of: "\r", with: "; ")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "; "))
+        guard Self.looksLoggedIn(header) else { return false }
         defaults.set(header, forKey: cookieKey)
         DispatchQueue.main.async {
             self.isLoggedIn = true
             self.errorMessage = nil
         }
         return true
+    }
+
+    /// 微信读书书架接口两样都要：`wr_vid` 是账号，`wr_skey` 才是会话。
+    private static func looksLoggedIn(_ header: String) -> Bool {
+        header.contains("wr_vid=") && header.contains("wr_skey=")
     }
 
     func logout() {

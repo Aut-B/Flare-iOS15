@@ -109,6 +109,9 @@ internal class XhsLoader(
 
     override suspend fun userById(id: String): UiProfile {
         val credential = credentialFlow.first()
+        // 账号列表一渲染就把 cookie 推给原生 Store；用户从「我」/账号标签
+        // 进原生页时不用再登录一次。adoptCookie 在 Swift 侧是幂等的。
+        XhsBridgeHolder.bridge?.adoptCookie(credential.cookie)
         return placeholderProfile(
             id = id,
             name = credential.userName,

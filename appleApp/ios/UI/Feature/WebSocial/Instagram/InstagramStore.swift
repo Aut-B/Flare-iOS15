@@ -37,18 +37,48 @@ final class InstagramStore: ObservableObject {
 
     func adopt(cookies: [HTTPCookie]) {
         let header = CookieJar.header(cookies, domainSuffix: "instagram.com")
-        guard CookieJar.value(inHeader: header, named: "sessionid") != nil else { return }
+        guard adopt(cookieHeader: header) else { return }
+        // 顺手把 cookie 灌进 URLSession 共享仓库，网页兜底页也能直接用。
+        CookieJar.syncToSharedStorage(cookies)
+    }
+
+    /// 直接吃一段原始 cookie 串（Kotlin 登录成功后通过 `InstagramBridge` 同步过来）。
+    @discardableResult
+    func adopt(cookieHeader raw: String) -> Bool {
+        let header =
+            raw
+                .replacingOccurrences(of: "\r\n", with: "; ")
+                .replacingOccurrences(of: "\n", with: "; ")
+                .replacingOccurrences(of: "\r", with: "; ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard CookieJar.value(inHeader: header, named: "sessionid") != nil else { return false }
+        // Kotlin 每次取数都会把同一份 cookie 同步过来。内容没变就直接返回，
+        // 否则会把用户名清空、反复请求 currentUser，时间线看起来一直在闪。
+        if isLoggedIn, cookie == header { return true }
         defaults.set(header, forKey: cookieKey)
-        let name = CookieJar.value(inHeader: header, named: "ds_user_id") ?? ""
-        defaults.set(name, forKey: userKey)
+        // 之前这里把 `ds_user_id`（纯数字）当成用户名存了，界面会显示一串数字。
+        // 真正的用户名异步从接口补，拿不到就留空。
+        defaults.removeObject(forKey: userKey)
         pushCredentials()
         DispatchQueue.main.async {
+            self.userName = ""
             self.isLoggedIn = true
             self.errorMessage = nil
             self.loaded = false
         }
-        // 顺手把 cookie 灌进 URLSession 共享仓库，网页兜底页也能直接用。
-        CookieJar.syncToSharedStorage(cookies)
+        refreshUserName()
+        return true
+    }
+
+    private func refreshUserName() {
+        Task { [weak self] in
+            guard let self else { return }
+            guard let user = try? await InstagramService.shared.currentUser() else { return }
+            DispatchQueue.main.async {
+                self.userName = user.userName
+                self.defaults.set(user.userName, forKey: self.userKey)
+            }
+        }
     }
 
     func logout() {

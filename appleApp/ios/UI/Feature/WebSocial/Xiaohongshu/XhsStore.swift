@@ -27,6 +27,11 @@ final class XhsStore: ObservableObject {
         let cookie = defaults.string(forKey: cookieKey) ?? ""
         isLoggedIn = !cookie.isEmpty
         pushCredentials()
+        // 签名页要读页面里的 a1 / webId，只有请求头里的 cookie 不够。
+        // 冷启动时把本地保存的 cookie 灌进隐藏 WebView。
+        if !cookie.isEmpty {
+            XhsSigner.shared.applyCookies(cookie)
+        }
     }
 
     var cookie: String {
@@ -41,13 +46,36 @@ final class XhsStore: ObservableObject {
         defaults.set(header, forKey: cookieKey)
         pushCredentials()
         // 签名页面的 cookie 也换了，重新加载一次让它拿到新会话。
-        XhsSigner.shared.reset()
+        XhsSigner.shared.applyCookies(header)
         DispatchQueue.main.async {
             self.isLoggedIn = true
             self.errorMessage = nil
             self.loaded = false
         }
         CookieJar.syncToSharedStorage(cookies)
+    }
+
+    /// 直接吃一段原始 cookie 串（Kotlin 登录成功后通过 `XhsBridge` 同步过来）。
+    @discardableResult
+    func adopt(cookieHeader raw: String) -> Bool {
+        let header =
+            raw
+                .replacingOccurrences(of: "\r\n", with: "; ")
+                .replacingOccurrences(of: "\n", with: "; ")
+                .replacingOccurrences(of: "\r", with: "; ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard CookieJar.value(inHeader: header, named: "web_session") != nil else { return false }
+        // Kotlin 每次取数都会同步同一份 cookie；内容没变就别重置签名页。
+        if isLoggedIn, cookie == header { return true }
+        defaults.set(header, forKey: cookieKey)
+        pushCredentials()
+        XhsSigner.shared.applyCookies(header)
+        DispatchQueue.main.async {
+            self.isLoggedIn = true
+            self.errorMessage = nil
+            self.loaded = false
+        }
+        return true
     }
 
     func logout() {

@@ -30,20 +30,31 @@ internal class XhsService {
         credential: XhsCredential,
         cursor: String?,
         follow: Boolean,
-    ): XhsPage = parsePage(requireBridge().homeFeed(credential.cookie, cursor, follow))
+    ): XhsPage {
+        val bridge = requireBridge()
+        // 原生页和 Kotlin 账号库是两套存储，取数时顺手同步一次 cookie。
+        bridge.adoptCookie(credential.cookie)
+        return parsePage(bridge.homeFeed(credential.cookie, cursor, follow))
+    }
 
     suspend fun userNotes(
         credential: XhsCredential,
         userId: String,
         cursor: String?,
-    ): XhsPage = parsePage(requireBridge().userNotes(credential.cookie, userId, cursor))
+    ): XhsPage {
+        val bridge = requireBridge()
+        bridge.adoptCookie(credential.cookie)
+        return parsePage(bridge.userNotes(credential.cookie, userId, cursor))
+    }
 
     suspend fun note(
         credential: XhsCredential,
         id: String,
     ): JsonObject {
+        val bridge = requireBridge()
+        bridge.adoptCookie(credential.cookie)
         val root =
-            parseObject(requireBridge().note(credential.cookie, id))
+            parseObject(bridge.note(credential.cookie, id))
                 ?: throw IllegalStateException("小红书返回格式异常")
         root.xhsString("error")?.let { throw IllegalStateException(it) }
         return root.xhsObjects("items").firstOrNull()

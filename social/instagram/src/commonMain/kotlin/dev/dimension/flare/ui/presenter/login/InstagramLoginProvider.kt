@@ -4,6 +4,7 @@ import dev.dimension.flare.data.datasource.instagram.igMediaId
 import dev.dimension.flare.data.datasource.instagram.igString
 import dev.dimension.flare.data.network.instagram.INSTAGRAM_HOST
 import dev.dimension.flare.data.network.instagram.INSTAGRAM_PLATFORM_ID
+import dev.dimension.flare.data.network.instagram.InstagramBridgeHolder
 import dev.dimension.flare.data.network.instagram.InstagramCredential
 import dev.dimension.flare.data.network.instagram.InstagramPlatformDetector
 import dev.dimension.flare.data.network.instagram.InstagramService
@@ -134,6 +135,9 @@ private class InstagramWebCookieLoginHandler(
                 credential = credential,
                 serializer = InstagramCredential.serializer(),
             )
+            // 原生 Instagram 页有自己的 Store；把同一份 cookie 同步过去，
+            // 否则从侧边栏进原生页会重新显示「登录 Instagram」。
+            InstagramBridgeHolder.bridge?.adopt(credential.cookie)
             context.onSuccess()
         }.onFailure {
             _state.value = state(error = it.message)

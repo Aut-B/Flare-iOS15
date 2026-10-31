@@ -14,6 +14,10 @@ final class XhsSigner {
     static let shared = XhsSigner()
 
     private var webView: WKWebView?
+    /// 当前登录 cookie；隐藏页面加载 / 重载时先灌进 WKWebsiteDataStore。
+    private var cookieHeader: String = ""
+    /// 已经灌进签名页的 cookie，避免每次取数都 reload。
+    private var appliedCookieHeader: String = ""
 
     static let desktopUserAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
@@ -72,13 +76,46 @@ final class XhsSigner {
     /// 重新加载页面，签名脚本崩了的时候用。
     func reset() {
         DispatchQueue.main.async {
-            self.webView?.reload()
+            let view = self.ensureWebView()
+            let cookies = Self.cookies(fromHeader: self.cookieHeader)
+            if cookies.isEmpty {
+                view.reload()
+            } else {
+                self.write(cookies) { view.reload() }
+            }
+        }
+    }
+
+    /// 把登录 cookie 灌进签名页。
+    ///
+    /// `_webmsxyw` 会读页面里的 `a1` / `webId`，只在请求头里带 cookie 时，
+    /// 隐藏页面仍然是匿名会话，算出来的签名会被服务端判无效。cookie 没变
+    /// 就什么都不做，翻页时不会反复 reload。
+    func applyCookies(_ header: String) {
+        let normalized = header.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        DispatchQueue.main.async {
+            guard self.appliedCookieHeader != normalized else { return }
+            self.appliedCookieHeader = normalized
+            self.cookieHeader = normalized
+            let cookies = Self.cookies(fromHeader: normalized)
+            guard !cookies.isEmpty else { return }
+            self.write(cookies) {
+                self.webView?.reload()
+            }
         }
     }
 
     // MARK: - 页面准备
 
     private func prepareIfNeeded() async throws {
+        // `webView` 是懒创建的：之前这里只轮询 `isSignerReady()`，
+        // 但 `ensureWebView()` 从来没被调用过，`webView` 永远是 nil，
+        // 每次请求都白等 16 秒再报「网页签名脚本没加载出来」。
+        // 必须先在主线程把隐藏页面建出来。
+        await MainActor.run {
+            _ = self.ensureWebView()
+        }
         // 最多等 16 秒，小红书首屏要跑完一大坨 bundle 才会有 `_webmsxyw`。
         for _ in 0..<40 {
             if await isSignerReady() { return }
@@ -145,8 +182,49 @@ final class XhsSigner {
         )
         view.customUserAgent = Self.desktopUserAgent
         view.isHidden = true
-        view.load(URLRequest(url: URL(string: "https://www.xiaohongshu.com/explore")!))
         webView = view
+        let load = {
+            view.load(URLRequest(url: URL(string: "https://www.xiaohongshu.com/explore")!))
+        }
+        let cookies = Self.cookies(fromHeader: cookieHeader)
+        if cookies.isEmpty {
+            load()
+        } else {
+            write(cookies, completion: load)
+        }
         return view
+    }
+
+    /// `Cookie:` 头 → `HTTPCookie`。域名统一写成 `.xiaohongshu.com`，
+    /// 这样 www 和 edith 两个子域都能带上。
+    private static func cookies(fromHeader header: String) -> [HTTPCookie] {
+        var result: [HTTPCookie] = []
+        for part in header.split(separator: ";") {
+            let piece = part.trimmingCharacters(in: .whitespaces)
+            guard let index = piece.firstIndex(of: "=") else { continue }
+            let name = String(piece[piece.startIndex..<index])
+            let value = String(piece[piece.index(after: index)...])
+            guard !name.isEmpty else { continue }
+            if let cookie = HTTPCookie(properties: [
+                .name: name,
+                .value: value,
+                .domain: ".xiaohongshu.com",
+                .path: "/",
+            ]) {
+                result.append(cookie)
+            }
+        }
+        return result
+    }
+
+    /// 把 cookie 写进默认 WKWebsiteDataStore，全部写完后回调。
+    private func write(_ cookies: [HTTPCookie], completion: @escaping () -> Void) {
+        let store = WKWebsiteDataStore.default().httpCookieStore
+        let group = DispatchGroup()
+        for cookie in cookies {
+            group.enter()
+            store.setCookie(cookie) { group.leave() }
+        }
+        group.notify(queue: .main, execute: completion)
     }
 }

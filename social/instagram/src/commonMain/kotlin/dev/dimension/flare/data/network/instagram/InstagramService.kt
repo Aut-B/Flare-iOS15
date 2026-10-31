@@ -191,6 +191,7 @@ internal class InstagramService {
         // 空的 X-CSRFToken 会让部分接口直接 400，没拿到就别发。
         credential.csrfToken.takeIf { it.isNotBlank() }?.let { header("X-CSRFToken", it) }
         header("X-IG-WWW-Claim", "0")
+        header("X-Instagram-AJAX", "1")
         header("X-Requested-With", "XMLHttpRequest")
         header("User-Agent", InstagramConstants.USER_AGENT)
         header("Accept", "*/*")
@@ -205,11 +206,24 @@ internal class InstagramService {
         // 未登录时 Instagram 会跳到登录页，跟随跳转后拿到的是一整页 HTML。
         // 当成接口结果去解析会静默变成空列表，这里显式识别成「掉登录」。
         val looksLikeHtml = text.trimStart().startsWith("<")
+        // 但只有真正的登录 / 验证码页才算掉登录；风控页也是 HTML，
+        // 之前一律当成「登录已失效」，用户会莫名其妙被踢回登录。
+        val looksLikeLoginPage =
+            looksLikeHtml &&
+                (
+                    text.contains("/accounts/login") ||
+                        text.contains("loginForm") ||
+                        text.contains("checkpoint")
+                )
+        val message = errorMessage(text)
+        val needsLogin = message == "login_required" || message == "checkpoint_required"
         if (status !in 200..299) {
-            if (status == 401 || status == 403 || looksLikeHtml) {
+            // 403 不一定是掉登录：POST 少 csrftoken 时也会 403。
+            // 只有 401 / 登录页 / 明确的 login_required 才算失效。
+            if (status == 401 || looksLikeLoginPage || needsLogin) {
                 throw InstagramException("Instagram 登录已失效，请重新登录", needLogin = true)
             }
-            val detail = errorMessage(text) ?: bodySnippet(text)
+            val detail = message ?: bodySnippet(text)
             throw InstagramException(
                 if (detail != null) {
                     "Instagram 请求被拒绝（HTTP $status：$detail）"
@@ -219,7 +233,12 @@ internal class InstagramService {
             )
         }
         if (looksLikeHtml) {
-            throw InstagramException("Instagram 登录已失效，请重新登录", needLogin = true)
+            if (looksLikeLoginPage) {
+                throw InstagramException("Instagram 登录已失效，请重新登录", needLogin = true)
+            }
+            throw InstagramException(
+                "Instagram 返回了网页而不是数据（HTTP $status），可能被风控拦截，请稍后再试或切换网络",
+            )
         }
         // 未登录时接口也会返回 200 + {"message":"login_required",...}
         if (text.contains("\"login_required\"") || text.contains("\"checkpoint_required\"")) {

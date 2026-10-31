@@ -1,6 +1,7 @@
 import SwiftUI
 import WebKit
 import UIKit
+import KotlinSharedUI
 
 /// 登录微信读书网页版。
 ///
@@ -52,8 +53,10 @@ struct WereadLoginView: View {
     @ViewBuilder
     private var qrLogin: some View {
         WereadWebContainer { cookies in
-            WereadStore.shared.adopt(cookies: cookies)
-            if WereadStore.shared.isLoggedIn {
+            if WereadStore.shared.adopt(cookies: cookies) {
+                // 书架页登录也要写进 Kotlin 账号库，否则「我的账户」和首页
+                // 标签栏里都不会出现微信读书。
+                _ = WeReadAccountBridge.shared.register(cookie: WereadStore.shared.cookie)
                 onFinish(true)
                 dismiss()
             }
@@ -103,6 +106,7 @@ struct WereadLoginView: View {
                 Button {
                     pasteError = nil
                     if WereadStore.shared.adopt(cookieHeader: cookieText) {
+                        _ = WeReadAccountBridge.shared.register(cookie: cookieText)
                         onFinish(true)
                         dismiss()
                     } else {

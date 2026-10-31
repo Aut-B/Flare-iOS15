@@ -1,5 +1,6 @@
 package dev.dimension.flare.ui.presenter.login
 
+import dev.dimension.flare.data.datasource.xiaohongshu.XhsBridgeHolder
 import dev.dimension.flare.data.network.xiaohongshu.XHS_HOST
 import dev.dimension.flare.data.network.xiaohongshu.XHS_LOGIN_URL
 import dev.dimension.flare.data.network.xiaohongshu.XHS_PLATFORM_ID
@@ -106,6 +107,8 @@ private class XhsWebCookieLoginHandler(
                 credential = credential,
                 serializer = XhsCredential.serializer(),
             )
+            // 原生小红书页有自己的 Store；把同一份 cookie 同步过去。
+            XhsBridgeHolder.bridge?.adoptCookie(credential.cookie)
             context.onSuccess()
         }.onFailure {
             _state.value = state(error = it.message)

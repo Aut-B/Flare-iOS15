@@ -8,6 +8,7 @@ import dev.dimension.flare.data.datasource.microblog.paging.CacheableRemoteLoade
 import dev.dimension.flare.data.datasource.microblog.paging.PagingRequest
 import dev.dimension.flare.data.datasource.microblog.paging.PagingResult
 import dev.dimension.flare.data.network.instagram.InstagramCredential
+import dev.dimension.flare.data.network.instagram.InstagramBridgeHolder
 import dev.dimension.flare.data.network.instagram.InstagramPage
 import dev.dimension.flare.data.network.instagram.InstagramService
 import dev.dimension.flare.model.MicroBlogKey
@@ -38,6 +39,9 @@ internal abstract class InstagramTimelineLoader(
                 is PagingRequest.Prepend -> null
             }
         val credential = credentialFlow.first()
+        // 老账号可能是在这次改动之前登录的，原生 Store 里没有 cookie；
+        // 每次取数顺手同步一次，侧边栏的原生页就能直接用。
+        InstagramBridgeHolder.bridge?.adopt(credential.cookie)
         val page = loadPage(credential, nextKey)
         return PagingResult(
             data = page.items.mapNotNull { it.toUiPost(accountKey) },
@@ -129,6 +133,7 @@ internal class InstagramLoader(
 
     override suspend fun userById(id: String): UiProfile {
         val credential = credentialFlow.first()
+        InstagramBridgeHolder.bridge?.adopt(credential.cookie)
         // 探测接口失败不要整页报错：账号页只要有个能渲染的资料。
         // 头像 / 昵称拿不到时退化成占位资料，至少账号能看见、能进主页。
         val raw = runCatching { service.userInfoById(credential, id) }.getOrNull()

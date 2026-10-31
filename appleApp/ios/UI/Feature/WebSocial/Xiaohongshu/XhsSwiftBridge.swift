@@ -12,6 +12,10 @@ import KotlinSharedUI
 /// 注意方法名：Kotlin 的 `suspend fun` 导出到 Swift 会带 `__` 前缀，并且是
 /// `async throws` 形式（Kotlin/Native 同时生成了 completionHandler 版本）。
 final class XhsSwiftBridge: NSObject, XhsBridge {
+    func adoptCookie(cookie: String) -> Bool {
+        XhsStore.shared.adopt(cookieHeader: cookie)
+    }
+
     func __homeFeed(
         cookie: String,
         cursor: String?,

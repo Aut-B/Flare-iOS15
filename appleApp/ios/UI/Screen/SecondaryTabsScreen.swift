@@ -33,7 +33,7 @@ struct SecondaryTabsScreen: View {
                     Section {
                         ForEach(items, id: \.accountKey) { item in
                             let tabs = item.tabs.compactMap { tab in
-                                route(for: tab).map { (tab: tab, route: $0) }
+                                route(for: tab, accountKey: item.accountKey).map { (tab: tab, route: $0) }
                             }
                             DisclosureGroup {
                                 ForEach(tabs, id: \.tab) { destination in
@@ -68,6 +68,9 @@ struct SecondaryTabsScreen: View {
                 // 在主导航栈上 push，全系统版本行为一致，也不再有任何嵌套导航栈。
                 secondaryRouteButton("Drafts", icon: .penToSquare, route: .draftBox)
                 secondaryRouteButton("settings_rss_management_title", icon: .squareRss, route: .rssManagement)
+                secondaryRouteButton("微信读书", icon: .bookmark, route: .weread)
+                secondaryRouteButton("Instagram", icon: .photoFilm, route: .instagram)
+                secondaryRouteButton("小红书", icon: .image, route: .xiaohongshu)
                 secondaryRouteButton("local_history_title", icon: .clockRotateLeft, route: .localHostory)
                 if aiAgentEnabledPresenter.state.enabled {
                     secondaryRouteButton("agent_history_title", icon: .robot, route: .agentHistory)
@@ -102,7 +105,23 @@ struct SecondaryTabsScreen: View {
     }
 }
 
-func route(for tab: SecondaryTabsPresenter.Tab) -> Route? {
+func route(for tab: SecondaryTabsPresenter.Tab, accountKey: MicroBlogKey) -> Route? {
+    // Instagram / 小红书 / 微信读书的账号标签页都走原生页面：
+    // - Instagram / 小红书：Kotlin 时间线要重新发一套网页请求，cookie 失效时
+    //   会直接报「登录已失效」，而且小红书还要等签名页；原生页有独立的
+    //   登录态和更完整的错误提示。
+    // - 微信读书：本来就没有时间线，只有原生书架。
+    // 「我」这个快捷入口也一起指过去，避免落到 Kotlin 个人主页后空白。
+    switch accountKey.host {
+    case "instagram.com":
+        return .instagram
+    case "xiaohongshu.com":
+        return .xiaohongshu
+    case "weread.qq.com":
+        return .weread
+    default:
+        break
+    }
     switch onEnum(of: tab.destination) {
     case .route(let destination):
         return Route.fromDeepLinkRoute(deeplinkRoute: destination.route)

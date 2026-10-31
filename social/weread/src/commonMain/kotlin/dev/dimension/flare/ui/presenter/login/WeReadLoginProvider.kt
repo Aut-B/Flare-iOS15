@@ -6,8 +6,12 @@ import dev.dimension.flare.data.network.weread.WeReadBridgeHolder
 import dev.dimension.flare.data.network.weread.WeReadCredential
 import dev.dimension.flare.data.network.weread.WeReadPlatformDetector
 import dev.dimension.flare.data.platform.WeReadPlatformSpec
+import dev.dimension.flare.data.repository.AccountService
+import dev.dimension.flare.di.koinInject
+import dev.dimension.flare.model.MicroBlogKey
 import dev.dimension.flare.model.PlatformMetadata
 import dev.dimension.flare.model.RecommendedInstance
+import dev.dimension.flare.ui.model.UiAccount
 import dev.dimension.flare.ui.model.UiInstance
 import dev.dimension.flare.ui.model.UiInstanceMetadata
 import dev.dimension.flare.ui.model.UiStrings
@@ -21,10 +25,10 @@ private const val LOGIN_ACTION = "login"
 /**
  * 微信读书的登录入口。
  *
- * 微信读书没有「时间线」这种东西（它是书架），所以这里**不建账号**：
- * 登录成功后只把 cookie 交给宿主（Swift 侧 `WereadStore`），
- * 书架页自己去读。这样「添加账号 → 实例」里能搜到它，
- * 又不会在账号列表里多出一个点进去空空的账号。
+ * 微信读书没有时间线（它是书架），但用户仍然希望在「我的账户」里看到它。
+ * 登录成功后同时做两件事：
+ * 1. 把 cookie 交给宿主（Swift 侧 `WereadStore`），书架页立刻可用；
+ * 2. 写入一个账号壳（`WeReadDataSource`），账号列表和侧边栏才有入口。
  */
 public data object WeReadLoginProvider : LoginPlatformProvider {
     override val platformId: String = WEREAD_PLATFORM_ID
@@ -75,6 +79,7 @@ public data object WeReadLoginProvider : LoginPlatformProvider {
 private class WeReadWebCookieLoginHandler(
     private val context: LoginContext,
 ) : LoginMethodHandler {
+    private val accountService: AccountService by koinInject()
     // 必须声明在 `_state` 之前：`_state` 的初始化会调用 state()，
     // 而 state() 会读这个字段。放到后面就变成「读未初始化的字段」。
     private var cookieInput: String = ""
@@ -116,7 +121,7 @@ private class WeReadWebCookieLoginHandler(
         _state.value = state(loading = true)
         runCatching {
             val normalized = WeReadCredential.normalize(value)
-            require(normalized.contains("wr_vid=")) {
+            require(normalized.contains("wr_vid=") && normalized.contains("wr_skey=")) {
                 "没有拿到微信读书的登录 cookie，请确认包含 wr_vid 与 wr_skey"
             }
             val credential = WeReadCredential.fromCookie(normalized)
@@ -126,6 +131,17 @@ private class WeReadWebCookieLoginHandler(
             check(bridge.adopt(credential.cookie)) {
                 "Cookie 被拒绝：需要包含 wr_vid 与 wr_skey，且未过期"
             }
+            val accountKey = MicroBlogKey(credential.userId, WEREAD_HOST)
+            context.requireReloginAccount(accountKey)
+            accountService.addAccount(
+                account =
+                    UiAccount(
+                        accountKey = accountKey,
+                        platformId = WEREAD_PLATFORM_ID,
+                    ),
+                credential = credential,
+                serializer = WeReadCredential.serializer(),
+            )
             context.onSuccess()
         }.onFailure {
             _state.value = state(error = it.message)
@@ -133,7 +149,9 @@ private class WeReadWebCookieLoginHandler(
     }
 
     override fun canResume(value: String): Boolean =
-        WeReadCredential.normalize(value).contains("wr_vid=")
+        WeReadCredential
+            .normalize(value)
+            .let { it.contains("wr_vid=") && it.contains("wr_skey=") }
 
     override fun clear() {
         cookieInput = ""

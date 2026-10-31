@@ -117,17 +117,28 @@ final class XhsService {
 
         let (data, response) = try await session.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        if status == 401 || status == 403 {
+        // 401 才是明确的未登录。403 多数是签名 / 风控，直接当掉登录会把
+        // 用户踢回登录页；先看 body，只有接口明确说未登录才算失效。
+        if status == 401 {
             throw XhsError.notLoggedIn
+        }
+        if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            try check(json)
+            guard (200..<300).contains(status) else {
+                throw XhsError(message: "请求失败（HTTP \(status)）", needLogin: false)
+            }
+            return json
+        }
+        if status == 403 || status == 461 {
+            throw XhsError(
+                message: "小红书风控拦截（HTTP \(status)），请稍后重试；一直失败就重新登录一次",
+                needLogin: false
+            )
         }
         guard (200..<300).contains(status) else {
             throw XhsError(message: "请求失败（HTTP \(status)）", needLogin: false)
         }
-        guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            throw XhsError(message: "接口返回格式异常", needLogin: false)
-        }
-        try check(json)
-        return json
+        throw XhsError(message: "接口返回格式异常", needLogin: false)
     }
 
     private func check(_ json: [String: Any]) throws {
@@ -135,8 +146,14 @@ final class XhsService {
         if code == 0 { return }
         let message = XhsJSON.string(json["msg"]) ?? "请求失败（code \(code)）"
         // -100 = 未登录，461 = 需要验证码，300013 = 签名错误。
-        if code == -100 || code == 300013 {
+        if code == -100 {
             throw XhsError.notLoggedIn
+        }
+        if code == 300013 {
+            // 签名跟隐藏页面的状态有关：cookie 换了 / 页面过期都会算错。
+            // 重新加载签名页让下一次请求重算，别当成掉登录把用户踢出去。
+            XhsSigner.shared.reset()
+            throw XhsError(message: "小红书签名失效，已自动刷新，请重试一次", needLogin: false)
         }
         if code == 461 {
             throw XhsError(

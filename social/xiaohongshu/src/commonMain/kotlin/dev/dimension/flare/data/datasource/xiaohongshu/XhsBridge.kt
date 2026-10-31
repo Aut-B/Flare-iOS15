@@ -11,6 +11,13 @@ package dev.dimension.flare.data.datasource.xiaohongshu
  */
 public interface XhsBridge {
     /**
+     * 把 Kotlin 登录拿到的 cookie 同步给宿主的原生 Store。
+     *
+     * 返回是否被接受（没有 `web_session` 会被拒）。
+     */
+    public fun adoptCookie(cookie: String): Boolean
+
+    /**
      * 首页流。`follow == true` 取关注流，否则是推荐流。
      *
      * 返回 `{"items":[...],"next":"cursor"}`。
