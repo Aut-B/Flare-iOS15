@@ -4,9 +4,10 @@ import WebKit
 
 /// 小红书的登录态与首页流。
 ///
-/// 凭证是网页版 cookie（关键 `web_session`）。签名用的隐藏网页和登录页
-/// 共用 `WKWebsiteDataStore.default()`，登录完 cookie 自动同步过去，
-/// 只需让那个页面重新加载一次。
+/// 取数不再直接打 `edith.xiaohongshu.com`：那条路签名能算对，但 `URLSession`
+/// 的 TLS 指纹 / `X-S-Common` 和真浏览器差太多，服务端一律回 `code -1`。
+/// 现在改成让一个真网页自己去请求首页流，我们只把响应 JSON 搬回原生渲染
+/// （见 `WebPageHarvester`）—— 请求是页面发的，风控没有理由拦。
 final class XhsStore: ObservableObject {
     static let shared = XhsStore()
 
@@ -14,16 +15,20 @@ final class XhsStore: ObservableObject {
     @Published private(set) var notes: [XhsNote] = []
     @Published private(set) var isLoading = false
     @Published private(set) var isLoadingMore = false
+    @Published private(set) var hasMore = true
     /// 当前是不是「关注」流。
     @Published private(set) var following = false
     @Published var errorMessage: String?
 
     private let defaults = UserDefaults.standard
     private let cookieKey = "xhs.cookie"
-    private var nextCursor: String?
     private var loaded = false
-    /// 上一次请求过的翻页游标，避免底部 `onAppear` 反复打同一个游标。
-    private var lastLoadMoreCursor: String?
+    private var harvester: WebPageHarvester?
+    /// 连续几次滚动都没捞到新内容，就当到底了，别一直空转。
+    private var emptyScrolls = 0
+
+    private static let recommendURL = "https://www.xiaohongshu.com/explore"
+    private static let followURL = "https://www.xiaohongshu.com/explore?channel_id=homefeed.follow"
 
     private init() {
         let cookie = defaults.string(forKey: cookieKey) ?? ""
@@ -90,26 +95,18 @@ final class XhsStore: ObservableObject {
     func logout() {
         defaults.removeObject(forKey: cookieKey)
         pushCredentials()
+        harvester?.stop()
+        harvester = nil
         DispatchQueue.main.async {
             self.isLoggedIn = false
             self.notes = []
-            self.nextCursor = nil
             self.loaded = false
+            self.hasMore = true
         }
     }
 
     private func pushCredentials() {
         XhsService.shared.cookie = cookie
-    }
-
-    private func handle(_ error: Error) {
-        if let error = error as? XhsError, error.needLogin {
-            logout()
-            DispatchQueue.main.async { self.errorMessage = error.message }
-            return
-        }
-        let message = error.localizedDescription
-        DispatchQueue.main.async { self.errorMessage = message }
     }
 
     // MARK: - 首页流
@@ -120,13 +117,13 @@ final class XhsStore: ObservableObject {
     }
 
     /// 在「推荐」和「关注」之间切换，切换后重新拉第一页。
-    /// 由按钮直接调用，所以是同步方法 —— 内部自己起任务去刷。
     func setFollowing(_ value: Bool) {
         guard following != value else { return }
         following = value
         loaded = false
+        emptyScrolls = 0
+        hasMore = true
         notes = []
-        nextCursor = nil
         Task { await self.refresh() }
     }
 
@@ -136,37 +133,113 @@ final class XhsStore: ObservableObject {
         DispatchQueue.main.async {
             self.isLoading = true
             self.errorMessage = nil
+            self.notes = []
+            self.hasMore = true
+            self.emptyScrolls = 0
         }
-        defer { DispatchQueue.main.async { self.isLoading = false } }
-        do {
-            let result = try await XhsService.shared.homeFeed(cursor: nil, follow: following)
-            DispatchQueue.main.async {
-                self.notes = result.notes
-                self.nextCursor = result.next
-                self.loaded = true
-                self.errorMessage = nil
-                self.lastLoadMoreCursor = nil
+        startHarvester(reload: true)
+
+        // 网页首屏要跑一会儿 JS。22 秒还一条都没捞到就报错，别让用户干等。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 22) { [weak self] in
+            guard let self = self else { return }
+            guard self.isLoading else { return }
+            self.isLoading = false
+            if self.notes.isEmpty {
+                self.errorMessage = "没抓到首页数据。点「重试」；连续失败就去菜单里重新登录一次"
             }
-        } catch {
-            handle(error)
         }
     }
 
     func loadMore() async {
-        guard isLoggedIn, let cursor = nextCursor, !isLoadingMore else { return }
-        guard cursor != lastLoadMoreCursor else { return }
-        lastLoadMoreCursor = cursor
+        guard isLoggedIn, !isLoading, !isLoadingMore, hasMore else { return }
+        guard !notes.isEmpty else { return }
         DispatchQueue.main.async { self.isLoadingMore = true }
-        defer { DispatchQueue.main.async { self.isLoadingMore = false } }
-        do {
-            let result = try await XhsService.shared.homeFeed(cursor: cursor, follow: following)
-            DispatchQueue.main.async {
-                let known = Set(self.notes.map { $0.id })
-                self.notes.append(contentsOf: result.notes.filter { !known.contains($0.id) })
-                self.nextCursor = result.next
-            }
-        } catch {
-            handle(error)
+        if let harvester = harvester, harvester.isRunning {
+            harvester.scroll()
+        } else {
+            startHarvester(reload: false)
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 9) { [weak self] in
+            guard let self = self else { return }
+            guard self.isLoadingMore else { return }
+            self.isLoadingMore = false
+            self.emptyScrolls += 1
+            if self.emptyScrolls >= 3 {
+                self.hasMore = false
+            }
+        }
+    }
+
+    // MARK: - 网页抓取
+
+    private func startHarvester(reload: Bool) {
+        let work: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            if !reload, let existing = self.harvester, existing.isRunning {
+                existing.scroll()
+                return
+            }
+            self.harvester?.stop()
+            let harvester = WebPageHarvester()
+            self.harvester = harvester
+            harvester.start(
+                url: self.following ? Self.followURL : Self.recommendURL,
+                userAgent: WebPlatformUserAgent.desktop,
+                cookie: self.cookie,
+                cookieDomain: "xiaohongshu.com",
+                patterns: ["/api/sns/web/v1/homefeed"],
+                onFinish: nil,
+                onMessage: { [weak self] message in
+                    self?.ingest(message)
+                }
+            )
+        }
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    /// 收到页面自己发出的 homefeed 响应。这里一定是主线程。
+    private func ingest(_ message: WebPageHarvester.Message) {
+        guard message.url.contains("homefeed") else { return }
+        guard
+            let data = message.body.data(using: .utf8),
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else {
+            return
+        }
+        let code = XhsJSON.int(json["code"])
+        guard code == 0 else {
+            if code == -100 {
+                logout()
+                errorMessage = XhsError.notLoggedIn.message
+            } else {
+                errorMessage = "小红书返回 code \(code)，稍后点「重试」"
+            }
+            isLoading = false
+            return
+        }
+
+        let payload = XhsJSON.object(json["data"]) ?? [:]
+        var batch: [XhsNote] = []
+        for item in XhsJSON.array(payload["items"]) {
+            // 首页流里混着 `model_type != note` 的推荐位，跳过。
+            if let type = XhsJSON.string(item["model_type"]), type != "note" { continue }
+            if let note = XhsJSON.note(item) { batch.append(note) }
+        }
+        guard !batch.isEmpty else { return }
+
+        let known = Set(notes.map { $0.id })
+        let fresh = batch.filter { !known.contains($0.id) }
+        if !fresh.isEmpty {
+            notes.append(contentsOf: fresh)
+            emptyScrolls = 0
+            loaded = true
+            errorMessage = nil
+        }
+        isLoading = false
+        isLoadingMore = false
     }
 }

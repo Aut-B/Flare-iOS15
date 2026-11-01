@@ -28,14 +28,43 @@ final class WereadService: @unchecked Sendable {
     // MARK: - 书架
 
     func shelf(cookie: String) async throws -> [WereadBook] {
-        let url = URL(string: "\(base)/web/shelf/sync?synckeys=0&teenmode=0&album=1")!
-        var request = URLRequest(url: url)
-        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        // `synckeys=0` 只给第一页，书架大的人会少一截（用户说的「没还原全」）。
+        // 接口会在响应里回一个新的 synckey，带着它再要一页，直到没有新书。
+        var result: [WereadBook] = []
+        var seen = Set<String>()
+        var syncKey = "0"
+        for _ in 0..<4 {
+            let url = URL(string: "\(base)/web/shelf/sync?synckeys=\(syncKey)&teenmode=0&album=1")!
+            var request = URLRequest(url: url)
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
 
-        let data = try await send(request)
-        let json = try parseObject(data)
-        try checkError(json)
+            let data = try await send(request)
+            let json = try parseObject(data)
+            try checkError(json)
 
+            var added = 0
+            for book in books(fromShelfJSON: json) where !seen.contains(book.id) {
+                seen.insert(book.id)
+                result.append(book)
+                added += 1
+            }
+            guard added > 0 else { break }
+            let next =
+                (json["synckey"] as? NSNumber)?.stringValue
+                ?? (json["synckeyStr"] as? String)
+            guard let nextKey = next, !nextKey.isEmpty, nextKey != syncKey, nextKey != "0" else {
+                break
+            }
+            syncKey = nextKey
+        }
+        return result
+    }
+
+    /// 把 `shelf/sync` 的响应翻成书单。
+    ///
+    /// 网页版书架拉的也是这个接口，`WebPageHarvester` 会把响应搬回来，
+    /// 所以解析只写这一份，两条路共用。
+    func books(fromShelfJSON json: [String: Any]) -> [WereadBook] {
         // `books` 是书架上的书，`archive` 是归档过的书；只看 books 会少一截，
         // 用户会觉得「书架没还原全」。
         let books = json["books"] as? [[String: Any]] ?? []

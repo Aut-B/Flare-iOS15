@@ -1,31 +1,41 @@
 import SwiftUI
-import Combine
 import WebKit
 import UIKit
 
-/// 微信读书阅读器（网页版）。
+/// 要打开的一本书。
+struct WereadReaderTarget: Identifiable {
+    let id = UUID()
+    /// 网页阅读器地址（`/web/reader/<hash>`）。没拿到时是网页书架地址。
+    let url: String
+    let title: String
+    /// true = 没有阅读器地址，先落到网页书架再自动点开那本书。
+    let needsJump: Bool
+}
+
+/// 微信读书阅读器（网页版，全屏）。
 ///
-/// 原生书架点一本书时直接开一个全屏网页：先落到网页书架，再用 JS 把这本书
-/// 点开 —— 网页阅读器要的是加密过的 bookId，`shelf/sync` 给的是数字 id，
-/// 自己拼一定 404。这样「先进线上书架、再点一次」那一步就省掉了。
+/// 只做一件事：把网页阅读器**原样全屏**铺开。
+/// 网页阅读器本来就支持长按选文、划线、写想法、翻页、进度同步，
+/// 这些自己用原生重写一遍既做不到那么好，也没必要。
 ///
-/// 没有导航栏：网页铺满整屏（这才是全屏），右下角只留三个悬浮按钮。
+/// 关键是地址：网页阅读器要的是 `/web/reader/<hash>` 里那个 hash，
+/// 用 `shelf/sync` 的数字 bookId 自己拼一定 404 —— 上一版「点进去白屏」
+/// 就是这个原因。hash 由 `WereadStore` 从网页书架的链接里抄下来缓存。
 struct WereadReaderView: View {
-    let book: WereadBook
+    let target: WereadReaderTarget
 
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var model = WereadWebModel()
     @State private var isLoading = true
-
-    private static let shelfURL = "https://weread.qq.com/web/shelf"
+    @State private var reloadToken = 0
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
+        ZStack(alignment: .topTrailing) {
             WereadReaderWebView(
-                url: Self.shelfURL,
+                url: target.url,
                 cookie: WereadStore.shared.cookie,
-                bookTitle: book.title,
-                model: model,
+                bookTitle: target.title,
+                needsJump: target.needsJump,
+                reloadToken: reloadToken,
                 isLoading: $isLoading
             )
             .ignoresSafeArea()
@@ -33,20 +43,18 @@ struct WereadReaderView: View {
             if isLoading {
                 ProgressView()
                     .progressViewStyle(.linear)
-                    .frame(maxWidth: .infinity)
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 4)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
 
             VStack(spacing: 10) {
                 floatingButton("xmark", label: "关闭") { dismiss() }
-                floatingButton("arrow.clockwise", label: "刷新") { model.reload() }
-                floatingButton("books.vertical", label: "回书架") { model.loadShelf() }
+                floatingButton("arrow.clockwise", label: "刷新") { reloadToken += 1 }
             }
-            .padding(.trailing, 12)
-            .padding(.bottom, 18)
+            .padding(.trailing, 10)
+            .padding(.top, 6)
         }
         .background(Color(.systemBackground))
+        .statusBar(hidden: true)
     }
 
     private func floatingButton(
@@ -56,10 +64,10 @@ struct WereadReaderView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
-                .frame(width: 36, height: 36)
-                .background(Color.black.opacity(0.38))
+                .frame(width: 32, height: 32)
+                .background(Color.black.opacity(0.32))
                 .clipShape(Circle())
         }
         .buttonStyle(.plain)
@@ -67,40 +75,13 @@ struct WereadReaderView: View {
     }
 }
 
-final class WereadWebModel: ObservableObject {
-    @Published var canGoBack = false
-
-    weak var webView: WKWebView?
-
-    func refresh() {
-        canGoBack = webView?.canGoBack ?? false
-    }
-
-    func reload() {
-        webView?.reload()
-    }
-
-    func goBack() {
-        webView?.goBack()
-    }
-
-    /// 回到网页书架。阅读器页面自己的返回键不一定在，这个兜底用。
-    func loadShelf() {
-        guard let target = URL(string: "https://weread.qq.com/web/shelf") else { return }
-        webView?.load(URLRequest(url: target))
-    }
-}
-
 private struct WereadReaderWebView: UIViewRepresentable {
     let url: String
     let cookie: String
     let bookTitle: String
-    @ObservedObject var model: WereadWebModel
+    let needsJump: Bool
+    let reloadToken: Int
     @Binding var isLoading: Bool
-
-    /// 桌面 UA：手机 UA 下微信读书会把网页换成「打开 App」引导页。
-    private static let desktopUserAgent =
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -112,31 +93,30 @@ private struct WereadReaderWebView: UIViewRepresentable {
         configuration.allowsInlineMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = []
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.customUserAgent = Self.desktopUserAgent
+        // 桌面 UA：手机 UA 下微信读书会把网页换成「打开 App」引导页。
+        webView.customUserAgent = WebPlatformUserAgent.desktop
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.scrollView.contentInsetAdjustmentBehavior = .never
-        model.webView = webView
-
-        let start: () -> Void = {
-            guard let target = URL(string: url) else { return }
-            webView.load(URLRequest(url: target))
-        }
-        // 页面里已经登录过就别再灌旧 cookie —— 那会把用户刚登好的会话顶掉。
-        if cookie.isEmpty {
-            start()
-        } else {
-            CookieJar.writeIfAbsent(cookie, domainSuffix: "weread.qq.com", completion: start)
-        }
+        context.coordinator.webView = webView
+        context.coordinator.load()
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {}
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        context.coordinator.parent = self
+        if context.coordinator.loadedToken != reloadToken {
+            context.coordinator.loadedToken = reloadToken
+            context.coordinator.load()
+        }
+    }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
-        private let parent: WereadReaderWebView
-        /// 只在第一次落到书架时自动点书；之后用户自己点的不再干预。
+        var parent: WereadReaderWebView
+        weak var webView: WKWebView?
+        var loadedToken = 0
+
         private var didAttemptJump = false
         private var jumpAttempts = 0
 
@@ -144,14 +124,36 @@ private struct WereadReaderWebView: UIViewRepresentable {
             self.parent = parent
         }
 
+        func load() {
+            guard let webView = webView else { return }
+            guard let target = URL(string: parent.url) else { return }
+            didAttemptJump = false
+            jumpAttempts = 0
+            // 页面里已经登录过就别再灌旧 cookie —— 那会把用户刚登好的会话顶掉。
+            let request = URLRequest(url: target)
+            if parent.cookie.isEmpty {
+                webView.load(request)
+            } else {
+                CookieJar.writeIfAbsent(
+                    parent.cookie,
+                    domainSuffix: "weread.qq.com"
+                ) {
+                    webView.load(request)
+                }
+            }
+        }
+
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             parent.isLoading = true
-            parent.model.refresh()
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             parent.isLoading = false
-            parent.model.refresh()
+            // 真的跳进阅读器了就把地址记下来，下次点这本书直接秒开。
+            if let current = webView.url?.absoluteString, current.contains("/web/reader/") {
+                WereadStore.shared.rememberReaderLink(title: parent.bookTitle, url: current)
+            }
+            guard parent.needsJump else { return }
             guard !didAttemptJump else { return }
             didAttemptJump = true
             // 书架是 JS 渲染的，`didFinish` 时列表往往还没出来，多试几次。
@@ -164,7 +166,6 @@ private struct WereadReaderWebView: UIViewRepresentable {
             withError error: Error
         ) {
             parent.isLoading = false
-            parent.model.refresh()
         }
 
         func webView(
@@ -173,7 +174,6 @@ private struct WereadReaderWebView: UIViewRepresentable {
             withError error: Error
         ) {
             parent.isLoading = false
-            parent.model.refresh()
         }
 
         /// 卡片经常用新窗口打开；没有这个回调点了会没反应。
@@ -190,11 +190,11 @@ private struct WereadReaderWebView: UIViewRepresentable {
         }
 
         private func scheduleJump(in webView: WKWebView) {
-            guard jumpAttempts < 4 else { return }
+            guard jumpAttempts < 5 else { return }
             let delay = jumpAttempts == 0 ? 1.2 : 2.0
             jumpAttempts += 1
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak webView] in
-                guard let self, let webView else { return }
+                guard let self = self, let webView = webView else { return }
                 Self.openBook(in: webView, title: self.parent.bookTitle) { found in
                     if !found {
                         self.scheduleJump(in: webView)

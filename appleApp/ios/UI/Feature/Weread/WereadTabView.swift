@@ -2,12 +2,14 @@ import SwiftUI
 
 /// 微信读书标签页。
 ///
-/// 原生书架走的是 `shelf/sync`，接口字段一改就少书；原生阅读器还得自己拼
-/// 加密过的 bookId，拼错就是 404。所以默认直接用网页版书架：书单、目录、
-/// 正文、进度、划线全由网页版处理，和手机 App 里那一份是一致的。
-/// 想看原生网格可以在右上角切回去。
+/// 默认是**原生书架**：书单走 `shelf/sync`，点书直接全屏进网页阅读器
+/// （网页阅读器支持长按选文、划线、写想法，这些自己重写不划算）。
+/// 网页阅读器要的 hash 由 `WereadStore` 从网页书架抄下来缓存，所以点书是秒开，
+/// 不用再「先进线上书架、再点一次」。
+///
+/// 想看网页版书架可以在右上角切过去。
 struct WereadTabView: View {
-    @State private var useWeb = true
+    @State private var useWeb = false
 
     var body: some View {
         Group {
@@ -36,7 +38,7 @@ struct WereadTabView: View {
                             } label: {
                                 Image(systemName: "safari")
                             }
-                            .accessibilityLabel("切回网页版书架")
+                            .accessibilityLabel("切到网页版书架")
                         }
                     }
             }

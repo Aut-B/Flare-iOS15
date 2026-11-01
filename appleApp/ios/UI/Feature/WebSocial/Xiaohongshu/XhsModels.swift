@@ -19,6 +19,8 @@ struct XhsNote: Identifiable, Hashable {
     let isVideo: Bool
     /// 首图宽高比（宽 / 高），用来定版式高度。
     let aspect: CGFloat
+    /// 视频直链。首页流里就带着，有它就能原生播放，不用再请求详情。
+    var videoURL: String? = nil
 
     var cover: String? { images.first }
 
@@ -115,6 +117,24 @@ enum XhsJSON {
         return (resolved, aspect)
     }
 
+    /// 视频直链。`video.media.stream` 里按编码分了 h264 / h265 / av1 三档，
+    /// 挑第一个有 `master_url` 的；老设备上 h264 最稳，所以放最前面。
+    static func videoURL(_ value: Any?) -> String? {
+        guard let video = object(value), let media = object(video["media"]) else { return nil }
+        guard let stream = object(media["stream"]) else { return nil }
+        for codec in ["h264", "h265", "av1"] {
+            let list = array(stream[codec])
+            guard let first = list.first else { continue }
+            if let url = string(first["master_url"]) {
+                return url
+            }
+            if let backups = first["backup_urls"] as? [String], let url = backups.first {
+                return url
+            }
+        }
+        return nil
+    }
+
     static func note(_ value: Any?) -> XhsNote? {
         guard let raw = object(value) else { return nil }
         // 首页流里是 `{id, model_type, note_card}`，详情接口里也是这个形状。
@@ -137,6 +157,8 @@ enum XhsJSON {
         guard !images.isEmpty else { return nil }
         if aspect <= 0 { aspect = 0.75 }
 
+        let isVideo = string(card["type"]) == "video" || object(card["video"]) != nil
+
         return XhsNote(
             id: id,
             title: string(card["title"]) ?? string(card["display_title"]) ?? "",
@@ -144,8 +166,9 @@ enum XhsJSON {
             user: user,
             images: images,
             likedCount: countText(object(card["interact_info"])?["liked_count"]),
-            isVideo: string(card["type"]) == "video" || object(card["video"]) != nil,
-            aspect: min(max(aspect, 0.5), 2.0)
+            isVideo: isVideo,
+            aspect: min(max(aspect, 0.5), 2.0),
+            videoURL: isVideo ? videoURL(card["video"]) : nil
         )
     }
 }

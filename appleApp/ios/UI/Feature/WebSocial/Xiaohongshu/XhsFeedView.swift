@@ -1,10 +1,11 @@
 import SwiftUI
 import UIKit
 
-/// 小红书首页。
+/// 小红书首页：真·瀑布流。
 ///
-/// 版式按网页版来：两列瀑布流，卡片是「图 + 标题 + 作者 + 点赞」。
-/// 真正的瀑布流要自己算列高，这里按奇偶分两列近似 —— 视觉上够用，代码短得多。
+/// 数据来自 `XhsStore`（由隐藏网页把 homefeed 的响应搬回来），版式完全原生：
+/// 每张卡片按图片真实宽高比算高度，新卡片放进「当前最矮」的那一列，
+/// 这才是网页版那个错落感；按奇偶分两列只是看着像，图片一高一矮就穿帮。
 struct XhsFeedView: View {
     @ObservedObject private var store = XhsStore.shared
     @State private var showLogin = false
@@ -80,16 +81,22 @@ struct XhsFeedView: View {
     private var feed: some View {
         ScrollView {
             if store.isLoading, store.notes.isEmpty {
-                ProgressView()
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 80)
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("正在从网页版取首页…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 80)
             } else if let message = store.errorMessage, store.notes.isEmpty {
                 errorState(message)
             } else {
                 VStack(spacing: 10) {
                     HStack(alignment: .top, spacing: 10) {
-                        column(notesAt: 0)
-                        column(notesAt: 1)
+                        ForEach(Array(columns.enumerated()), id: \.offset) { _, bucket in
+                            column(bucket)
+                        }
                     }
                     loadMoreFooter
                 }
@@ -102,17 +109,39 @@ struct XhsFeedView: View {
         }
     }
 
-    private func column(notesAt offset: Int) -> some View {
+    /// 按累计高度分列。列数跟着屏宽走：6s 竖屏两列，iPad 上三列。
+    private var columns: [[XhsNote]] {
+        let width = UIScreen.main.bounds.width
+        let count = max(2, min(4, Int(width / 200)))
+        var buckets = Array(repeating: [XhsNote](), count: count)
+        var heights = Array(repeating: CGFloat(0), count: count)
+        for note in store.notes {
+            var target = 0
+            for index in 1..<count where heights[index] < heights[target] {
+                target = index
+            }
+            buckets[target].append(note)
+            heights[target] += estimatedHeight(note, columnCount: count)
+        }
+        return buckets
+    }
+
+    private func estimatedHeight(_ note: XhsNote, columnCount: Int) -> CGFloat {
+        let width = (UIScreen.main.bounds.width - CGFloat(columnCount - 1) * 10 - 20) / CGFloat(columnCount)
+        let imageHeight = width / max(note.aspect, 0.4)
+        let textHeight: CGFloat = note.displayTitle.isEmpty ? 36 : 62
+        return imageHeight + textHeight + 10
+    }
+
+    private func column(_ bucket: [XhsNote]) -> some View {
         LazyVStack(spacing: 10) {
-            ForEach(Array(store.notes.enumerated()), id: \.element.id) { index, note in
-                if index % 2 == offset {
-                    Button {
-                        selected = note
-                    } label: {
-                        XhsNoteCard(note: note)
-                    }
-                    .buttonStyle(.plain)
+            ForEach(bucket) { note in
+                Button {
+                    selected = note
+                } label: {
+                    XhsNoteCard(note: note)
                 }
+                .buttonStyle(.plain)
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
@@ -122,6 +151,11 @@ struct XhsFeedView: View {
     private var loadMoreFooter: some View {
         if store.isLoadingMore {
             ProgressView()
+                .padding(.vertical, 16)
+        } else if !store.hasMore {
+            Text("没有更多了")
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 .padding(.vertical, 16)
         } else {
             Color.clear
@@ -236,19 +270,96 @@ struct XhsNoteCard: View {
     }
 }
 
-/// `AsyncImage` 的薄封装，失败和加载中统一灰底。
+/// 图片缓存。`AsyncImage` 每次滚回来都重新下载，6s 上就是「一直卡」，
+/// 所以这里自己做一层 NSCache + URLCache。
+final class XhsImageCache {
+    static let shared = XhsImageCache()
+
+    private let cache = NSCache<NSString, UIImage>()
+    private var waiters: [String: [(UIImage?) -> Void]] = [:]
+    private let session: URLSession
+
+    private init() {
+        let configuration = URLSessionConfiguration.default
+        configuration.requestCachePolicy = .returnCacheDataElseLoad
+        configuration.urlCache = URLCache(
+            memoryCapacity: 24 * 1024 * 1024,
+            diskCapacity: 160 * 1024 * 1024,
+            diskPath: "xhs-images"
+        )
+        session = URLSession(configuration: configuration)
+    }
+
+    func cached(_ url: String) -> UIImage? {
+        cache.object(forKey: url as NSString)
+    }
+
+    func image(for url: String, completion: @escaping (UIImage?) -> Void) {
+        if let cached = cache.object(forKey: url as NSString) {
+            completion(cached)
+            return
+        }
+        if waiters[url] != nil {
+            waiters[url]?.append(completion)
+            return
+        }
+        waiters[url] = [completion]
+        guard let target = URL(string: url) else {
+            finish(url, image: nil)
+            return
+        }
+        session.dataTask(with: target) { [weak self] data, _, _ in
+            let image = data.flatMap { UIImage(data: $0) }
+            DispatchQueue.main.async {
+                self?.finish(url, image: image)
+            }
+        }.resume()
+    }
+
+    private func finish(_ url: String, image: UIImage?) {
+        if let image = image {
+            cache.setObject(image, forKey: url as NSString)
+        }
+        let list = waiters[url] ?? []
+        waiters[url] = nil
+        for item in list {
+            item(image)
+        }
+    }
+}
+
+/// 带缓存的图片视图，失败和加载中统一灰底。
 struct XhsImageView: View {
     let url: String?
 
+    @State private var image: UIImage?
+
     var body: some View {
-        AsyncImage(url: url.flatMap { URL(string: $0) }) { phase in
-            if let image = phase.image {
-                image
+        Group {
+            if let image = image {
+                Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
             } else {
                 Rectangle()
                     .fill(Color(.tertiarySystemFill))
+            }
+        }
+        .onAppear { load() }
+    }
+
+    private func load() {
+        guard let url = url, !url.isEmpty else {
+            image = nil
+            return
+        }
+        if let cached = XhsImageCache.shared.cached(url) {
+            image = cached
+            return
+        }
+        XhsImageCache.shared.image(for: url) { loaded in
+            if let loaded = loaded {
+                self.image = loaded
             }
         }
     }

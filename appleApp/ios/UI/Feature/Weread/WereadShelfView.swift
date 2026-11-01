@@ -1,11 +1,15 @@
 import SwiftUI
 import WebKit
 
-/// 微信读书书架。
+/// 微信读书书架（原生）。
+///
+/// 书单来自 `shelf/sync`；同时后台用一个隐藏网页把线上书架抄一遍，
+/// 补上接口漏掉的书，并记下每本书网页阅读器的真实地址。
+/// 点书直接全屏进阅读器 —— 不再「先进线上书架、再点一次」。
 struct WereadShelfView: View {
     @ObservedObject private var store = WereadStore.shared
     @State private var showLogin = false
-    @State private var selectedBook: WereadBook?
+    @State private var target: WereadReaderTarget?
 
     private let columns = [GridItem(.adaptive(minimum: 96, maximum: 140), spacing: 16)]
 
@@ -30,6 +34,11 @@ struct WereadShelfView: View {
                         } label: {
                             Label("刷新书架", systemImage: "arrow.clockwise")
                         }
+                        Button {
+                            store.syncWebShelf()
+                        } label: {
+                            Label("重新同步线上书架", systemImage: "arrow.triangle.2.circlepath")
+                        }
                         Button(role: .destructive) {
                             store.logout()
                         } label: {
@@ -46,8 +55,8 @@ struct WereadShelfView: View {
                 Task { await store.refreshShelf() }
             }
         }
-        .sheet(item: $selectedBook) { book in
-            WereadReaderView(book: book)
+        .fullScreenCover(item: $target) { item in
+            WereadReaderView(target: item)
         }
         .task {
             if store.isLoggedIn, store.books.isEmpty {
@@ -79,7 +88,7 @@ struct WereadShelfView: View {
                 LazyVGrid(columns: columns, spacing: 18) {
                     ForEach(store.books) { book in
                         Button {
-                            selectedBook = book
+                            open(book)
                         } label: {
                             bookCell(book)
                         }
@@ -92,6 +101,20 @@ struct WereadShelfView: View {
         .background(Color(.systemGroupedBackground))
         .refreshable {
             await store.refreshShelf()
+        }
+    }
+
+    private func open(_ book: WereadBook) {
+        if let url = store.readerLink(for: book) {
+            target = WereadReaderTarget(url: url, title: book.title, needsJump: false)
+        } else {
+            // 还没抄到地址：先落到网页书架，进去后自动点开这本书。
+            target = WereadReaderTarget(
+                url: "https://weread.qq.com/web/shelf",
+                title: book.title,
+                needsJump: true
+            )
+            store.syncWebShelf()
         }
     }
 

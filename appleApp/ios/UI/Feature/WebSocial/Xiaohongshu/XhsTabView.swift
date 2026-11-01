@@ -2,14 +2,12 @@ import SwiftUI
 
 /// 小红书标签页。
 ///
-/// 原生瀑布流走的是 `edith.xiaohongshu.com` 的私有接口：签名能算出来，
-/// 服务端风控一收紧还是只回 `code -1`。所以默认用**网页版**。
+/// 默认就是**原生瀑布流**：数据由隐藏网页把 `homefeed` 的响应搬回来，
+/// 版式、滚动、图片缓存全是原生的，比套壳网页快得多，也不卡。
 ///
-/// 默认是**桌面版**网页：手机版网页现在几乎每个入口都在喊「打开 App」，
-/// 视频根本看不了；桌面版没有这套引导，登录、视频、评论都是完整的。
-/// 觉得字小可以在右上角菜单里切回手机版，选择会记住。
+/// 万一抓不到（网页要求验证、账号异常），右上角菜单里还能切到网页版。
 struct XhsTabView: View {
-    @State private var useWeb = true
+    @State private var useWeb = false
 
     var body: some View {
         Group {
@@ -38,7 +36,7 @@ struct XhsTabView: View {
                             } label: {
                                 Image(systemName: "safari")
                             }
-                            .accessibilityLabel("切回网页版")
+                            .accessibilityLabel("切到网页版")
                         }
                     }
             }

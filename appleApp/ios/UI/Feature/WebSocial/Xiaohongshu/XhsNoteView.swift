@@ -1,19 +1,27 @@
 import SwiftUI
+import AVFoundation
+import AVKit
 
-/// 笔记详情：图逐张铺开，下面是正文。
+/// 笔记详情：视频能直接播，图逐张铺开，下面是正文。
 struct XhsNoteView: View {
     let note: XhsNote
 
     @Environment(\.dismiss) private var dismiss
     @State private var detail: XhsNote?
     @State private var errorText: String?
+    @State private var player: AVPlayer?
 
     private var current: XhsNote { detail ?? note }
+
+    /// 详情接口偶尔拿不到，但首页流里本来就带视频直链，先用着。
+    private var videoURL: String? {
+        current.videoURL ?? note.videoURL
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                images
+                media
                 header
                 if !current.desc.isEmpty {
                     Text(current.desc)
@@ -41,23 +49,42 @@ struct XhsNoteView: View {
                 Button("关闭") { dismiss() }
             }
         }
+        .onDisappear {
+            player?.pause()
+        }
         .task {
-            guard detail == nil else { return }
+            // 首页流里已经带了标题、正文、图片、视频，够看了。只有正文缺了
+            // 才去问详情接口 —— 那个接口要拉起签名页，为了一点正文不值当。
+            guard detail == nil, note.desc.isEmpty else { return }
             do {
                 detail = try await XhsService.shared.note(id: note.id)
             } catch {
-                errorText = error.localizedDescription
+                // 详情接口被风控挡了不影响看：首页流里的标题、正文、图片、视频都在。
+                errorText = nil
             }
         }
     }
 
-    private var images: some View {
-        VStack(spacing: 2) {
-            ForEach(Array(current.images.enumerated()), id: \.offset) { _, url in
-                XhsImageView(url: url)
-                    .aspectRatio(current.aspect, contentMode: .fit)
-                    .frame(maxWidth: .infinity)
-                    .clipped()
+    @ViewBuilder
+    private var media: some View {
+        if let urlString = videoURL, let url = URL(string: urlString) {
+            VideoPlayer(player: player)
+                .aspectRatio(9.0 / 16.0, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .background(Color.black)
+                .onAppear {
+                    if player == nil {
+                        player = AVPlayer(url: url)
+                    }
+                }
+        } else {
+            VStack(spacing: 2) {
+                ForEach(Array(current.images.enumerated()), id: \.offset) { _, url in
+                    XhsImageView(url: url)
+                        .aspectRatio(current.aspect, contentMode: .fit)
+                        .frame(maxWidth: .infinity)
+                        .clipped()
+                }
             }
         }
     }
