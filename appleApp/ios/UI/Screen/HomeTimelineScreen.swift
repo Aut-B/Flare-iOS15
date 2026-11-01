@@ -39,9 +39,13 @@ private func nativeSocialView(for tab: NativeSocialTab) -> some View {
     case .instagram:
         InstagramFeedView()
     case .xiaohongshu:
-        XhsFeedView()
+        // 原生瀑布流要现算签名，服务端风控一收紧就只回 code -1，
+        // 用户看到的就是「请求失败 / 签名没拿到」。这里直接进网页版。
+        XhsTabView()
     case .weread:
-        WereadShelfView()
+        // 原生书架走 shelf/sync，字段一改就少书；阅读器还要拼加密 bookId，
+        // 拼错就是 404。网页版书架 + 网页版阅读器才是用户 App 里那一份。
+        WereadTabView()
     }
 }
 

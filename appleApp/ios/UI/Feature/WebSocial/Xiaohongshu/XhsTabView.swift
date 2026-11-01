@@ -18,28 +18,25 @@ struct XhsTabView: View {
                     mobileUserAgent: WebPlatformUserAgent.mobile,
                     desktopUserAgent: WebPlatformUserAgent.desktop,
                     initialCookie: XhsStore.shared.cookie,
-                    cookieDomainSuffix: "xiaohongshu.com"
+                    cookieDomainSuffix: "xiaohongshu.com",
+                    // 时间线标签里已经有一整条应用自己的工具栏，浏览器那排
+                    // 收进右上角菜单，别把左上角的账号入口挤掉。
+                    showsBrowserBar: false,
+                    extraMenuTitle: "切回原生瀑布流",
+                    extraMenuAction: { useWeb = false }
                 )
             } else {
                 XhsFeedView()
-            }
-        }
-        .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                Menu {
-                    Button {
-                        useWeb = true
-                    } label: {
-                        Label("网页版", systemImage: "safari")
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Button {
+                                useWeb = true
+                            } label: {
+                                Image(systemName: "safari")
+                            }
+                            .accessibilityLabel("切回网页版")
+                        }
                     }
-                    Button {
-                        useWeb = false
-                    } label: {
-                        Label("原生瀑布流", systemImage: "square.grid.2x2")
-                    }
-                } label: {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                }
             }
         }
     }

@@ -23,6 +23,7 @@ struct IGVideoPlayer: View {
     var autoPlay: Bool = true
 
     @State private var player: AVPlayer?
+    @State private var fullscreen = false
 
     var body: some View {
         ZStack {
@@ -33,6 +34,30 @@ struct IGVideoPlayer: View {
                 ProgressView()
                     .tint(.white)
             }
+        }
+        .overlay(alignment: .topLeading) {
+            Button {
+                // 全屏那个播放器会自己播，这里先停掉，免得两路声音叠在一起。
+                player?.pause()
+                fullscreen = true
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .padding(8)
+            .accessibilityLabel("全屏播放")
+        }
+        .fullScreenCover(isPresented: $fullscreen, onDismiss: {
+            if autoPlay {
+                player?.play()
+            }
+        }) {
+            IGFullscreenVideo(url: url)
         }
         .onAppear {
             guard player == nil, let target = URL(string: url) else { return }
@@ -45,6 +70,206 @@ struct IGVideoPlayer: View {
         .onDisappear {
             player?.pause()
             player = nil
+        }
+    }
+}
+
+/// 全屏播放：铺一个系统 `AVPlayerViewController`，进度条 / 音量 / 画中画都在。
+struct IGFullscreenVideo: View {
+    let url: String
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Color.black.ignoresSafeArea()
+            IGPlayerControllerView(url: url)
+                .ignoresSafeArea()
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(10)
+                    .background(Color.black.opacity(0.45))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .padding(16)
+            .accessibilityLabel("关闭")
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+private struct IGPlayerControllerView: UIViewControllerRepresentable {
+    let url: String
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        if let target = URL(string: url) {
+            let player = AVPlayer(url: target)
+            controller.player = player
+            player.play()
+        }
+        controller.showsPlaybackControls = true
+        controller.videoGravity = .resizeAspect
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {}
+}
+
+/// 全屏看图：左右翻页 + 双指放大 + 直接存原图。
+struct IGImageGalleryView: View {
+    let images: [String]
+    let caption: String
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var index: Int
+
+    init(images: [String], startIndex: Int, caption: String = "") {
+        self.images = images
+        self.caption = caption
+        let bounded = min(max(startIndex, 0), max(images.count - 1, 0))
+        _index = State(initialValue: bounded)
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            TabView(selection: $index) {
+                ForEach(Array(images.enumerated()), id: \.offset) { offset, url in
+                    IGZoomableImage(url: url)
+                        .tag(offset)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .ignoresSafeArea()
+
+            VStack {
+                HStack {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(10)
+                            .background(Color.black.opacity(0.45))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 0)
+
+                    Button {
+                        save()
+                    } label: {
+                        Image(systemName: "square.and.arrow.down")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(10)
+                            .background(Color.black.opacity(0.45))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+
+                Spacer(minLength: 0)
+
+                if images.count > 1 {
+                    Text("\(index + 1) / \(images.count)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.black.opacity(0.45))
+                        .clipShape(Capsule())
+                        .padding(.bottom, 24)
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func save() {
+        guard images.indices.contains(index) else { return }
+        MediaSaver.shared.saveImages([MediaImageSaveItem(url: images[index])])
+    }
+}
+
+/// 单张可缩放的图。双击在 1x / 2.5x 之间切，捏合到 4x，放大后可拖动。
+struct IGZoomableImage: View {
+    let url: String
+
+    @State private var scale: CGFloat = 1
+    @State private var lastScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+
+    var body: some View {
+        GeometryReader { geometry in
+            AsyncImage(url: URL(string: url)) { phase in
+                if let image = phase.image {
+                    image
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .scaleEffect(scale)
+                        .offset(offset)
+                        .gesture(
+                            MagnificationGesture()
+                                .onChanged { value in
+                                    scale = min(max(lastScale * value, 1), 4)
+                                }
+                                .onEnded { _ in
+                                    lastScale = scale
+                                    if scale <= 1 {
+                                        offset = .zero
+                                        lastOffset = .zero
+                                    }
+                                }
+                        )
+                        .simultaneousGesture(
+                            DragGesture()
+                                .onChanged { value in
+                                    guard scale > 1 else { return }
+                                    offset = CGSize(
+                                        width: lastOffset.width + value.translation.width,
+                                        height: lastOffset.height + value.translation.height
+                                    )
+                                }
+                                .onEnded { _ in
+                                    guard scale > 1 else { return }
+                                    lastOffset = offset
+                                }
+                        )
+                        .onTapGesture(count: 2) {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                scale = scale > 1 ? 1 : 2.5
+                                lastScale = scale
+                                if scale == 1 {
+                                    offset = .zero
+                                    lastOffset = .zero
+                                }
+                            }
+                        }
+                } else if phase.error != nil {
+                    Image(systemName: "photo")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                } else {
+                    ProgressView()
+                        .tint(.white)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                }
+            }
         }
     }
 }

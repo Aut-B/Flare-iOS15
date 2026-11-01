@@ -11,9 +11,12 @@ struct WereadReaderView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var isLoading = true
+    @State private var showHint = true
 
     private var readerURL: String {
-        "https://weread.qq.com/web/reader/\(book.id)"
+        // 网页版阅读器要的是加密过的 bookId；直接拼 `shelf/sync` 里的数字 id
+        // 一定 404。落到网页书架，点封面进去就是真正的阅读页。
+        "https://weread.qq.com/web/shelf"
     }
 
     var body: some View {
@@ -29,6 +32,27 @@ struct WereadReaderView: View {
                         .progressViewStyle(.linear)
                         .frame(maxWidth: .infinity)
                 }
+                if showHint {
+                    HStack(spacing: 8) {
+                        Image(systemName: "book")
+                            .font(.system(size: 11))
+                        Text("已打开网页书架，点《\(book.title)》的封面开始阅读")
+                            .font(.system(size: 11))
+                            .lineLimit(2)
+                        Spacer(minLength: 0)
+                        Button {
+                            showHint = false
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .bold))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial)
+                }
             }
             .navigationTitle(book.title)
             .navigationBarTitleDisplayMode(.inline)
@@ -40,7 +64,7 @@ struct WereadReaderView: View {
                     Menu {
                         if let url = URL(string: readerURL) {
                             Link(destination: url) {
-                                Label("在浏览器里打开", systemImage: "safari")
+                                Label("在浏览器里打开网页书架", systemImage: "safari")
                             }
                         }
                     } label: {

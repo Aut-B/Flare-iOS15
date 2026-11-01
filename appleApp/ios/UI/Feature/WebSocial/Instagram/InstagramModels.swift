@@ -68,6 +68,15 @@ struct IGError: LocalizedError {
         message: "Instagram 登录已失效，请在「Instagram」页面重新登录",
         needLogin: true
     )
+
+    /// 点赞 / 评论这类「写」操作被拒。
+    ///
+    /// 首页还能刷就说明 cookie 是好的，`login_required` 多半是风控或者少了
+    /// 某个头部，这时候**不能**把用户踢回登录页 —— 那只会让能刷的首页也没了。
+    static let interactionDenied = IGError(
+        message: "Instagram 拒绝了这次操作（首页还能刷，说明登录没掉，多半是风控）。稍后再试，或点「网页版」在网页里操作。",
+        needLogin: false
+    )
 }
 
 // MARK: - JSON 解析

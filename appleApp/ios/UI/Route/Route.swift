@@ -286,7 +286,7 @@ enum Route: Hashable, Identifiable {
         case .rssManagement:
             RssScreen()
         case .weread:
-            WereadShelfView()
+            WereadTabView()
         case .instagram:
             InstagramFeedView()
         case .xiaohongshu:

@@ -17,15 +17,62 @@ struct WebPlatformView: View {
     var initialCookie: String = ""
     /// 上面 cookie 属于哪个域名，例如 `xiaohongshu.com`。
     var cookieDomainSuffix: String = ""
+    /// 浏览器工具条（后退 / 前进 / 刷新 / 桌面版）放底部还是收进右上角菜单。
+    /// 嵌在时间线标签里时要收起来，否则会和应用自己的底部栏打架。
+    var showsBrowserBar: Bool = true
+    /// 有些站（微信读书）手机 UA 会被塞「打开 App」引导，直接进桌面版更省事。
+    var startDesktop: Bool = false
+    /// 追加在右上角菜单末尾的一项，用来「切回原生列表 / 书架」。
+    var extraMenuTitle: String? = nil
+    var extraMenuAction: (() -> Void)? = nil
 
     @StateObject private var model = WebPlatformModel()
-    @State private var desktopMode = false
+    @State private var desktopMode: Bool
+
+    init(
+        url: String,
+        title: String,
+        mobileUserAgent: String,
+        desktopUserAgent: String,
+        initialCookie: String = "",
+        cookieDomainSuffix: String = "",
+        showsBrowserBar: Bool = true,
+        startDesktop: Bool = false,
+        extraMenuTitle: String? = nil,
+        extraMenuAction: (() -> Void)? = nil
+    ) {
+        self.url = url
+        self.title = title
+        self.mobileUserAgent = mobileUserAgent
+        self.desktopUserAgent = desktopUserAgent
+        self.initialCookie = initialCookie
+        self.cookieDomainSuffix = cookieDomainSuffix
+        self.showsBrowserBar = showsBrowserBar
+        self.startDesktop = startDesktop
+        self.extraMenuTitle = extraMenuTitle
+        self.extraMenuAction = extraMenuAction
+        _desktopMode = State(initialValue: startDesktop)
+    }
 
     private var userAgent: String {
         desktopMode ? desktopUserAgent : mobileUserAgent
     }
 
     var body: some View {
+        Group {
+            if showsBrowserBar {
+                content.toolbar { bottomBar }
+            } else {
+                content.toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        browserMenu
+                    }
+                }
+            }
+        }
+    }
+
+    private var content: some View {
         WebPlatformWebView(
             url: url,
             userAgent: userAgent,
@@ -42,50 +89,80 @@ struct WebPlatformView: View {
                     .frame(maxWidth: .infinity)
             }
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .bottomBar) {
-                Button {
-                    model.goBack()
-                } label: {
-                    Image(systemName: "chevron.backward")
-                }
-                .disabled(!model.canGoBack)
+    }
 
-                Button {
-                    model.goForward()
-                } label: {
-                    Image(systemName: "chevron.forward")
-                }
-                .disabled(!model.canGoForward)
+    @ToolbarContentBuilder
+    private var bottomBar: some ToolbarContent {
+        ToolbarItemGroup(placement: .bottomBar) {
+            Button {
+                model.goBack()
+            } label: {
+                Image(systemName: "chevron.backward")
+            }
+            .disabled(!model.canGoBack)
 
-                Spacer()
+            Button {
+                model.goForward()
+            } label: {
+                Image(systemName: "chevron.forward")
+            }
+            .disabled(!model.canGoForward)
 
-                Button {
-                    model.reload()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
+            Spacer()
 
-                Spacer()
+            Button {
+                model.reload()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
 
-                Menu {
-                    Button {
-                        desktopMode.toggle()
-                    } label: {
-                        Label(
-                            desktopMode ? "手机版网页" : "桌面版网页",
-                            systemImage: "display"
-                        )
-                    }
-                    Button {
-                        model.openInSafari()
-                    } label: {
-                        Label("在浏览器里打开", systemImage: "safari")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
+            Spacer()
+
+            browserMenu
+        }
+    }
+
+    private var browserMenu: some View {
+        Menu {
+            Button {
+                model.goBack()
+            } label: {
+                Label("后退", systemImage: "chevron.backward")
+            }
+            .disabled(!model.canGoBack)
+            Button {
+                model.goForward()
+            } label: {
+                Label("前进", systemImage: "chevron.forward")
+            }
+            .disabled(!model.canGoForward)
+            Button {
+                model.reload()
+            } label: {
+                Label("刷新", systemImage: "arrow.clockwise")
+            }
+            Divider()
+            Button {
+                desktopMode.toggle()
+            } label: {
+                Label(
+                    desktopMode ? "手机版网页" : "桌面版网页",
+                    systemImage: "display"
+                )
+            }
+            Button {
+                model.openInSafari()
+            } label: {
+                Label("在浏览器里打开", systemImage: "safari")
+            }
+            if let title = extraMenuTitle, let action = extraMenuAction {
+                Divider()
+                Button(action: action) {
+                    Label(title, systemImage: "square.grid.2x2")
                 }
             }
+        } label: {
+            Image(systemName: "ellipsis.circle")
         }
     }
 }

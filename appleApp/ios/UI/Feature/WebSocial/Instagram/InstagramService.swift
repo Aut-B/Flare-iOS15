@@ -170,7 +170,8 @@ final class InstagramService {
         _ = try await request(
             "\(base)/api/v1/web/likes/\(mediaId)/\(action)/",
             method: "POST",
-            formBody: "media_id=\(mediaId)"
+            formBody: "media_id=\(mediaId)",
+            interaction: true
         )
     }
 
@@ -186,7 +187,8 @@ final class InstagramService {
         let json = try await request(
             "\(base)/api/v1/web/comments/add/\(mediaId)/",
             method: "POST",
-            formBody: "comment_text=\(Self.percentEncode(text))"
+            formBody: "comment_text=\(Self.percentEncode(text))",
+            interaction: true
         )
         return IGJSON.comment(json["comment"])
     }
@@ -196,7 +198,10 @@ final class InstagramService {
     private func request(
         _ url: String,
         method: String = "GET",
-        formBody: String? = nil
+        formBody: String? = nil,
+        /// 「写」操作（点赞 / 评论）被拒时不要报「登录失效」：
+        /// 首页还能刷就说明登录是好的，那是风控。
+        interaction: Bool = false
     ) async throws -> [String: Any] {
         guard let target = URL(string: url) else {
             throw IGError(message: "请求地址非法", needLogin: false)
@@ -213,7 +218,11 @@ final class InstagramService {
         urlRequest.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         urlRequest.setValue(appID, forHTTPHeaderField: "X-IG-App-ID")
         urlRequest.setValue(asbdID, forHTTPHeaderField: "X-ASBD-ID")
-        urlRequest.setValue("0", forHTTPHeaderField: "X-IG-WWW-Claim")
+        // 网页版会把这个 claim 带上；缺了的时候点赞容易被当成未登录。
+        urlRequest.setValue(
+            CookieJar.value(inHeader: cookie, named: "x-ig-www-claim") ?? "0",
+            forHTTPHeaderField: "X-IG-WWW-Claim"
+        )
         urlRequest.setValue("1", forHTTPHeaderField: "X-Instagram-AJAX")
         urlRequest.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
         urlRequest.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
@@ -244,20 +253,20 @@ final class InstagramService {
         // 或者被风控拦一下都会 403。先看 body，只有登录页 / login_required
         // 才判定失效，其它 403 交给上层重试 GET。
         if status == 401 {
-            throw IGError.notLoggedIn
+            throw interaction ? IGError.interactionDenied : IGError.notLoggedIn
         }
         // Instagram 出错时也给 JSON，先把 message 捞出来再判断。
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         let message = IGJSON.string(json["message"]) ?? ""
         if message == "login_required" || message == "checkpoint_required" {
-            throw IGError.notLoggedIn
+            throw interaction ? IGError.interactionDenied : IGError.notLoggedIn
         }
         if looksLikeHTML {
             // 只有真的是登录 / 验证码页才算掉登录；其它 HTML 多半是风控页，
             // 不要把用户踢回登录界面。
             let lower = trimmed.lowercased()
             if lower.contains("/accounts/login") || lower.contains("loginform") || lower.contains("checkpoint") {
-                throw IGError.notLoggedIn
+                throw interaction ? IGError.interactionDenied : IGError.notLoggedIn
             }
             throw IGError(
                 message: "Instagram 返回了网页而不是数据（HTTP \(status)），可能被风控拦截，请稍后再试或切换网络",

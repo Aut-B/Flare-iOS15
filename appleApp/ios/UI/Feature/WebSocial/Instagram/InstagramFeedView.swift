@@ -1,6 +1,12 @@
 import SwiftUI
 import UIKit
 
+/// 点帖子里的头像 / 用户名时，用这个包一层用户名给 `sheet(item:)` 用。
+struct IGProfileTarget: Identifiable {
+    let name: String
+    var id: String { name }
+}
+
 /// Instagram 首页。
 ///
 /// 版式照 Instagram 自己的来：头像 + 用户名一行，下面是图（轮播可以左右滑），
@@ -12,6 +18,7 @@ struct InstagramFeedView: View {
     /// 原生接口被风控拦住时的兜底：直接用网页版刷。
     @State private var showWeb = false
     @State private var selected: IGMedia?
+    @State private var profileTarget: IGProfileTarget?
 
     var body: some View {
         Group {
@@ -37,6 +44,11 @@ struct InstagramFeedView: View {
                             showSearch = true
                         } label: {
                             Label("查看用户主页", systemImage: "magnifyingglass")
+                        }
+                        Button {
+                            showWeb = true
+                        } label: {
+                            Label("网页版", systemImage: "safari")
                         }
                         Button(role: .destructive) {
                             store.logout()
@@ -86,6 +98,12 @@ struct InstagramFeedView: View {
             }
             .navigationViewStyle(.stack)
         }
+        .sheet(item: $profileTarget) { target in
+            NavigationView {
+                InstagramProfileView(userName: target.name)
+            }
+            .navigationViewStyle(.stack)
+        }
         .task {
             await store.refreshIfNeeded()
         }
@@ -105,9 +123,11 @@ struct InstagramFeedView: View {
                         banner(message)
                     }
                     ForEach(store.feed) { media in
-                        IGMediaCard(media: media) {
-                            selected = media
-                        }
+                        IGMediaCard(
+                            media: media,
+                            onOpen: { selected = media },
+                            onOpenUser: { profileTarget = IGProfileTarget(name: $0) }
+                        )
                         Divider()
                     }
                     if store.feed.isEmpty {
@@ -223,8 +243,10 @@ struct InstagramFeedView: View {
 
 struct IGMediaCard: View {
     let media: IGMedia
-    /// 点图片 / 用户名 / 评论 / 更多都进详情。
+    /// 点正文 / 评论 / 更多进详情。
     var onOpen: () -> Void = {}
+    /// 点头像 / 用户名进用户主页。
+    var onOpenUser: (String) -> Void = { _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -238,22 +260,32 @@ struct IGMediaCard: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            IGImageView(url: media.user.avatar)
-                .frame(width: 30, height: 30)
-                .clipShape(Circle())
-            VStack(alignment: .leading, spacing: 1) {
-                Text(media.user.userName)
-                    .font(.system(size: 13, weight: .semibold))
-                Text(Self.relative(media.takenAt))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+            // 头像和用户名单独做成按钮：之前整行都挂 `onTapGesture` 进详情，
+            // 想点进作者主页根本没入口。
+            Button {
+                onOpenUser(media.user.userName)
+            } label: {
+                HStack(spacing: 10) {
+                    IGImageView(url: media.user.avatar)
+                        .frame(width: 30, height: 30)
+                        .clipShape(Circle())
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(media.user.userName)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.primary)
+                        Text(Self.relative(media.takenAt))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("打开 \(media.user.userName) 的主页")
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onOpen)
     }
 
     private var footer: some View {
@@ -293,6 +325,7 @@ struct IGMediaCarousel: View {
 
     @State private var index = 0
     @State private var playing = false
+    @State private var showGallery = false
 
     /// 只有「单条视频」才原地播；多图轮播里混的视频进详情看。
     private var canPlayInline: Bool {
@@ -325,6 +358,11 @@ struct IGMediaCarousel: View {
                             IGImageView(url: url)
                                 .frame(width: width, height: height)
                                 .clipped()
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    index = offset
+                                    showGallery = true
+                                }
                                 .tag(offset)
                         }
                     }
@@ -337,7 +375,9 @@ struct IGMediaCarousel: View {
                         .frame(width: width, height: height)
                         .clipped()
                         .contentShape(Rectangle())
-                        .onTapGesture(perform: onOpen)
+                        .onTapGesture {
+                            showGallery = true
+                        }
                 }
 
                 if canPlayInline, !playing {
@@ -363,6 +403,13 @@ struct IGMediaCarousel: View {
             .frame(width: width, height: height)
         }
         .frame(height: estimatedHeight)
+        .fullScreenCover(isPresented: $showGallery) {
+            IGImageGalleryView(
+                images: media.images,
+                startIndex: index,
+                caption: media.caption
+            )
+        }
     }
 
     /// `GeometryReader` 会吃掉高度，所以外面还要按屏幕宽度估一个。

@@ -13,6 +13,10 @@ struct InstagramPostView: View {
     @State private var commentText = ""
     @State private var sending = false
     @State private var commentError: String?
+    @State private var showGallery = false
+    @State private var galleryIndex = 0
+    @State private var profileTarget: IGProfileTarget?
+    @State private var showWeb = false
     @FocusState private var commentFocused: Bool
 
     private var current: IGMedia { detail ?? media }
@@ -52,20 +56,56 @@ struct InstagramPostView: View {
             }
             await loadComments()
         }
+        .sheet(isPresented: $showWeb) {
+            NavigationView {
+                WebPlatformView(
+                    url: current.webURL,
+                    title: "Instagram 网页版",
+                    mobileUserAgent: WebPlatformUserAgent.mobile,
+                    desktopUserAgent: WebPlatformUserAgent.desktop,
+                    initialCookie: InstagramStore.shared.cookie,
+                    cookieDomainSuffix: "instagram.com"
+                )
+            }
+            .navigationViewStyle(.stack)
+        }
+        .sheet(item: $profileTarget) { target in
+            NavigationView {
+                InstagramProfileView(userName: target.name)
+            }
+            .navigationViewStyle(.stack)
+        }
+        .fullScreenCover(isPresented: $showGallery) {
+            IGImageGalleryView(
+                images: current.images,
+                startIndex: galleryIndex,
+                caption: current.caption
+            )
+        }
     }
 
     private var userHeader: some View {
         HStack(spacing: 10) {
-            IGImageView(url: current.user.avatar)
-                .frame(width: 34, height: 34)
-                .clipShape(Circle())
-            VStack(alignment: .leading, spacing: 1) {
-                Text(current.user.userName)
-                    .font(.system(size: 14, weight: .semibold))
-                Text(IGMediaCard.relative(current.takenAt))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+            Button {
+                profileTarget = IGProfileTarget(name: current.user.userName)
+            } label: {
+                HStack(spacing: 10) {
+                    IGImageView(url: current.user.avatar)
+                        .frame(width: 34, height: 34)
+                        .clipShape(Circle())
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(current.user.userName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.primary)
+                        Text(IGMediaCard.relative(current.takenAt))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("打开 \(current.user.userName) 的主页")
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
@@ -81,11 +121,16 @@ struct InstagramPostView: View {
                 .clipped()
         } else {
             VStack(spacing: 2) {
-                ForEach(Array(current.images.enumerated()), id: \.offset) { _, url in
+                ForEach(Array(current.images.enumerated()), id: \.offset) { offset, url in
                     IGImageView(url: url)
                         .aspectRatio(current.aspect, contentMode: .fit)
                         .frame(maxWidth: .infinity)
                         .clipped()
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            galleryIndex = offset
+                            showGallery = true
+                        }
                 }
             }
         }
@@ -120,8 +165,10 @@ struct InstagramPostView: View {
                 Spacer(minLength: 0)
             }
 
-            if comments.isEmpty, !isLoadingComments {
-                Text(commentError ?? "还没有评论，来抢第一条")
+            if let commentError = commentError {
+                actionErrorBanner(commentError)
+            } else if comments.isEmpty, !isLoadingComments {
+                Text("还没有评论，来抢第一条")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -165,6 +212,27 @@ struct InstagramPostView: View {
         .padding(.top, 12)
     }
 
+    /// 点赞 / 评论被风控拦下时的提示条：说清楚「登录没掉」，并给网页版入口。
+    private func actionErrorBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button("网页版") {
+                showWeb = true
+            }
+            .font(.system(size: 12, weight: .semibold))
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
     private func loadComments() async {
         isLoadingComments = true
         commentError = nil
@@ -193,6 +261,7 @@ struct InstagramPostView: View {
                 }
                 IGToast.success("评论已发送")
             } catch {
+                commentError = error.localizedDescription
                 IGToast.error(error.localizedDescription)
             }
             sending = false
