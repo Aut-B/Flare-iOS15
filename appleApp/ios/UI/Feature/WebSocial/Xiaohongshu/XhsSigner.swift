@@ -114,6 +114,160 @@ final class XhsSigner {
         }
     }
 
+    // MARK: - 页面内请求
+
+    /// 页面里跑出来的响应。
+    struct PageResult {
+        let status: Int
+        let text: String
+    }
+
+    /// 让**真正的网页**自己去发请求，我们把响应文本搬回来。
+    ///
+    /// 之前是 Swift 侧用 `URLSession` 发：签名算得没错，但 TLS 指纹、
+    /// `X-S-Common`、`a1` 这些跟真浏览器差太多，服务端一律回 `code -1`。
+    /// 现在请求由页面发出（`credentials: 'include'` 自动带 cookie），
+    /// 我们只负责把 `_webmsxyw` 算出来的 `X-S` / `X-T` 塞进 header。
+    ///
+    /// 注意签名用的是**相对路径 + query**，不是完整 URL —— 站点就是这么算的，
+    /// 多带一个 `https://...` 前缀签名就废了。
+    func pageRequest(
+        path: String,
+        method: String,
+        host: String,
+        query: String? = nil,
+        payload: [String: Any]? = nil,
+        commonHeader: String = ""
+    ) async throws -> PageResult {
+        await MainActor.run {
+            _ = self.ensureWebView()
+        }
+        var lastError: Error = XhsError.signFailed
+        for attempt in 0..<2 {
+            if attempt > 0 {
+                await reloadPage()
+            }
+            do {
+                try await waitUntilReady(timeout: attempt == 0 ? 12 : 10)
+            } catch {
+                lastError = error
+                continue
+            }
+            do {
+                let raw = try await callAsync(
+                    Self.requestScript,
+                    arguments: [
+                        "path": path,
+                        "method": method,
+                        "host": host,
+                        "query": query ?? "",
+                        "payload": payload ?? [:],
+                        "hasPayload": payload != nil,
+                        "common": commonHeader,
+                    ]
+                )
+                guard
+                    let data = raw.data(using: .utf8),
+                    let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                else {
+                    lastError = XhsError.signFailed
+                    continue
+                }
+                let status = (json["status"] as? NSNumber)?.intValue ?? 0
+                let text = (json["text"] as? String) ?? ""
+                // status == 0 且带 `flare:` 前缀 = fetch 本身抛了异常（网络 /
+                // CORS / 页面还没登录）。这种再试一次通常也没用，直接上报。
+                if status == 0, text.hasPrefix("flare:") {
+                    lastError = XhsError(
+                        message: "小红书网页请求失败：\(String(text.dropFirst(6).prefix(120)))",
+                        needLogin: false
+                    )
+                    continue
+                }
+                return PageResult(status: status, text: text)
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError
+    }
+
+    /// 在页面里跑一段 **async** 脚本，返回值统一转成字符串。
+    ///
+    /// `evaluateJavaScript` 不认 Promise（拿到的是 `{}`），所以必须用
+    /// `callAsyncJavaScript`，它会 await 脚本里的 Promise。
+    private func callAsync(_ script: String, arguments: [String: Any]) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.main.async {
+                guard let webView = self.webView else {
+                    continuation.resume(throwing: XhsError.signerUnavailable)
+                    return
+                }
+                webView.callAsyncJavaScript(
+                    script,
+                    arguments: arguments,
+                    in: nil,
+                    in: .page
+                ) { result in
+                    switch result {
+                    case .success(let value):
+                        if let text = value as? String {
+                            continuation.resume(returning: text)
+                        } else if let number = value as? NSNumber {
+                            continuation.resume(returning: number.stringValue)
+                        } else {
+                            continuation.resume(returning: "")
+                        }
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        }
+    }
+
+    /// `callAsyncJavaScript` 的脚本体（会被包进 async function，可以直接 await）。
+    private static let requestScript = """
+    var signPath = path;
+    if (query && query.length > 0) { signPath = path + '?' + query; }
+    var data = hasPayload ? payload : undefined;
+    var xs = '';
+    var xt = '';
+    try {
+      if (typeof window._webmsxyw === 'function') {
+        var sig = window._webmsxyw(signPath, data);
+        if (typeof sig === 'string') {
+          try { sig = JSON.parse(sig); } catch (e) {}
+        }
+        if (sig) {
+          if (Object.prototype.toString.call(sig) === '[object Array]') {
+            xs = String(sig[0] || '');
+            xt = String(sig[1] || '');
+          } else {
+            xs = String(sig['X-s'] || sig['x-s'] || sig['xs'] || sig['X-S'] || '');
+            xt = String(sig['X-t'] || sig['x-t'] || sig['xt'] || sig['X-T'] || '');
+          }
+        }
+      }
+    } catch (e) {}
+    var headers = {
+      'Content-Type': 'application/json;charset=UTF-8',
+      'Accept': 'application/json, text/plain, */*'
+    };
+    if (xs) { headers['X-S'] = xs; }
+    if (xt) { headers['X-T'] = xt; }
+    if (common) { headers['X-S-Common'] = common; }
+    var options = { method: method, headers: headers, credentials: 'include' };
+    if (data !== undefined) { options.body = JSON.stringify(data); }
+    try {
+      var response = await fetch(host + signPath, options);
+      var text = await response.text();
+      return JSON.stringify({ status: response.status, text: text });
+    } catch (e) {
+      return JSON.stringify({ status: 0, text: 'flare:' + String(e) });
+    }
+    """
+
     // MARK: - 页面准备
 
     private func waitUntilReady(timeout: TimeInterval) async throws {

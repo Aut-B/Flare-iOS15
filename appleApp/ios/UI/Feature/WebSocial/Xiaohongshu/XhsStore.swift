@@ -335,6 +335,81 @@ final class XhsStore: ObservableObject {
         }
     }
 
+    // MARK: - 互动
+
+    /// 点赞 / 取消点赞。界面先自己改状态，这里只负责发请求和回写列表。
+    func setLiked(_ note: XhsNote, liked: Bool) async throws {
+        if liked {
+            try await XhsService.shared.like(noteId: note.id)
+        } else {
+            try await XhsService.shared.unlike(noteId: note.id)
+        }
+        DispatchQueue.main.async {
+            if let index = self.notes.firstIndex(where: { $0.id == note.id }) {
+                self.notes[index].liked = liked
+            }
+        }
+    }
+
+    func setCollected(_ note: XhsNote, collected: Bool) async throws {
+        if collected {
+            try await XhsService.shared.collect(noteId: note.id)
+        } else {
+            try await XhsService.shared.uncollect(noteId: note.id)
+        }
+        DispatchQueue.main.async {
+            if let index = self.notes.firstIndex(where: { $0.id == note.id }) {
+                self.notes[index].collected = collected
+            }
+        }
+    }
+
+    // MARK: - 评论
+
+    func comments(note: XhsNote, cursor: String?) async throws -> (items: [XhsComment], next: String?) {
+        try await XhsService.shared.comments(
+            noteId: note.id,
+            xsecToken: note.xsecToken,
+            cursor: cursor
+        )
+    }
+
+    func postComment(note: XhsNote, content: String) async throws -> XhsComment? {
+        let comment = try await XhsService.shared.postComment(noteId: note.id, content: content)
+        DispatchQueue.main.async {
+            if let index = self.notes.firstIndex(where: { $0.id == note.id }) {
+                let current = Int(self.notes[index].commentCount) ?? 0
+                self.notes[index].commentCount = current > 0 ? String(current + 1) : ""
+            }
+        }
+        return comment
+    }
+
+    // MARK: - 用户主页
+
+    func profile(userId: String) async throws -> XhsProfile {
+        try await XhsService.shared.profile(userId: userId)
+    }
+
+    func selfProfile() async throws -> XhsProfile {
+        try await XhsService.shared.selfProfile()
+    }
+
+    func userNotes(userId: String, cursor: String?) async throws -> (notes: [XhsNote], next: String?) {
+        try await XhsService.shared.userNotes(userId: userId, cursor: cursor)
+    }
+
+    /// 把错误翻成一句能显示的话；掉登录就顺手退回登录页。
+    func message(for error: Error) -> String {
+        if let xhs = error as? XhsError {
+            if xhs.needLogin { logout() }
+            return xhs.message
+        }
+        return error.localizedDescription
+    }
+
+    // MARK: - 列表
+
     private func merge(_ batch: [XhsNote]) {
         let known = Set(notes.map { $0.id })
         let fresh = batch.filter { !known.contains($0.id) }
@@ -358,16 +433,27 @@ final class XhsStore: ObservableObject {
         let rawAspect = (item["aspect"] as? NSNumber)?.doubleValue ?? 0.75
         let aspect = CGFloat(min(max(rawAspect, 0.5), 2.0))
         let isVideo = ((item["video"] as? NSNumber)?.intValue ?? 0) != 0
+        // 首页卡片本身不带作者 id 和 xsec_token，缺了这两个：头像点不进主页，
+        // 评论接口会被当成「来源不明」拒掉，详情接口也拿不到多图。
+        // DOM 脚本已经从卡片里的 <a href> 把它们抠出来了。
+        let uid = (item["uid"] as? String) ?? ""
+        let token = (item["token"] as? String) ?? ""
+        var images: [String] = []
+        for value in (item["images"] as? [String]) ?? [] where !value.isEmpty {
+            if !images.contains(value) { images.append(value) }
+        }
+        if images.isEmpty { images = [cover] }
         return XhsNote(
             id: id,
             title: title,
             desc: "",
-            user: XhsUser(id: "", name: author, avatar: (avatar?.isEmpty ?? true) ? nil : avatar),
-            images: [cover],
+            user: XhsUser(id: uid, name: author, avatar: (avatar?.isEmpty ?? true) ? nil : avatar),
+            images: images,
             likedCount: likes,
             isVideo: isVideo,
             aspect: aspect,
-            videoURL: nil
+            videoURL: nil,
+            xsecToken: token
         )
     }
 
@@ -402,6 +488,26 @@ final class XhsStore: ObservableObject {
           }
           return { url: '', aspect: 0 };
         }
+        function imagesOf(card) {
+          var list = card.imageList || card.images || null;
+          var out = [];
+          if (list && list.length) {
+            for (var i = 0; i < list.length && i < 18; i++) {
+              var it = list[i];
+              var u = '';
+              if (it && typeof it === 'object') {
+                u = it.urlDefault || it.urlPre || it.url || it.url_default || '';
+              } else if (typeof it === 'string') {
+                u = it;
+              }
+              if (!u) { continue; }
+              u = String(u);
+              if (u.indexOf('//') === 0) { u = 'https:' + u; }
+              out.push(u);
+            }
+          }
+          return out;
+        }
         function add(card) {
           if (!card || typeof card !== 'object') { return; }
           var id = text(card.noteId || card.note_id || card.id);
@@ -419,10 +525,13 @@ final class XhsStore: ObservableObject {
           out.push({
             id: id,
             cover: cover,
+            images: imagesOf(card),
             title: text(card.displayTitle || card.title || card.desc || ''),
             author: text(user.nickname || user.nickName || user.name || ''),
+            uid: text(user.userId || user.user_id || user.id || ''),
             avatar: text(user.avatar || ''),
             likes: text(interact.likedCount || interact.liked_count || ''),
+            token: text(card.xsecToken || card.xsec_token || ''),
             aspect: aspect,
             video: (text(card.type) === 'video') ? 1 : 0
           });
@@ -464,6 +573,15 @@ final class XhsStore: ObservableObject {
         var m = String(href || '').match(/\\/(?:explore|discovery\\/item)\\/([0-9a-zA-Z]{16,32})/);
         return m ? m[1] : '';
       }
+      function pickToken(href) {
+        var m = String(href || '').match(/[?&]xsec_token=([^&#]+)/);
+        if (!m) { return ''; }
+        try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
+      }
+      function pickUser(href) {
+        var m = String(href || '').match(/\\/user\\/profile\\/([0-9a-zA-Z]+)/);
+        return m ? m[1] : '';
+      }
       function textOf(node) {
         if (!node) { return ''; }
         var t = node.innerText || node.textContent || '';
@@ -489,6 +607,13 @@ final class XhsStore: ObservableObject {
         }
         if (!cover) { continue; }
         if (cover.indexOf('//') === 0) { cover = 'https:' + cover; }
+        var token = pickToken(href);
+        var uid = '';
+        var ua = card.querySelector('a[href*="/user/profile/"]');
+        if (!ua && a.parentElement) {
+          ua = a.parentElement.querySelector('a[href*="/user/profile/"]');
+        }
+        if (ua) { uid = pickUser(abs(ua.getAttribute('href') || ua.href || '')); }
         var title = '';
         var t = card.querySelector('[class*="title"], [class*="desc"]');
         if (t) { title = textOf(t); }
@@ -515,8 +640,10 @@ final class XhsStore: ObservableObject {
           cover: cover,
           title: title,
           author: author,
+          uid: uid,
           avatar: avatar,
           likes: likes,
+          token: token,
           aspect: aspect,
           video: /video/i.test(cls) ? 1 : 0
         });

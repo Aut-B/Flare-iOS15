@@ -3,14 +3,13 @@ import WebKit
 
 /// 微信读书书架（原生）。
 ///
-/// 书单来自 `shelf/sync`；同时后台用一个隐藏网页把线上书架抄一遍，
-/// 补上接口漏掉的书，并记下每本书网页阅读器的真实地址。
-/// 点书直接全屏进阅读器 —— 不再「先进线上书架、再点一次」。
+/// 书单来自 `shelf/sync`（`books` + `archive` + `bookProgress`），同时后台用
+/// 一个隐藏网页把线上书架抄一遍，补上接口漏掉的书，并记下每本书网页阅读器的
+/// 真实地址。点书直接全屏进阅读器 —— 不再「先进线上书架、再点一次」。
 struct WereadShelfView: View {
     @ObservedObject private var store = WereadStore.shared
     @State private var showLogin = false
     @State private var target: WereadReaderTarget?
-    @State private var opening: WereadBook?
 
     private let columns = [GridItem(.adaptive(minimum: 96, maximum: 140), spacing: 16)]
 
@@ -61,34 +60,66 @@ struct WereadShelfView: View {
         .fullScreenCover(item: $target) { item in
             WereadReaderView(target: item)
         }
-        .overlay {
-            if let book = opening {
-                ZStack {
-                    Color.black.opacity(0.35).ignoresSafeArea()
-                    VStack(spacing: 14) {
-                        ProgressView()
-                        Text("正在打开《\(book.title)》…")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(24)
-                    .background(Color(.systemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-            }
-        }
         .task {
             guard store.isLoggedIn else { return }
             if store.books.isEmpty {
                 await store.refreshShelf()
             }
-            // 老版本升级上来的用户书架有、readerLinks 是空的，先补一遍。
-            // 一次启动只跑一次，别每切回标签页就重建隐藏网页。
-            if store.readerLinks.isEmpty {
+            // 老版本升级上来的用户书架有、但「bookId → 阅读器地址」是空的，
+            // 先补一遍。一次启动只跑一次，别每切回标签页就重建隐藏网页。
+            if store.bookLinks.isEmpty {
                 store.syncWebShelfIfNeeded()
             }
         }
     }
+
+    // MARK: - 排序与分组
+
+    /// 按最近阅读倒序。`updatedAt` 全是 0 的老数据保持接口原顺序，
+    /// 免得「一升级顺序全乱」。
+    private var sortedBooks: [WereadBook] {
+        store.books
+            .enumerated()
+            .sorted { left, right in
+                if left.element.updatedAt == right.element.updatedAt {
+                    return left.offset < right.offset
+                }
+                return left.element.updatedAt > right.element.updatedAt
+            }
+            .map { $0.element }
+    }
+
+    /// 线上书架的分组（`shelf/sync` 里的 `bookGroups`）。
+    /// 一个分组都认不出来就平铺，不硬造「最近阅读 / 全部」这种假分组。
+    private var shelfSections: [ShelfSection] {
+        let sorted = sortedBooks
+        var order: [String] = []
+        var buckets: [String: [WereadBook]] = [:]
+        for book in sorted where !book.group.isEmpty {
+            if buckets[book.group] == nil { order.append(book.group) }
+            buckets[book.group, default: []].append(book)
+        }
+        var result = order.map { name in
+            ShelfSection(id: name, title: name, books: buckets[name] ?? [])
+        }
+        let ungrouped = sorted.filter { $0.group.isEmpty }
+        if !ungrouped.isEmpty {
+            if result.isEmpty {
+                result = [ShelfSection(id: "__all__", title: "", books: ungrouped)]
+            } else {
+                result.append(ShelfSection(id: "__ungrouped__", title: "未分组", books: ungrouped))
+            }
+        }
+        return result
+    }
+
+    private struct ShelfSection: Identifiable {
+        let id: String
+        let title: String
+        let books: [WereadBook]
+    }
+
+    // MARK: - 书架
 
     private var shelf: some View {
         ScrollView {
@@ -110,17 +141,23 @@ struct WereadShelfView: View {
                 }
                 .padding(32)
             } else {
-                LazyVGrid(columns: columns, spacing: 18) {
-                    ForEach(store.books) { book in
-                        Button {
-                            open(book)
-                        } label: {
-                            bookCell(book)
+                if shelfSections.count <= 1 {
+                    grid(flatBooks)
+                        .padding(.vertical, 16)
+                } else {
+                    VStack(alignment: .leading, spacing: 20) {
+                        ForEach(shelfSections) { section in
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text(section.title)
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                    .padding(.horizontal, 16)
+                                grid(section.books)
+                            }
                         }
-                        .buttonStyle(.plain)
                     }
+                    .padding(.vertical, 16)
                 }
-                .padding(16)
             }
         }
         .background(Color(.systemGroupedBackground))
@@ -129,30 +166,45 @@ struct WereadShelfView: View {
         }
     }
 
-    private func open(_ book: WereadBook) {
-        if let url = store.readerLink(for: book) {
-            target = WereadReaderTarget(url: url, title: book.title, needsJump: false)
-            return
-        }
-        // 还没抄到地址：不要直接把用户扔进网页书架。先在原生界面盖一层
-        // 「正在打开」，后台跑网页书架把这本书的 reader hash 找出来，
-        // 找到就直接进阅读器；实在找不到才退回「网页书架 + 自动点开」。
-        opening = book
-        Task {
-            let url = await store.resolveReaderLink(for: book)
-            await MainActor.run {
-                opening = nil
-                if let url = url {
-                    target = WereadReaderTarget(url: url, title: book.title, needsJump: false)
-                } else {
-                    target = WereadReaderTarget(
-                        url: "https://weread.qq.com/web/shelf",
-                        title: book.title,
-                        needsJump: true
-                    )
+    /// 认不出分组时的平铺列表（已经按最近阅读排好）。
+    private var flatBooks: [WereadBook] {
+        shelfSections.first?.books ?? []
+    }
+
+    private func grid(_ books: [WereadBook]) -> some View {
+        LazyVGrid(columns: columns, spacing: 18) {
+            ForEach(books) { book in
+                Button {
+                    open(book)
+                } label: {
+                    bookCell(book)
                 }
+                .buttonStyle(.plain)
             }
         }
+        .padding(.horizontal, 16)
+    }
+
+    /// 点书立刻进阅读器。
+    ///
+    /// 有缓存地址（按 bookId 记的）就直接秒开；没有就打开网页书架，
+    /// 用 `data-book-id` 精确点中这本，点到之后把真地址记下来，下次秒开。
+    private func open(_ book: WereadBook) {
+        if let url = store.readerLink(for: book) {
+            target = WereadReaderTarget(
+                url: url,
+                title: book.title,
+                bookId: book.id,
+                needsJump: false
+            )
+            return
+        }
+        target = WereadReaderTarget(
+            url: "https://weread.qq.com/web/shelf",
+            title: book.title,
+            bookId: book.id,
+            needsJump: true
+        )
     }
 
     private func bookCell(_ book: WereadBook) -> some View {

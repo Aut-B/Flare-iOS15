@@ -10,6 +10,8 @@ struct XhsFeedView: View {
     @ObservedObject private var store = XhsStore.shared
     @State private var showLogin = false
     @State private var selected: XhsNote?
+    @State private var userTarget: XhsUserTarget?
+    @State private var actionError: String?
 
     var body: some View {
         Group {
@@ -39,6 +41,12 @@ struct XhsFeedView: View {
                             Task { await store.refresh() }
                         } label: {
                             Label("刷新", systemImage: "arrow.clockwise")
+                        }
+                        Button {
+                            // 空 id = 先调 selfinfo 拿自己的 id，再看自己的笔记。
+                            userTarget = XhsUserTarget(id: "", name: "我的主页")
+                        } label: {
+                            Label("我的主页", systemImage: "person.circle")
                         }
                         Button(role: .destructive) {
                             store.logout()
@@ -75,6 +83,23 @@ struct XhsFeedView: View {
                 XhsNoteView(note: note)
             }
             .navigationViewStyle(.stack)
+        }
+        .sheet(item: $userTarget) { target in
+            NavigationView {
+                XhsUserView(userId: target.id, name: target.name, showsClose: true)
+            }
+            .navigationViewStyle(.stack)
+        }
+        .alert(
+            "提示",
+            isPresented: Binding(
+                get: { actionError != nil },
+                set: { if !$0 { actionError = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) { actionError = nil }
+        } message: {
+            Text(actionError ?? "")
         }
         .task {
             await store.refreshIfNeeded()
@@ -139,15 +164,32 @@ struct XhsFeedView: View {
     private func column(_ bucket: [XhsNote]) -> some View {
         LazyVStack(spacing: 10) {
             ForEach(bucket) { note in
-                Button {
-                    selected = note
-                } label: {
-                    XhsNoteCard(note: note)
-                }
-                .buttonStyle(.plain)
+                XhsNoteCard(
+                    note: note,
+                    onOpen: { selected = note },
+                    onUser: {
+                        guard !note.user.id.isEmpty else { return }
+                        userTarget = XhsUserTarget(id: note.user.id, name: note.user.name)
+                    },
+                    onLike: { toggleLike(note) }
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    /// 卡片上的心：先乐观地翻状态，失败再翻回来并提示。
+    private func toggleLike(_ note: XhsNote) {
+        let next = !note.liked
+        Task {
+            do {
+                try await store.setLiked(note, liked: next)
+            } catch {
+                await MainActor.run {
+                    actionError = store.message(for: error)
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -225,6 +267,12 @@ struct XhsFeedView: View {
 
 struct XhsNoteCard: View {
     let note: XhsNote
+    /// 点整张卡：进笔记详情。
+    var onOpen: () -> Void = {}
+    /// 点头像 / 昵称：进这个人的主页。
+    var onUser: () -> Void = {}
+    /// 点右下角的心：直接点赞，不用先进详情。
+    var onLike: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -253,23 +301,52 @@ struct XhsNoteCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            HStack(spacing: 4) {
-                XhsImageView(url: note.user.avatar)
-                    .frame(width: 14, height: 14)
-                    .clipShape(Circle())
-                Text(note.user.name)
-                    .font(.system(size: 11))
-                    .lineLimit(1)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                if !note.likedCount.isEmpty {
-                    Label(note.likedCount, systemImage: "heart")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .labelStyle(.titleAndIcon)
+            HStack(spacing: 6) {
+                Button(action: onUser) {
+                    HStack(spacing: 4) {
+                        XhsImageView(url: note.user.avatar)
+                            .frame(width: 14, height: 14)
+                            .clipShape(Circle())
+                        Text(note.user.name.isEmpty ? "小红书用户" : note.user.name)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .disabled(note.user.id.isEmpty)
+
+                Spacer(minLength: 0)
+
+                if !note.commentCount.isEmpty {
+                    HStack(spacing: 3) {
+                        Image(systemName: "bubble.right")
+                            .font(.system(size: 10))
+                        Text(note.commentCount)
+                            .font(.system(size: 10))
+                    }
+                    .foregroundStyle(.secondary)
+                }
+
+                Button(action: onLike) {
+                    HStack(spacing: 3) {
+                        Image(systemName: note.liked ? "heart.fill" : "heart")
+                            .font(.system(size: 11))
+                        if !note.likedCount.isEmpty {
+                            Text(note.likedCount)
+                                .font(.system(size: 10))
+                        }
+                    }
+                    .foregroundStyle(note.liked ? Color.red : Color.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
+        // 整卡可点。子按钮（头像、心）优先级更高，不会被打断。
+        .contentShape(Rectangle())
+        .onTapGesture { onOpen() }
     }
 }
 
@@ -332,17 +409,25 @@ final class XhsImageCache {
 }
 
 /// 带缓存的图片视图，失败和加载中统一灰底。
+/// `fit == true` 时按完整图片显示（详情页 / 全屏看图），否则铺满裁切（瀑布流封面）。
 struct XhsImageView: View {
     let url: String?
+    var fit: Bool = false
 
     @State private var image: UIImage?
 
     var body: some View {
         Group {
             if let image = image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
+                if fit {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                }
             } else {
                 Rectangle()
                     .fill(Color(.tertiarySystemFill))

@@ -19,16 +19,19 @@ final class WereadStore: ObservableObject {
     @Published private(set) var isLoading = false
     /// 书名 → 网页阅读器地址（`/web/reader/<hash>`）。
     ///
-    /// 没抄到也不要紧：hash 其实就是 bookId 过一遍 `WereadCrypto.calcHash`，
-    /// 见 `readerLink(for:)`。这张表只是网页里看到的真实地址缓存，
-    /// 用来纠正极少数拼不出来的书。
+    /// 这张表只存**真在网页里打开过**的地址：`readerLink(for:)` 拼出来的
+    /// 地址不会写进来，避免一次拼错就永久错下去。
     @Published private(set) var readerLinks: [String: String] = [:]
+    /// bookId → 阅读器地址。书名会重名、会带副标题，用 id 记最稳，
+    /// 点书时先认这张表，认不到才去看书名。
+    @Published private(set) var bookLinks: [String: String] = [:]
     @Published var errorMessage: String?
 
     private let defaults = UserDefaults.standard
     private let cookieKey = "weread.cookie"
     private let nameKey = "weread.nickname"
     private let linksKey = "weread.readerLinks"
+    private let linksByIdKey = "weread.readerLinksById"
 
     private var harvester: WebPageHarvester?
     private var harvesting = false
@@ -42,6 +45,7 @@ final class WereadStore: ObservableObject {
         isLoggedIn = Self.looksLoggedIn(cookie)
         nickname = defaults.string(forKey: nameKey) ?? ""
         readerLinks = defaults.dictionary(forKey: linksKey) as? [String: String] ?? [:]
+        bookLinks = defaults.dictionary(forKey: linksByIdKey) as? [String: String] ?? [:]
     }
 
     var cookie: String {
@@ -121,6 +125,7 @@ final class WereadStore: ObservableObject {
             self.nickname = ""
             self.books = []
             self.readerLinks = [:]
+            self.bookLinks = [:]
         }
     }
 
@@ -133,6 +138,7 @@ final class WereadStore: ObservableObject {
             self.nickname = ""
             self.books = []
             self.readerLinks = [:]
+            self.bookLinks = [:]
             self.errorMessage = WereadError.notLoggedIn.errorDescription
         }
     }
@@ -221,9 +227,11 @@ final class WereadStore: ObservableObject {
         syncWebShelf()
     }
 
-    /// 点书时调用：有缓存就秒开；没有就现场跑一遍网页书架，最多等 15 秒。
-    /// 这样用户看到的是原生的「正在打开」，而不是先跳进网页书架。
-    func resolveReaderLink(for book: WereadBook, timeout: TimeInterval = 15) async -> String? {
+    /// 点书时调用：有缓存就秒开；没有就现场跑一遍网页书架，最多等 8 秒。
+    ///
+    /// 8 秒是上限不是常态：书架页在 6s 这种老机器上要两三秒才铺完，
+    /// 等太久用户只会觉得「卡住了」。等不到就交给调用方直接进网页书架。
+    func resolveReaderLink(for book: WereadBook, timeout: TimeInterval = 8) async -> String? {
         if let url = await linkOnMain(for: book) { return url }
         let alreadyHarvesting = await MainActor.run { self.harvesting }
         if !alreadyHarvesting {
@@ -247,24 +255,31 @@ final class WereadStore: ObservableObject {
 
     /// 网页阅读器地址。书名对不上时返回 nil，调用方退回「网页书架 + 自动点开」。
     func readerLink(for book: WereadBook) -> String? {
+        if !book.id.isEmpty, let url = bookLinks[book.id], !url.isEmpty { return url }
         let key = Self.normalize(book.title)
         if let url = readerLinks[key], !url.isEmpty { return url }
-        // 兜底：网页阅读器的 hash 就是 bookId 过一遍站点的 id 混淆算法
-        // （`WereadCrypto.calcHash`，章节接口里的 `b` 字段用的也是它）。
-        // 之前不知道这一点，只能等隐藏网页把书架铺完再抄链接，点一本书
-        // 要干等十几秒 —— 用户看到的「点进去先加载半天」就是这个。
-        guard !book.id.isEmpty else { return nil }
-        return "https://weread.qq.com/web/reader/\(WereadCrypto.calcHash(book.id))"
+        // 不再用 `calcHash` 拼地址：那是章节接口里的 `b` 参数，
+        // 跟阅读器地址里的 hash 不是一回事，拼出来大概率 404，
+        // 表现就是「点进去转半天，最后掉回网页书架」。
+        // 没有真地址就交给调用方走「网页书架 + 按 bookId 点开」。
+        return nil
     }
 
     /// 阅读器里真正跳成功以后把地址记下来，下次点这本书就是秒开。
     ///
     /// 有些书的链接不在书架的 DOM 里（懒渲染、分组折叠），第一次只能靠
     /// 「网页书架 + 自动点开」，这条兜底让第二次不用再绕。
-    func rememberReaderLink(title: String, url: String) {
-        guard !title.isEmpty, url.contains("/web/reader/") else { return }
+    func rememberReaderLink(bookId: String, title: String, url: String) {
+        guard url.contains("/web/reader/") else { return }
+        if !bookId.isEmpty, bookLinks[bookId] != url {
+            var merged = bookLinks
+            merged[bookId] = url
+            bookLinks = merged
+            defaults.set(merged, forKey: linksByIdKey)
+        }
+        guard !title.isEmpty else { return }
         let key = Self.normalize(title)
-        if readerLinks[key] == url { return }
+        guard readerLinks[key] != url else { return }
         var merged = readerLinks
         merged[key] = url
         readerLinks = merged
@@ -296,18 +311,22 @@ final class WereadStore: ObservableObject {
             if (!href) { continue; }
             var title = '';
             var node = a;
-            for (var d = 0; d < 5 && node; d++) {
+            var bookId = '';
+            for (var d = 0; d < 6 && node; d++) {
+              if (!bookId && node.getAttribute) {
+                bookId = node.getAttribute('data-book-id') || node.getAttribute('data-bookid') || '';
+              }
               var attr = (node.getAttribute && node.getAttribute('title')) || '';
               if (!attr && node.querySelector) {
                 var cand = node.querySelector('[class*="title"], [class*="name"]');
                 if (cand) { attr = cand.textContent || ''; }
               }
               attr = String(attr || '').replace(/\\s+/g, ' ').trim();
-              if (attr.length > 0 && attr.length < 80) { title = attr; break; }
+              if (!title && attr.length > 0 && attr.length < 80) { title = attr; }
               node = node.parentElement;
             }
-            if (!title) { continue; }
-            out.push({title: title, href: href});
+            if (!title && !bookId) { continue; }
+            out.push({title: title, href: href, bookId: bookId});
           }
           return JSON.stringify(out);
         })()
@@ -320,20 +339,22 @@ final class WereadStore: ObservableObject {
             else {
                 return
             }
-            var merged = self.readerLinks
+            var byTitle = self.readerLinks
+            var byId = self.bookLinks
             for item in list {
-                guard
-                    let title = item["title"] as? String,
-                    let href = item["href"] as? String,
-                    !href.isEmpty
-                else {
-                    continue
-                }
-                merged[Self.normalize(title)] = href
+                guard let href = item["href"] as? String, !href.isEmpty else { continue }
+                let bookId = (item["bookId"] as? String) ?? ""
+                let title = (item["title"] as? String) ?? ""
+                if !bookId.isEmpty { byId[bookId] = href }
+                if !title.isEmpty { byTitle[Self.normalize(title)] = href }
             }
-            if merged.count != self.readerLinks.count {
-                self.readerLinks = merged
-                self.defaults.set(merged, forKey: self.linksKey)
+            if byId.count != self.bookLinks.count {
+                self.bookLinks = byId
+                self.defaults.set(byId, forKey: self.linksByIdKey)
+            }
+            if byTitle.count != self.readerLinks.count {
+                self.readerLinks = byTitle
+                self.defaults.set(byTitle, forKey: self.linksKey)
             }
         }
     }

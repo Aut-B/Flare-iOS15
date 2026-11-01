@@ -69,14 +69,94 @@ final class WereadService: @unchecked Sendable {
         // 用户会觉得「书架没还原全」。
         let books = json["books"] as? [[String: Any]] ?? []
         let archive = json["archive"] as? [[String: Any]] ?? []
+        let groups = groupMap(json)
+        let progress = progressMap(json)
         var seen = Set<String>()
         var result: [WereadBook] = []
         for item in books + archive {
-            guard let book = parseBook(item), !seen.contains(book.id) else { continue }
+            guard var book = parseBook(item), !seen.contains(book.id) else { continue }
             seen.insert(book.id)
+            if let name = groups[book.id] { book.group = name }
+            // `books` 里往往没有进度，进度和时间戳在 `bookProgress` 里。
+            if let extra = progress[book.id] {
+                if extra.percent > book.progress { book.progress = extra.percent }
+                if extra.updatedAt > book.updatedAt { book.updatedAt = extra.updatedAt }
+            }
             result.append(book)
         }
         return result
+    }
+
+    /// 书架分组的「书 → 分组名」映射。
+    ///
+    /// 网页书架的分组在 `shelf/sync` 里叫 `bookGroups`，不同版本还见过
+    /// `book_groups` / `groups`，组内书目又可能是 `bookIds` / `book_ids` / `books`
+    /// 三种写法（字符串数组或对象数组）。全都试一遍，认不出来就当没分组。
+    private func groupMap(_ json: [String: Any]) -> [String: String] {
+        var map: [String: String] = [:]
+        var containers: [[String: Any]] = []
+        for key in ["bookGroups", "book_groups", "groups"] {
+            if let list = json[key] as? [[String: Any]] {
+                containers.append(contentsOf: list)
+            }
+        }
+        for group in containers {
+            let name =
+                (group["title"] as? String)
+                ?? (group["name"] as? String)
+                ?? ""
+            guard !name.isEmpty else { continue }
+            var ids: [String] = []
+            for key in ["bookIds", "book_ids", "books"] {
+                if let list = group[key] as? [String] {
+                    ids.append(contentsOf: list)
+                } else if let list = group[key] as? [[String: Any]] {
+                    for item in list {
+                        if let id = item["bookId"] as? String {
+                            ids.append(id)
+                        } else if let number = item["bookId"] as? NSNumber {
+                            ids.append(number.stringValue)
+                        }
+                    }
+                }
+            }
+            for id in ids where !id.isEmpty {
+                if map[id] == nil { map[id] = name }
+            }
+        }
+        return map
+    }
+
+    /// 每本书的阅读进度与最近阅读时间。
+    ///
+    /// `shelf/sync` 把书的信息和阅读进度分成两份：`books` 只有书本身，
+    /// 进度、`updateTime` 全在 `bookProgress` 里。只读 `books` 的话书架
+    /// 既没有进度百分比，也没法按「最近阅读」排序 —— 用户看到的顺序
+    /// 就是接口给的原始顺序。
+    private func progressMap(
+        _ json: [String: Any]
+    ) -> [String: (percent: Int, updatedAt: TimeInterval)] {
+        var map: [String: (percent: Int, updatedAt: TimeInterval)] = [:]
+        var containers: [[String: Any]] = []
+        for key in ["bookProgress", "book_progress"] {
+            if let list = json[key] as? [[String: Any]] {
+                containers.append(contentsOf: list)
+            }
+        }
+        for item in containers {
+            let id =
+                (item["bookId"] as? String)
+                ?? (item["bookId"] as? NSNumber)?.stringValue
+            guard let bookId = id, !bookId.isEmpty else { continue }
+            let percent = min(max(intValue(item["progress"]) ?? 0, 0), 100)
+            var stamp = TimeInterval(max(intValue(item["updateTime"]) ?? 0, 0))
+            if stamp == 0 {
+                stamp = TimeInterval(max(intValue(item["readUpdateTime"]) ?? 0, 0))
+            }
+            if stamp > 10_000_000_000 { stamp /= 1000 }
+            map[bookId] = (percent, stamp)
+        }
+        return map
     }
 
     // MARK: - 目录
@@ -291,13 +371,29 @@ final class WereadService: @unchecked Sendable {
         } else {
             percent = 0
         }
+        // 最近阅读时间：`readUpdateTime` 是书架级的，`progress[].updateTime`
+        // 是每本书自己的；有的一版只给毫秒，所以大于 1e10 就除 1000。
+        var stamp = intValue(item["readUpdateTime"]) ?? 0
+        if stamp == 0, let list = item["progress"] as? [[String: Any]] {
+            stamp = intValue(list.first?["updateTime"]) ?? 0
+        }
+        if stamp == 0, let dict = item["progress"] as? [String: Any] {
+            stamp = intValue(dict["updateTime"]) ?? 0
+        }
+        if stamp == 0 {
+            stamp = intValue(item["updateTime"]) ?? 0
+        }
+        var updated = TimeInterval(max(stamp, 0))
+        if updated > 10_000_000_000 { updated /= 1000 }
+
         return WereadBook(
             id: bookId,
             title: item["title"] as? String ?? "",
             author: item["author"] as? String ?? "",
             cover: item["cover"] as? String,
             progress: min(max(percent, 0), 100),
-            finished: (intValue(item["finishReading"]) ?? 0) == 1
+            finished: (intValue(item["finishReading"]) ?? 0) == 1,
+            updatedAt: updated
         )
     }
 

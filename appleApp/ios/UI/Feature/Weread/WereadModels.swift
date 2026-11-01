@@ -7,8 +7,14 @@ struct WereadBook: Identifiable, Hashable {
     let author: String
     let cover: String?
     /// 0-100，接口给的是 0-100 的整数，没读过是 0。
-    let progress: Int
+    /// 书架里 books 和 bookProgress 是两份数据，合并时会被改写。
+    var progress: Int
     let finished: Bool
+    /// 最近阅读时间（秒级时间戳），0 = 从没打开过。
+    /// 书架默认就按这个倒序排 —— 网页版也是「最近读过」在最前面。
+    var updatedAt: TimeInterval = 0
+    /// 网页书架上的分组名（「默认分组」「想读」这些），空串 = 没分组。
+    var group: String = ""
 }
 
 /// 目录里的一章。

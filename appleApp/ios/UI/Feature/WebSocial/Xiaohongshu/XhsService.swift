@@ -5,30 +5,24 @@ import Foundation
 /// 域名是 `edith.xiaohongshu.com`，每个请求都要 `X-S` / `X-T` / `X-S-Common`。
 /// 前两个由隐藏网页里的 `_webmsxyw` 算（见 `XhsSigner`），`X-S-Common` 是一段
 /// base64 过的设备信息，本地拼就行。
+///
+/// 请求本身也交给那个网页去发（`XhsSigner.pageRequest`）：从 `URLSession` 发
+/// 出去，签名再对也会被判 `code -1`，因为 TLS 指纹和浏览器不是一回事。
 final class XhsService {
     static let shared = XhsService()
 
-    private let session: URLSession
     private let host = "https://edith.xiaohongshu.com"
-    private let referer = "https://www.xiaohongshu.com/"
 
     /// 由 `XhsStore` 每次请求前写入。
     var cookie: String = ""
 
-    private init() {
-        let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 25
-        configuration.timeoutIntervalForResource = 45
-        configuration.httpShouldSetCookies = false
-        configuration.httpCookieAcceptPolicy = .never
-        session = URLSession(configuration: configuration)
-    }
+    private init() {}
 
     // MARK: - 首页
 
     /// `follow == true` 时取关注流，否则是推荐流。
     func homeFeed(cursor: String?, follow: Bool) async throws -> (notes: [XhsNote], next: String?) {
-        var payload: [String: Any] = [
+        let payload: [String: Any] = [
             "cursor_score": cursor ?? "",
             "num": 20,
             "refresh_type": 1,
@@ -42,9 +36,6 @@ final class XhsService {
             "image_formats": ["jpg", "webp", "avif"],
             "need_filter_image": false,
         ]
-        if cursor == nil {
-            payload["refresh_type"] = 1
-        }
 
         let json = try await post("/api/sns/web/v1/homefeed", payload: payload)
         let data = XhsJSON.object(json["data"]) ?? [:]
@@ -60,12 +51,16 @@ final class XhsService {
 
     // MARK: - 笔记详情
 
-    func note(id: String) async throws -> XhsNote {
-        let payload: [String: Any] = [
+    func note(id: String, xsecToken: String = "") async throws -> XhsNote {
+        var payload: [String: Any] = [
             "source_note_id": id,
             "image_formats": ["jpg", "webp", "avif"],
             "extra": ["need_body_topic": "1"],
         ]
+        if !xsecToken.isEmpty {
+            payload["xsec_token"] = xsecToken
+            payload["xsec_source"] = "pc_feed"
+        }
         let json = try await post("/api/sns/web/v1/feed", payload: payload)
         let data = XhsJSON.object(json["data"]) ?? [:]
         guard let note = XhsJSON.array(data["items"]).compactMap({ XhsJSON.note($0) }).first else {
@@ -74,80 +69,187 @@ final class XhsService {
         return note
     }
 
-    // MARK: - 用户笔记
+    // MARK: - 互动
 
-    func userNotes(userId: String, cursor: String?) async throws -> (notes: [XhsNote], next: String?) {
-        let payload: [String: Any] = [
-            "num": 30,
-            "cursor": cursor ?? "",
-            "user_id": userId,
-            "image_formats": ["jpg", "webp", "avif"],
+    /// 点赞 / 取消点赞。网页版这两个接口要的是 `note_oid`（收藏才是
+    /// `note_id`），两个都带上，省得再猜一次。
+    func like(noteId: String) async throws {
+        _ = try await post("/api/sns/web/v1/note/like", payload: Self.noteKeys(noteId))
+    }
+
+    func unlike(noteId: String) async throws {
+        _ = try await post("/api/sns/web/v1/note/unlike", payload: Self.noteKeys(noteId))
+    }
+
+    func collect(noteId: String) async throws {
+        _ = try await post("/api/sns/web/v1/note/collect", payload: Self.noteKeys(noteId))
+    }
+
+    func uncollect(noteId: String) async throws {
+        _ = try await post("/api/sns/web/v1/note/uncollect", payload: Self.noteKeys(noteId))
+    }
+
+    private static func noteKeys(_ noteId: String) -> [String: Any] {
+        ["note_id": noteId, "note_oid": noteId]
+    }
+
+    // MARK: - 评论
+
+    func comments(
+        noteId: String,
+        xsecToken: String,
+        cursor: String?
+    ) async throws -> (items: [XhsComment], next: String?) {
+        var parts = [
+            "note_id=" + Self.encode(noteId),
+            "cursor=" + Self.encode(cursor ?? ""),
+            "top_comment_id=",
+            "image_formats=jpg,webp,avif",
         ]
-        let json = try await post("/api/sns/web/v1/user_posted", payload: payload)
+        if !xsecToken.isEmpty {
+            parts.append("xsec_token=" + Self.encode(xsecToken))
+        }
+        let json = try await get(
+            "/api/sns/web/v2/comment/page",
+            query: parts.joined(separator: "&")
+        )
+        let data = XhsJSON.object(json["data"]) ?? [:]
+        let items = XhsJSON.array(data["comments"]).compactMap { XhsJSON.comment($0) }
+        return (items, XhsJSON.string(data["cursor"]))
+    }
+
+    @discardableResult
+    func postComment(noteId: String, content: String) async throws -> XhsComment? {
+        let json = try await post(
+            "/api/sns/web/v1/comment/post",
+            payload: [
+                "note_id": noteId,
+                "content": content,
+                "at_users": [String](),
+            ]
+        )
+        let data = XhsJSON.object(json["data"]) ?? [:]
+        return XhsJSON.comment(data["comment"])
+    }
+
+    // MARK: - 用户
+
+    /// 某个用户公开的笔记。网页版是 GET + query，老版本也见过 POST，
+    /// 两种都试一遍，免得一个接口改版就整页空白。
+    func userNotes(userId: String, cursor: String?) async throws -> (notes: [XhsNote], next: String?) {
+        let query = [
+            "num=30",
+            "cursor=" + Self.encode(cursor ?? ""),
+            "user_id=" + Self.encode(userId),
+            "image_formats=jpg,webp,avif",
+        ].joined(separator: "&")
+        let json: [String: Any]
+        do {
+            json = try await get("/api/sns/web/v1/user_posted", query: query)
+        } catch {
+            json = try await post(
+                "/api/sns/web/v1/user_posted",
+                payload: [
+                    "num": 30,
+                    "cursor": cursor ?? "",
+                    "user_id": userId,
+                    "image_formats": ["jpg", "webp", "avif"],
+                ]
+            )
+        }
         let data = XhsJSON.object(json["data"]) ?? [:]
         let notes = XhsJSON.array(data["notes"]).compactMap { XhsJSON.note($0) }
         return (notes, XhsJSON.string(data["cursor"]))
     }
 
+    func profile(userId: String) async throws -> XhsProfile {
+        let json = try await get(
+            "/api/sns/web/v1/user/otherinfo",
+            query: "target_user_id=" + Self.encode(userId)
+        )
+        let data = XhsJSON.object(json["data"]) ?? json
+        guard let profile = XhsJSON.profile(data) else {
+            throw XhsError(message: "没拿到用户资料，稍后重试", needLogin: false)
+        }
+        return profile
+    }
+
+    func selfProfile() async throws -> XhsProfile {
+        let json = try await get("/api/sns/web/v1/user/selfinfo", query: nil)
+        let data = XhsJSON.object(json["data"]) ?? json
+        guard let profile = XhsJSON.profile(data) else {
+            throw XhsError(message: "没拿到账号资料，稍后重试", needLogin: false)
+        }
+        return profile
+    }
+
     // MARK: - 底层
 
     private func post(_ path: String, payload: [String: Any]) async throws -> [String: Any] {
-        let signature: XhsSigner.Signature
-        do {
-            signature = try await XhsSigner.shared.sign(path: path, payload: payload)
-        } catch {
-            // 签名页偶尔会停在「脚本在、算不出来」的状态。重载一次再算，
-            // 比直接把「签名没拿到」丢给用户要好。
-            XhsSigner.shared.reset()
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
-            signature = try await XhsSigner.shared.sign(path: path, payload: payload)
-        }
+        try await send(path: path, method: "POST", query: nil, payload: payload)
+    }
 
-        guard let url = URL(string: host + path) else {
-            throw XhsError(message: "请求地址非法", needLogin: false)
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = signature.body.data(using: .utf8)
-        request.setValue("application/json;charset=UTF-8", forHTTPHeaderField: "Content-Type")
-        request.setValue(XhsSigner.desktopUserAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue(referer, forHTTPHeaderField: "Origin")
-        request.setValue(referer, forHTTPHeaderField: "Referer")
-        request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
-        request.setValue(signature.xs, forHTTPHeaderField: "X-S")
-        request.setValue(signature.xt, forHTTPHeaderField: "X-T")
-        let common = commonHeader()
-        if !common.isEmpty {
-            request.setValue(common, forHTTPHeaderField: "X-S-Common")
-        }
-        if !cookie.isEmpty {
-            request.setValue(cookie, forHTTPHeaderField: "Cookie")
-        }
+    private func get(_ path: String, query: String?) async throws -> [String: Any] {
+        try await send(path: path, method: "GET", query: query, payload: nil)
+    }
 
-        let (data, response) = try await session.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        // 401 才是明确的未登录。403 多数是签名 / 风控，直接当掉登录会把
-        // 用户踢回登录页；先看 body，只有接口明确说未登录才算失效。
-        if status == 401 {
-            throw XhsError.notLoggedIn
-        }
-        if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+    private func send(
+        path: String,
+        method: String,
+        query: String?,
+        payload: [String: Any]?
+    ) async throws -> [String: Any] {
+        var attempt = 0
+        while true {
+            let result: XhsSigner.PageResult
+            do {
+                result = try await XhsSigner.shared.pageRequest(
+                    path: path,
+                    method: method,
+                    host: host,
+                    query: query,
+                    payload: payload,
+                    commonHeader: commonHeader()
+                )
+            } catch let error as XhsError {
+                throw error
+            } catch {
+                throw XhsError.signFailed
+            }
+
+            if result.status == 401 {
+                throw XhsError.notLoggedIn
+            }
+            guard
+                let data = result.text.data(using: .utf8),
+                let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else {
+                if result.status == 403 || result.status == 461 {
+                    throw XhsError(
+                        message: "小红书风控拦截（HTTP \(result.status)），请稍后重试；一直失败就重新登录一次",
+                        needLogin: false
+                    )
+                }
+                throw XhsError(
+                    message: "接口返回格式异常（HTTP \(result.status)）",
+                    needLogin: false
+                )
+            }
+
+            // 300013 = 签名过期。重算一次通常就好，别把用户踢回登录页。
+            if XhsJSON.int(json["code"]) == 300013, attempt == 0 {
+                attempt += 1
+                XhsSigner.shared.reset()
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                continue
+            }
+
             try check(json)
-            guard (200..<300).contains(status) else {
-                throw XhsError(message: "请求失败（HTTP \(status)）", needLogin: false)
+            guard (200..<300).contains(result.status) else {
+                throw XhsError(message: "请求失败（HTTP \(result.status)）", needLogin: false)
             }
             return json
         }
-        if status == 403 || status == 461 {
-            throw XhsError(
-                message: "小红书风控拦截（HTTP \(status)），请稍后重试；一直失败就重新登录一次",
-                needLogin: false
-            )
-        }
-        guard (200..<300).contains(status) else {
-            throw XhsError(message: "请求失败（HTTP \(status)）", needLogin: false)
-        }
-        throw XhsError(message: "接口返回格式异常", needLogin: false)
     }
 
     private func check(_ json: [String: Any]) throws {
@@ -159,14 +261,18 @@ final class XhsService {
             throw XhsError.notLoggedIn
         }
         if code == 300013 {
-            // 签名跟隐藏页面的状态有关：cookie 换了 / 页面过期都会算错。
-            // 重新加载签名页让下一次请求重算，别当成掉登录把用户踢出去。
             XhsSigner.shared.reset()
             throw XhsError(message: "小红书签名失效，已自动刷新，请再点一次重试", needLogin: false)
         }
         if code == 461 {
             throw XhsError(
                 message: "小红书要求人机验证，去网页版刷一下再回来",
+                needLogin: false
+            )
+        }
+        if code == -1 {
+            throw XhsError(
+                message: "小红书拒绝了这次请求（code -1），多半是风控。稍后再试，或点右上角切到网页版操作",
                 needLogin: false
             )
         }
@@ -204,5 +310,11 @@ final class XhsService {
             return ""
         }
         return data.base64EncodedString()
+    }
+
+    private static func encode(_ value: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=?+")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 }

@@ -8,6 +8,8 @@ struct WereadReaderTarget: Identifiable {
     /// 网页阅读器地址（`/web/reader/<hash>`）。没拿到时是网页书架地址。
     let url: String
     let title: String
+    /// 数字 bookId。网页书架的卡片上有 data-book-id，按它点最准。
+    let bookId: String
     /// true = 没有阅读器地址，先落到网页书架再自动点开那本书。
     let needsJump: Bool
 }
@@ -28,6 +30,8 @@ struct WereadReaderView: View {
     @State private var isLoading = true
     @State private var reloadToken = 0
     @State private var inReader = false
+    /// 「正在打开」那层遮罩。最多盖 6 秒就撤，绝不把用户永远挡在外面。
+    @State private var showSplash = true
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -35,6 +39,7 @@ struct WereadReaderView: View {
                 url: target.url,
                 cookie: WereadStore.shared.cookie,
                 bookTitle: target.title,
+                bookId: target.bookId,
                 needsJump: target.needsJump,
                 reloadToken: reloadToken,
                 isLoading: $isLoading,
@@ -42,18 +47,28 @@ struct WereadReaderView: View {
             )
             .ignoresSafeArea()
 
-            if isLoading || (target.needsJump && !inReader) {
-                // 兜底路径会先落到网页书架再自动点开，中间那一下不要露给用户。
+            if showSplash, !inReader {
+                // 只盖一小会儿：6 秒后不管有没有打开都把遮罩撤掉，
+                // 让用户看见真实页面，别一直对着「正在打开」发呆。
                 ZStack {
                     Color(.systemBackground)
-                    VStack(spacing: 14) {
+                    VStack(spacing: 12) {
                         ProgressView()
                         Text("正在打开《\(target.title)》…")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                        Text("一直在转圈的话，等下会露出网页书架，点封面也能进")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 40)
                     }
                 }
                 .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    withAnimation(.easeOut(duration: 0.2)) { showSplash = false }
+                }
             }
 
             VStack(spacing: 10) {
@@ -65,6 +80,16 @@ struct WereadReaderView: View {
         }
         .background(Color(.systemBackground))
         .statusBar(hidden: true)
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+                withAnimation(.easeOut(duration: 0.2)) { showSplash = false }
+            }
+        }
+        .onChange(of: inReader) { value in
+            if value {
+                withAnimation(.easeOut(duration: 0.2)) { showSplash = false }
+            }
+        }
     }
 
     private func floatingButton(
@@ -89,6 +114,7 @@ private struct WereadReaderWebView: UIViewRepresentable {
     let url: String
     let cookie: String
     let bookTitle: String
+    let bookId: String
     let needsJump: Bool
     let reloadToken: Int
     @Binding var isLoading: Bool
@@ -183,6 +209,8 @@ private struct WereadReaderWebView: UIViewRepresentable {
         private var jumpMode = false
         /// 阅读器页只校验一次，避免每次翻页都跑一遍。
         private var checkedReader = false
+        /// 正文还没画出来时多等两轮，别把「还在加载」当成「打不开」。
+        private var verifyAttempts = 0
 
         init(parent: WereadReaderWebView) {
             self.parent = parent
@@ -195,6 +223,7 @@ private struct WereadReaderWebView: UIViewRepresentable {
             jumpAttempts = 0
             jumpMode = parent.needsJump
             checkedReader = false
+            verifyAttempts = 0
             // 页面里已经登录过就别再灌旧 cookie —— 那会把用户刚登好的会话顶掉。
             let request = URLRequest(url: target)
             if parent.cookie.isEmpty {
@@ -219,9 +248,30 @@ private struct WereadReaderWebView: UIViewRepresentable {
             // 真的跳进阅读器了就把地址记下来，下次点这本书直接秒开。
             if current.contains("/web/reader/") {
                 parent.inReader = true
-                WereadStore.shared.rememberReaderLink(title: parent.bookTitle, url: current)
-                if !jumpMode { verifyReader(in: webView) }
+                if jumpMode {
+                    // 在网页书架里自己点开的，这个地址一定是对的，直接记下来。
+                    WereadStore.shared.rememberReaderLink(
+                        bookId: parent.bookId,
+                        title: parent.bookTitle,
+                        url: current
+                    )
+                } else {
+                    verifyReader(in: webView, url: current)
+                }
                 return
+            }
+            // 落到书架上：先把这一屏所有书的阅读器地址抄下来，
+            // 下次点别的书就不用再走一遍兜底。
+            if current.contains("/web/shelf") {
+                captureLinks(in: webView)
+                if jumpMode || parent.needsJump {
+                    jumpMode = true
+                    guard !didAttemptJump else { return }
+                    didAttemptJump = true
+                    // 书架是 JS 渲染的，`didFinish` 时列表往往还没出来，多试几次。
+                    scheduleJump(in: webView)
+                    return
+                }
             }
             // 直接拼出来的地址被服务端踢回书架 = 这本书的 hash 拼错了
             // （下架、合集、老书）。别让用户对着书架发愣，走点击兜底。
@@ -233,28 +283,44 @@ private struct WereadReaderWebView: UIViewRepresentable {
             jumpMode = true
             guard !didAttemptJump else { return }
             didAttemptJump = true
-            // 书架是 JS 渲染的，`didFinish` 时列表往往还没出来，多试几次。
             scheduleJump(in: webView)
         }
 
         /// 阅读器页可能只是「书不存在」的空壳（HTTP 200），看正文判断一下。
-        private func verifyReader(in webView: WKWebView) {
+        private func verifyReader(in webView: WKWebView, url: String) {
             guard !checkedReader else { return }
             checkedReader = true
-            // 正文是 JS 画出来的，`didFinish` 时往往还是白屏。
-            // 等两秒再看，别把「还没画完」当成「这本书不存在」。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self, weak webView] in
+            verifyAttempts = 0
+            checkReaderBody(in: webView, url: url)
+        }
+
+        /// 正文是 JS 画出来的，`didFinish` 时往往还是白屏。
+        /// 只看明确的「这本书不在这里」；白屏就再等一轮，最多三轮，
+        /// 免得把「还在加载」误判成「打不开」把人踢回网页书架。
+        private func checkReaderBody(in webView: WKWebView, url: String) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self, weak webView] in
                 guard let self = self, let webView = webView, !self.jumpMode else { return }
-                let script = "(document.body ? (document.body.innerText || '') : '').slice(0, 800)"
+                let script = "(document.body ? (document.body.innerText || '') : '').slice(0, 1500)"
                 webView.evaluateJavaScript(script) { value, _ in
                     let text = ((value as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     let missing =
                         text.contains("404")
                         || text.contains("不存在")
                         || text.contains("已下架")
-                        || text.count < 20
-                    guard missing else { return }
-                    self.enterJumpMode(in: webView)
+                    if missing {
+                        self.enterJumpMode(in: webView)
+                        return
+                    }
+                    if text.count < 10, self.verifyAttempts < 2 {
+                        self.verifyAttempts += 1
+                        self.checkReaderBody(in: webView, url: url)
+                        return
+                    }
+                    WereadStore.shared.rememberReaderLink(
+                        bookId: self.parent.bookId,
+                        title: self.parent.bookTitle,
+                        url: url
+                    )
                 }
             }
         }
@@ -301,50 +367,158 @@ private struct WereadReaderWebView: UIViewRepresentable {
         }
 
         private func scheduleJump(in webView: WKWebView) {
-            guard jumpAttempts < 5 else { return }
-            let delay = jumpAttempts == 0 ? 1.2 : 2.0
+            // 已经进阅读器了就别再折腾书架，否则会把正文页滚走。
+            if parent.inReader { return }
+            guard jumpAttempts < 14 else {
+                // 实在找不到就把遮罩撤掉，让用户自己在网页书架上点。
+                parent.isLoading = false
+                return
+            }
+            // 第一次稍微等一下让书架铺开，之后半秒一次，快速试。
+            let delay = jumpAttempts == 0 ? 0.8 : 0.6
             jumpAttempts += 1
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak webView] in
                 guard let self = self, let webView = webView else { return }
-                Self.openBook(in: webView, title: self.parent.bookTitle) { found in
-                    if !found {
+                self.captureLinks(in: webView)
+                Self.openBook(
+                    in: webView,
+                    title: self.parent.bookTitle,
+                    bookId: self.parent.bookId
+                ) { found in
+                    if found {
+                        // 有些卡片走的是 SPA 路由，点完不会立刻换地址。
+                        // 隔几秒还没进阅读器就再试一轮，免得停在书架上一动不动。
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self, weak webView] in
+                            guard let self = self, let webView = webView else { return }
+                            if self.parent.inReader { return }
+                            let current = webView.url?.absoluteString ?? ""
+                            if current.contains("/web/reader/") { return }
+                            self.scheduleJump(in: webView)
+                        }
+                        return
+                    }
+                    // 书架是虚拟列表，目标书往往还在下面没渲染出来。
+                    // 每次找不到就往下滚一屏；到底了就回到顶部再来一轮。
+                    let scroll = "(function(){var h=document.documentElement;var bottom=(window.innerHeight+window.scrollY)>=((document.body?document.body.scrollHeight:0)-60);if(bottom){window.scrollTo(0,0);return 'top';}window.scrollBy(0,Math.round(window.innerHeight*0.9));return 'down';})()"
+                    webView.evaluateJavaScript(scroll) { _, _ in
                         self.scheduleJump(in: webView)
                     }
                 }
             }
         }
 
-        /// 在网页书架里找到书名匹配的那本并点开。
+        /// 把网页书架上这一屏所有书的 `bookId/书名 → 阅读器地址` 抄进缓存。
+        private func captureLinks(in webView: WKWebView) {
+            let script = """
+            (function(){
+              var out = [];
+              var anchors = document.querySelectorAll('a[href*="/web/reader/"]');
+              for (var i = 0; i < anchors.length; i++) {
+                var a = anchors[i];
+                var text = (a.innerText || a.textContent || a.getAttribute('title') || '').replace(/\\s+/g,' ').trim();
+                if (!text || text.length > 60) {
+                  var img = a.querySelector('img');
+                  if (img) { text = (img.getAttribute('alt') || '').trim(); }
+                }
+                if (!text || text.length > 60) { continue; }
+                var id = '';
+                var node = a;
+                for (var k = 0; k < 6 && node; k++) {
+                  if (node.getAttribute) {
+                    id = node.getAttribute('data-book-id') || '';
+                    if (id) { break; }
+                  }
+                  node = node.parentElement;
+                }
+                out.push({title: text, href: a.href, bookId: id});
+              }
+              return JSON.stringify(out);
+            })()
+            """
+            webView.evaluateJavaScript(script) { value, _ in
+                guard
+                    let text = value as? String,
+                    let data = text.data(using: .utf8),
+                    let list = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
+                else {
+                    return
+                }
+                for item in list {
+                    guard
+                        let title = item["title"] as? String,
+                        let href = item["href"] as? String,
+                        !title.isEmpty,
+                        !href.isEmpty
+                    else {
+                        continue
+                    }
+                    let bookId = (item["bookId"] as? String) ?? ""
+                    WereadStore.shared.rememberReaderLink(bookId: bookId, title: title, url: href)
+                }
+            }
+        }
+
+        /// 在网页书架里找到目标书并点开。
+        /// 优先用 `data-book-id`（和 shelf/sync 的数字 bookId 一致），
+        /// 精确命中就不用赌书名是否被改过、是否带副标题。
         private static func openBook(
             in webView: WKWebView,
             title: String,
+            bookId: String,
             completion: @escaping (Bool) -> Void
         ) {
-            guard !title.isEmpty else {
+            guard !title.isEmpty || !bookId.isEmpty else {
                 completion(true)
                 return
             }
             let script = """
             (function(){
               var title = \(jsString(title));
-              function norm(s){ return (s||"").replace(/\\s+/g,"").toLowerCase(); }
+              var bookId = \(jsString(bookId));
+              function norm(s){ return String(s||"").replace(/\\s+/g,"").toLowerCase(); }
               var target = norm(title);
+              // 1) data-book-id 精确命中：卡片上的 id 就是书架接口给的 bookId。
+              if (bookId) {
+                var byId = null;
+                try { byId = document.querySelector('[data-book-id="' + bookId + '"]'); } catch (e) { byId = null; }
+                if (byId) {
+                  var inner = byId.querySelector ? byId.querySelector('a[href*="/web/reader/"]') : null;
+                  var self = (byId.getAttribute && byId.getAttribute('href') && byId.getAttribute('href').indexOf('/web/reader/') >= 0) ? byId : null;
+                  var anchor = inner || self;
+                  if (anchor && anchor.href) { location.href = anchor.href; return "nav"; }
+                  if (byId.click) { byId.click(); return "click"; }
+                }
+              }
               if (!target) return "";
-              var nodes = document.querySelectorAll('a, li, [class*="book"], [class*="shelf"]');
-              var best = null;
-              for (var i = 0; i < nodes.length; i++) {
-                var t = norm(nodes[i].innerText || nodes[i].textContent || "");
-                if (!t) continue;
-                if (t === target || t.indexOf(target) >= 0) { best = nodes[i]; break; }
+              // 2) 书名精确匹配 <a href="/web/reader/...">：直接改 location 最稳。
+              var anchors = document.querySelectorAll('a[href*="/web/reader/"]');
+              var fallback = "";
+              for (var i = 0; i < anchors.length; i++) {
+                var a = anchors[i];
+                var text = norm(a.innerText || a.textContent || a.getAttribute('title') || a.getAttribute('aria-label') || "");
+                if (!text) {
+                  var img = a.querySelector('img');
+                  if (img) { text = norm(img.getAttribute('alt') || ""); }
+                }
+                if (!text) { continue; }
+                if (text === target) { location.href = a.href; return "nav"; }
+                if (!fallback && (text.indexOf(target) >= 0 || target.indexOf(text) >= 0)) {
+                  fallback = a.href;
+                }
               }
-              if (!best) return "";
-              var link = best.closest ? best.closest('a') : null;
-              if (link && link.href && link.href.indexOf('/web/reader/') >= 0) {
-                location.href = link.href;
-                return "nav";
+              if (fallback) { location.href = fallback; return "nav"; }
+              // 3) 有些卡片不是 <a>，只挂了 data-book-id 或者整块可点。
+              var cards = document.querySelectorAll('[data-book-id], [class*="shelfBook"], [class*="bookItem"], [class*="book-item"]');
+              for (var j = 0; j < cards.length; j++) {
+                var c = cards[j];
+                var ct = norm(c.innerText || c.textContent || "");
+                if (!ct) { continue; }
+                if (ct === target || ct.indexOf(target) >= 0) {
+                  c.click();
+                  return "click";
+                }
               }
-              best.click();
-              return "click";
+              return "";
             })()
             """
             webView.evaluateJavaScript(script) { value, _ in
