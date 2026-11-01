@@ -228,6 +228,37 @@ enum CookieJar {
         }
     }
 
+    /// 把一段 `Cookie:` 串写进 WKWebsiteDataStore（网页版兜底页用）。
+    static func write(_ header: String, domainSuffix: String, completion: @escaping () -> Void) {
+        let store = WKWebsiteDataStore.default().httpCookieStore
+        var cookies: [HTTPCookie] = []
+        for part in header.split(separator: ";") {
+            let piece = part.trimmingCharacters(in: .whitespaces)
+            guard let index = piece.firstIndex(of: "=") else { continue }
+            let name = String(piece[piece.startIndex..<index])
+            let value = String(piece[piece.index(after: index)...])
+            guard !name.isEmpty, !value.isEmpty else { continue }
+            if let cookie = HTTPCookie(properties: [
+                .name: name,
+                .value: value,
+                .domain: ".\(domainSuffix)",
+                .path: "/",
+            ]) {
+                cookies.append(cookie)
+            }
+        }
+        guard !cookies.isEmpty else {
+            DispatchQueue.main.async(execute: completion)
+            return
+        }
+        let group = DispatchGroup()
+        for cookie in cookies {
+            group.enter()
+            store.setCookie(cookie) { group.leave() }
+        }
+        group.notify(queue: .main, execute: completion)
+    }
+
     /// 把 WKWebView 里的 cookie 灌进 URLSession 的共享仓库，
     /// 这样 `URLSession.shared` 的请求也能带上登录态。
     static func syncToSharedStorage(_ cookies: [HTTPCookie]) {

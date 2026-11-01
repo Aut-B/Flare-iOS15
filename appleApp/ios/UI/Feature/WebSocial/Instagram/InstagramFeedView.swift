@@ -9,6 +9,8 @@ struct InstagramFeedView: View {
     @ObservedObject private var store = InstagramStore.shared
     @State private var showLogin = false
     @State private var showSearch = false
+    /// 原生接口被风控拦住时的兜底：直接用网页版刷。
+    @State private var showWeb = false
     @State private var selected: IGMedia?
 
     var body: some View {
@@ -65,6 +67,19 @@ struct InstagramFeedView: View {
             }
             .navigationViewStyle(.stack)
         }
+        .sheet(isPresented: $showWeb) {
+            NavigationView {
+                WebPlatformView(
+                    url: "https://www.instagram.com/",
+                    title: "Instagram 网页版",
+                    mobileUserAgent: WebPlatformUserAgent.mobile,
+                    desktopUserAgent: WebPlatformUserAgent.desktop,
+                    initialCookie: InstagramStore.shared.cookie,
+                    cookieDomainSuffix: "instagram.com"
+                )
+            }
+            .navigationViewStyle(.stack)
+        }
         .sheet(item: $selected) { media in
             NavigationView {
                 InstagramPostView(media: media)
@@ -86,6 +101,9 @@ struct InstagramFeedView: View {
                 } else if let message = store.errorMessage, store.feed.isEmpty {
                     errorState(message)
                 } else {
+                    if let message = store.errorMessage, !store.feed.isEmpty {
+                        banner(message)
+                    }
                     ForEach(store.feed) { media in
                         IGMediaCard(media: media) {
                             selected = media
@@ -105,6 +123,26 @@ struct InstagramFeedView: View {
         .refreshable {
             await store.refresh()
         }
+    }
+
+    private func banner(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.system(size: 11))
+                .lineLimit(2)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Button("网页版") {
+                showWeb = true
+            }
+            .font(.system(size: 11, weight: .semibold))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.08))
     }
 
     @ViewBuilder
@@ -132,10 +170,19 @@ struct InstagramFeedView: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 32)
-            Button("重试") {
-                Task { await store.refresh() }
+            HStack(spacing: 12) {
+                Button("重试") {
+                    Task { await store.refresh() }
+                }
+                .buttonStyle(.borderedProminent)
+                Button("用网页版") {
+                    showWeb = true
+                }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.borderedProminent)
+            Text("原生接口被风控拦的时候，网页版还能正常刷。")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
         .padding(32)
         .frame(maxWidth: .infinity)

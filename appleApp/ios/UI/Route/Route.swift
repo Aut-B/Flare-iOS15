@@ -290,11 +290,7 @@ enum Route: Hashable, Identifiable {
         case .instagram:
             InstagramFeedView()
         case .xiaohongshu:
-            XhsFeedView()
-        case .douyin:
-            DouyinView()
-        case .tiktok:
-            TikTokView()
+            XhsTabView()
         case .draftBox:
             DraftBoxScreen { groupId in
                 onNavigate(.composeDraft(groupId))
@@ -387,10 +383,6 @@ enum Route: Hashable, Identifiable {
     case instagram
     /// 小红书：网页版 cookie 登录 + 隐藏网页算签名，原生瀑布流。
     case xiaohongshu
-    /// 抖音：网页版标签页（视频 / 点赞 / 评论 / 转发都用网页版原生的）。
-    case douyin
-    /// TikTok：同抖音。
-    case tiktok
     case draftBox
     case secondaryMenu
 

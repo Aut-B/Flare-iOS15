@@ -22,6 +22,8 @@ final class XhsStore: ObservableObject {
     private let cookieKey = "xhs.cookie"
     private var nextCursor: String?
     private var loaded = false
+    /// 上一次请求过的翻页游标，避免底部 `onAppear` 反复打同一个游标。
+    private var lastLoadMoreCursor: String?
 
     private init() {
         let cookie = defaults.string(forKey: cookieKey) ?? ""
@@ -143,6 +145,7 @@ final class XhsStore: ObservableObject {
                 self.nextCursor = result.next
                 self.loaded = true
                 self.errorMessage = nil
+                self.lastLoadMoreCursor = nil
             }
         } catch {
             handle(error)
@@ -151,6 +154,8 @@ final class XhsStore: ObservableObject {
 
     func loadMore() async {
         guard isLoggedIn, let cursor = nextCursor, !isLoadingMore else { return }
+        guard cursor != lastLoadMoreCursor else { return }
+        lastLoadMoreCursor = cursor
         DispatchQueue.main.async { self.isLoadingMore = true }
         defer { DispatchQueue.main.async { self.isLoadingMore = false } }
         do {

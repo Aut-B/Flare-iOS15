@@ -3,17 +3,20 @@ import Combine
 import WebKit
 import UIKit
 
-/// 抖音 / TikTok 这类「网页版本身就最全」的平台。
+/// 用网页版直接承载的平台（小红书 / Instagram 兜底）。
 ///
-/// 它们没有稳定的开放接口，但网页版该有的都有：视频、点赞、评论、转发、
-/// 收藏、私信。这里放一个常驻 `WKWebsiteDataStore.default()` 的浏览器页面，
-/// 登录一次就一直留着 —— 和 Instagram / 小红书那套 cookie 登录是同一个思路，
-/// 只是不需要再把数据搬进原生列表。
+/// 有些平台的私有接口动不动就变签名、加风控，网页版反而是最稳的：
+/// 视频、点赞、评论、转发、收藏全都在。这里给一个常驻
+/// `WKWebsiteDataStore.default()` 的浏览器页面，登录一次就一直留着。
 struct WebPlatformView: View {
     let url: String
     let title: String
     let mobileUserAgent: String
     let desktopUserAgent: String
+    /// 打开前先灌进去的 cookie 串（从原生登录里拿到的）。
+    var initialCookie: String = ""
+    /// 上面 cookie 属于哪个域名，例如 `xiaohongshu.com`。
+    var cookieDomainSuffix: String = ""
 
     @StateObject private var model = WebPlatformModel()
     @State private var desktopMode = false
@@ -23,83 +26,67 @@ struct WebPlatformView: View {
     }
 
     var body: some View {
-        WebPlatformWebView(url: url, userAgent: userAgent, model: model)
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .overlay(alignment: .top) {
-                if model.isLoading {
-                    ProgressView()
-                        .progressViewStyle(.linear)
-                        .frame(maxWidth: .infinity)
+        WebPlatformWebView(
+            url: url,
+            userAgent: userAgent,
+            initialCookie: initialCookie,
+            cookieDomainSuffix: cookieDomainSuffix,
+            model: model
+        )
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .overlay(alignment: .top) {
+            if model.isLoading {
+                ProgressView()
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .bottomBar) {
+                Button {
+                    model.goBack()
+                } label: {
+                    Image(systemName: "chevron.backward")
+                }
+                .disabled(!model.canGoBack)
+
+                Button {
+                    model.goForward()
+                } label: {
+                    Image(systemName: "chevron.forward")
+                }
+                .disabled(!model.canGoForward)
+
+                Spacer()
+
+                Button {
+                    model.reload()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+
+                Spacer()
+
+                Menu {
+                    Button {
+                        desktopMode.toggle()
+                    } label: {
+                        Label(
+                            desktopMode ? "手机版网页" : "桌面版网页",
+                            systemImage: "display"
+                        )
+                    }
+                    Button {
+                        model.openInSafari()
+                    } label: {
+                        Label("在浏览器里打开", systemImage: "safari")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
                 }
             }
-            .toolbar {
-                ToolbarItemGroup(placement: .bottomBar) {
-                    Button {
-                        model.goBack()
-                    } label: {
-                        Image(systemName: "chevron.backward")
-                    }
-                    .disabled(!model.canGoBack)
-
-                    Button {
-                        model.goForward()
-                    } label: {
-                        Image(systemName: "chevron.forward")
-                    }
-                    .disabled(!model.canGoForward)
-
-                    Spacer()
-
-                    Button {
-                        model.reload()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-
-                    Spacer()
-
-                    Menu {
-                        Button {
-                            desktopMode.toggle()
-                        } label: {
-                            Label(
-                                desktopMode ? "手机版网页" : "桌面版网页",
-                                systemImage: "display"
-                            )
-                        }
-                        Button {
-                            model.openInSafari()
-                        } label: {
-                            Label("在浏览器里打开", systemImage: "safari")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                }
-            }
-    }
-}
-
-struct DouyinView: View {
-    var body: some View {
-        WebPlatformView(
-            url: "https://www.douyin.com/",
-            title: "抖音",
-            mobileUserAgent: WebPlatformUserAgent.mobile,
-            desktopUserAgent: WebPlatformUserAgent.desktop
-        )
-    }
-}
-
-struct TikTokView: View {
-    var body: some View {
-        WebPlatformView(
-            url: "https://www.tiktok.com/",
-            title: "TikTok",
-            mobileUserAgent: WebPlatformUserAgent.mobile,
-            desktopUserAgent: WebPlatformUserAgent.desktop
-        )
+        }
     }
 }
 
@@ -143,6 +130,8 @@ final class WebPlatformModel: ObservableObject {
 private struct WebPlatformWebView: UIViewRepresentable {
     let url: String
     let userAgent: String
+    let initialCookie: String
+    let cookieDomainSuffix: String
     @ObservedObject var model: WebPlatformModel
 
     func makeCoordinator() -> Coordinator {
@@ -161,8 +150,16 @@ private struct WebPlatformWebView: UIViewRepresentable {
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         model.webView = webView
-        if let target = URL(string: url) {
+
+        let start: () -> Void = {
+            guard let target = URL(string: url) else { return }
             webView.load(URLRequest(url: target))
+        }
+        // 原生登录拿到的 cookie 先灌进数据仓库，否则网页版会要求重新登录。
+        if initialCookie.isEmpty || cookieDomainSuffix.isEmpty {
+            start()
+        } else {
+            CookieJar.write(initialCookie, domainSuffix: cookieDomainSuffix, completion: start)
         }
         return webView
     }
@@ -209,7 +206,7 @@ private struct WebPlatformWebView: UIViewRepresentable {
             model.refresh()
         }
 
-        /// 抖音 / TikTok 的卡片大量用新窗口打开；没有这个回调点了会没反应。
+        /// 卡片经常用新窗口打开；没有这个回调点了会没反应。
         func webView(
             _ webView: WKWebView,
             createWebViewWith configuration: WKWebViewConfiguration,

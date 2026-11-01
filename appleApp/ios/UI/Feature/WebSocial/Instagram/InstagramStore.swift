@@ -21,6 +21,12 @@ final class InstagramStore: ObservableObject {
     private let userKey = "instagram.username"
     private var nextCursor: String?
     private var loaded = false
+    /// 防止重复刷新：`.task` 和下拉刷新同时触发时会叠在一起，
+    /// 界面就会一直转圈。
+    private var refreshing = false
+    /// 上一次已经请求过的翻页游标。接口把 `next_max_id` 原样返回时，
+    /// 列表底部会反复触发 `onAppear` → 无限请求 → 永远在「刷新」。
+    private var lastLoadMoreCursor: String?
 
     private init() {
         let cookie = defaults.string(forKey: cookieKey) ?? ""
@@ -85,6 +91,7 @@ final class InstagramStore: ObservableObject {
         defaults.removeObject(forKey: cookieKey)
         defaults.removeObject(forKey: userKey)
         pushCredentials()
+        lastLoadMoreCursor = nil
         DispatchQueue.main.async {
             self.isLoggedIn = false
             self.userName = ""
@@ -122,13 +129,17 @@ final class InstagramStore: ObservableObject {
     }
 
     func refresh() async {
-        guard isLoggedIn else { return }
+        guard isLoggedIn, !refreshing else { return }
+        refreshing = true
         pushCredentials()
         DispatchQueue.main.async {
             self.isLoading = true
             self.errorMessage = nil
         }
-        defer { DispatchQueue.main.async { self.isLoading = false } }
+        defer {
+            refreshing = false
+            DispatchQueue.main.async { self.isLoading = false }
+        }
         do {
             let result = try await InstagramService.shared.homeFeed(cursor: nil)
             DispatchQueue.main.async {
@@ -136,6 +147,7 @@ final class InstagramStore: ObservableObject {
                 self.nextCursor = result.next
                 self.loaded = true
                 self.errorMessage = nil
+                self.lastLoadMoreCursor = nil
             }
         } catch {
             handle(error)
@@ -144,6 +156,8 @@ final class InstagramStore: ObservableObject {
 
     func loadMore() async {
         guard isLoggedIn, let cursor = nextCursor, !isLoadingMore else { return }
+        guard cursor != lastLoadMoreCursor else { return }
+        lastLoadMoreCursor = cursor
         DispatchQueue.main.async { self.isLoadingMore = true }
         defer { DispatchQueue.main.async { self.isLoadingMore = false } }
         do {

@@ -71,8 +71,6 @@ struct SecondaryTabsScreen: View {
                 secondaryRouteButton("微信读书", icon: .bookmark, route: .weread)
                 secondaryRouteButton("Instagram", icon: .photoFilm, route: .instagram)
                 secondaryRouteButton("小红书", icon: .image, route: .xiaohongshu)
-                secondaryRouteButton("抖音", icon: .circlePlay, route: .douyin)
-                secondaryRouteButton("TikTok", icon: .play, route: .tiktok)
                 secondaryRouteButton("local_history_title", icon: .clockRotateLeft, route: .localHostory)
                 if aiAgentEnabledPresenter.state.enabled {
                     secondaryRouteButton("agent_history_title", icon: .robot, route: .agentHistory)

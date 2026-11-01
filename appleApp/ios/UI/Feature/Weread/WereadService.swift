@@ -36,8 +36,18 @@ final class WereadService: @unchecked Sendable {
         let json = try parseObject(data)
         try checkError(json)
 
+        // `books` 是书架上的书，`archive` 是归档过的书；只看 books 会少一截，
+        // 用户会觉得「书架没还原全」。
         let books = json["books"] as? [[String: Any]] ?? []
-        return books.compactMap(parseBook)
+        let archive = json["archive"] as? [[String: Any]] ?? []
+        var seen = Set<String>()
+        var result: [WereadBook] = []
+        for item in books + archive {
+            guard let book = parseBook(item), !seen.contains(book.id) else { continue }
+            seen.insert(book.id)
+            result.append(book)
+        }
+        return result
     }
 
     // MARK: - 目录
@@ -239,9 +249,19 @@ final class WereadService: @unchecked Sendable {
     }
 
     private func parseBook(_ item: [String: Any]) -> WereadBook? {
-        guard let bookId = item["bookId"] as? String else { return nil }
-        let progressList = item["progress"] as? [[String: Any]]
-        let percent = intValue(progressList?.first?["progress"]) ?? 0
+        let bookId =
+            (item["bookId"] as? String)
+            ?? (item["bookId"] as? NSNumber)?.stringValue
+        guard let bookId = bookId, !bookId.isEmpty else { return nil }
+        // 进度有时是数组（shelf/sync），有时是单个对象。
+        let percent: Int
+        if let list = item["progress"] as? [[String: Any]] {
+            percent = intValue(list.first?["progress"]) ?? 0
+        } else if let dict = item["progress"] as? [String: Any] {
+            percent = intValue(dict["progress"]) ?? 0
+        } else {
+            percent = 0
+        }
         return WereadBook(
             id: bookId,
             title: item["title"] as? String ?? "",
