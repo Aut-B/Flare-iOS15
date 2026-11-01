@@ -367,11 +367,26 @@ final class XhsStore: ObservableObject {
     // MARK: - 评论
 
     func comments(note: XhsNote, cursor: String?) async throws -> (items: [XhsComment], next: String?) {
-        try await XhsService.shared.comments(
-            noteId: note.id,
-            xsecToken: note.xsecToken,
-            cursor: cursor
-        )
+        do {
+            return try await XhsService.shared.comments(
+                noteId: note.id,
+                xsecToken: note.xsecToken,
+                cursor: cursor
+            )
+        } catch {
+            // 卡片上的 xsec_token 会过期。过期后服务端一律回「当前笔记暂时无法浏览」，
+            // 这时用详情接口换一个新 token 再试一次，比让用户自己去网页版强。
+            guard
+                let fresh = try? await XhsService.shared.note(id: note.id, xsecToken: note.xsecToken),
+                !fresh.xsecToken.isEmpty,
+                fresh.xsecToken != note.xsecToken
+            else { throw error }
+            return try await XhsService.shared.comments(
+                noteId: note.id,
+                xsecToken: fresh.xsecToken,
+                cursor: cursor
+            )
+        }
     }
 
     func postComment(note: XhsNote, content: String) async throws -> XhsComment? {
@@ -443,6 +458,9 @@ final class XhsStore: ObservableObject {
             if !images.contains(value) { images.append(value) }
         }
         if images.isEmpty { images = [cover] }
+        // 视频直链只有接口/DOM 抓到了才播得起来；抓不到就只显示封面。
+        let rawVideo = (item["videoURL"] as? String) ?? ""
+        let videoURL = rawVideo.isEmpty ? nil : rawVideo
         return XhsNote(
             id: id,
             title: title,
@@ -452,7 +470,7 @@ final class XhsStore: ObservableObject {
             likedCount: likes,
             isVideo: isVideo,
             aspect: aspect,
-            videoURL: nil,
+            videoURL: videoURL,
             xsecToken: token
         )
     }
@@ -469,53 +487,102 @@ final class XhsStore: ObservableObject {
         function text(v) {
           return (v === null || v === undefined) ? '' : String(v);
         }
-        function coverOf(card) {
-          var c = card.cover || card.image || null;
-          if (c && typeof c === 'object') {
-            var url = c.urlDefault || c.urlPre || c.url || c.url_default || '';
-            var w = Number(c.width || 0);
-            var h = Number(c.height || 0);
-            return { url: url, aspect: (w > 0 && h > 0) ? (w / h) : 0 };
-          }
-          if (typeof c === 'string') { return { url: c, aspect: 0 }; }
-          var list = card.imageList || card.images || null;
-          if (list && list.length) {
-            var first = list[0];
-            if (first && typeof first === 'object') {
-              return { url: first.urlDefault || first.urlPre || first.url || '', aspect: 0 };
+        // 真实结构是 noteCard.imageList[].infoList[].url，
+        // 元素形如 {infoList:[{url,imageScene}], width, height}。
+        // 只认 urlDefault 的话会一张都取不到，首页就只剩封面。
+        function firstURL(obj) {
+          if (!obj) { return ''; }
+          if (typeof obj === 'string') { return obj; }
+          if (typeof obj !== 'object') { return ''; }
+          var u = obj.urlDefault || obj.url_default || obj.urlPre || obj.url_pre || obj.url || obj.master_url || obj.masterUrl || '';
+          if (!u) {
+            var lists = [obj.infoList, obj.info_list];
+            for (var l = 0; l < lists.length && !u; l++) {
+              var list = lists[l];
+              if (!list || !list.length) { continue; }
+              for (var i = 0; i < list.length; i++) {
+                var info = list[i];
+                if (info && info.url) { u = info.url; break; }
+              }
             }
-            if (typeof first === 'string') { return { url: first, aspect: 0 }; }
+          }
+          return text(u);
+        }
+        function norm(u) {
+          u = text(u);
+          if (u.indexOf('//') === 0) { u = 'https:' + u; }
+          return u;
+        }
+        function imageListOf(card) {
+          var lists = [card.imageList, card.image_list, card.images];
+          for (var l = 0; l < lists.length; l++) {
+            if (lists[l] && lists[l].length) { return lists[l]; }
+          }
+          return null;
+        }
+        function coverOf(card) {
+          var list = imageListOf(card);
+          if (list) {
+            var first = list[0];
+            var u = norm(firstURL(first));
+            if (u) {
+              var w = Number((first && first.width) || 0);
+              var h = Number((first && first.height) || 0);
+              return { url: u, aspect: (w > 0 && h > 0) ? (w / h) : 0 };
+            }
+          }
+          var c = card.cover || card.image || null;
+          var cu = norm(firstURL(c));
+          if (cu) {
+            var cw = Number((c && c.width) || 0);
+            var ch = Number((c && c.height) || 0);
+            return { url: cu, aspect: (cw > 0 && ch > 0) ? (cw / ch) : 0 };
           }
           return { url: '', aspect: 0 };
         }
         function imagesOf(card) {
-          var list = card.imageList || card.images || null;
-          var out = [];
-          if (list && list.length) {
-            for (var i = 0; i < list.length && i < 18; i++) {
-              var it = list[i];
-              var u = '';
-              if (it && typeof it === 'object') {
-                u = it.urlDefault || it.urlPre || it.url || it.url_default || '';
-              } else if (typeof it === 'string') {
-                u = it;
+          var list = imageListOf(card);
+          var res = [];
+          if (!list) { return res; }
+          for (var i = 0; i < list.length && i < 18; i++) {
+            var u = norm(firstURL(list[i]));
+            if (!u) { continue; }
+            if (res.indexOf(u) < 0) { res.push(u); }
+          }
+          return res;
+        }
+        function videoOf(card) {
+          var v = card.video || card.videoInfo || card.video_info || null;
+          if (!v || typeof v !== 'object') { return ''; }
+          var media = v.media || v.mediaInfo || null;
+          var stream = media ? (media.stream || media.streams || null) : null;
+          if (!stream) {
+            return norm(v.masterUrl || v.master_url || v.url || '');
+          }
+          var codecs = ['h264', 'h265', 'av1'];
+          for (var c = 0; c < codecs.length; c++) {
+            var arr = stream[codecs[c]];
+            if (!arr || !arr.length) { continue; }
+            for (var j = 0; j < arr.length && j < 3; j++) {
+              var item = arr[j];
+              if (!item) { continue; }
+              var u = norm(item.master_url || item.masterUrl || '');
+              if (!u && item.backup_urls && item.backup_urls.length) {
+                u = norm(item.backup_urls[0]);
               }
-              if (!u) { continue; }
-              u = String(u);
-              if (u.indexOf('//') === 0) { u = 'https:' + u; }
-              out.push(u);
+              if (u) { return u; }
             }
           }
-          return out;
+          return '';
         }
         function add(card) {
           if (!card || typeof card !== 'object') { return; }
           var id = text(card.noteId || card.note_id || card.id);
           if (!id || id.length < 8 || seen[id]) { return; }
+          var imgs = imagesOf(card);
           var info = coverOf(card);
-          var cover = text(info.url);
+          var cover = info.url || (imgs.length ? imgs[0] : '');
           if (!cover) { return; }
-          if (cover.indexOf('//') === 0) { cover = 'https:' + cover; }
           var user = card.user || card.author || {};
           var interact = card.interactInfo || card.interact_info || {};
           var aspect = info.aspect > 0 ? info.aspect : 0.75;
@@ -525,15 +592,16 @@ final class XhsStore: ObservableObject {
           out.push({
             id: id,
             cover: cover,
-            images: imagesOf(card),
-            title: text(card.displayTitle || card.title || card.desc || ''),
-            author: text(user.nickname || user.nickName || user.name || ''),
+            images: imgs.length ? imgs : [cover],
+            title: text(card.displayTitle || card.display_title || card.title || card.desc || ''),
+            author: text(user.nickname || user.nickName || user.nick_name || user.name || ''),
             uid: text(user.userId || user.user_id || user.id || ''),
-            avatar: text(user.avatar || ''),
+            avatar: norm(user.avatar || ''),
             likes: text(interact.likedCount || interact.liked_count || ''),
             token: text(card.xsecToken || card.xsec_token || ''),
             aspect: aspect,
-            video: (text(card.type) === 'video') ? 1 : 0
+            video: (text(card.type) === 'video') ? 1 : 0,
+            videoURL: videoOf(card)
           });
         }
         function walk(node, depth) {
@@ -546,7 +614,7 @@ final class XhsStore: ObservableObject {
           visited++;
           if (node.noteCard) { add(node.noteCard); }
           if (node.note_card) { add(node.note_card); }
-          if (node.noteId && (node.cover || node.imageList)) { add(node); }
+          if (node.noteId && (node.cover || node.imageList || node.image_list)) { add(node); }
           for (var k in node) {
             if (k === 'noteCard' || k === 'note_card') { continue; }
             var v = node[k];
@@ -630,14 +698,38 @@ final class XhsStore: ObservableObject {
         var likes = '';
         var lk = card.querySelector('[class*="like"] [class*="count"], [class*="count"]');
         if (lk) { likes = textOf(lk); }
+        var imgs = [];
+        var all = card.querySelectorAll ? card.querySelectorAll('img') : [];
+        for (var k = 0; k < all.length && k < 18; k++) {
+          var iu = all[k].getAttribute('src') || all[k].getAttribute('data-src') || '';
+          if (!iu && all[k].getAttribute('srcset')) {
+            iu = String(all[k].getAttribute('srcset')).split(' ')[0];
+          }
+          if (!iu) { continue; }
+          if (iu.indexOf('//') === 0) { iu = 'https:' + iu; }
+          if (imgs.indexOf(iu) < 0) { imgs.push(iu); }
+        }
+        if (imgs.length === 0) { imgs = [cover]; }
+        var videoURL = '';
+        var vid = card.querySelector ? card.querySelector('video') : null;
+        if (vid) {
+          videoURL = vid.getAttribute('src') || vid.currentSrc || '';
+          if (!videoURL) {
+            var vs = vid.querySelector('source');
+            if (vs) { videoURL = vs.getAttribute('src') || ''; }
+          }
+          if (videoURL.indexOf('//') === 0) { videoURL = 'https:' + videoURL; }
+        }
         var w = img.naturalWidth || 0;
         var h = img.naturalHeight || 0;
         var aspect = (w > 0 && h > 0) ? (w / h) : 0.75;
         var cls = String(card.className || '') + ' ' + String(a.className || '');
+        var isVideo = /video/i.test(cls) || !!vid;
         seen[id] = true;
         out.push({
           id: id,
           cover: cover,
+          images: imgs,
           title: title,
           author: author,
           uid: uid,
@@ -645,7 +737,8 @@ final class XhsStore: ObservableObject {
           likes: likes,
           token: token,
           aspect: aspect,
-          video: /video/i.test(cls) ? 1 : 0
+          video: isVideo ? 1 : 0,
+          videoURL: videoURL
         });
       }
       return JSON.stringify(out);

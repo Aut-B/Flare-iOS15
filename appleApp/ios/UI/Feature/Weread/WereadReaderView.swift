@@ -128,7 +128,10 @@ private struct WereadReaderWebView: UIViewRepresentable {
     private static let selectionScript = """
     (function(){
       var styleId = 'flare-select-style';
+      var css = 'body, body * { -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default !important; }';
+      var pending = false;
       function apply(){
+        pending = false;
         try {
           var head = document.head || document.documentElement;
           if (!head) { return; }
@@ -138,22 +141,34 @@ private struct WereadReaderWebView: UIViewRepresentable {
             style.id = styleId;
             head.appendChild(style);
           }
-          style.textContent = 'body, body * { -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default !important; }';
+          // 只有内容真的变了才写。以前每次都写 textContent，等于每次
+          // MutationObserver 回调都再产生一条 mutation，自己触发自己，
+          // 主线程被微任务塞满 —— 阅读页就永远画不出来（白屏）。
+          if (style.textContent !== css) { style.textContent = css; }
           var inline = document.querySelectorAll('[style*="user-select"]');
-          for (var i = 0; i < inline.length; i++) {
-            inline[i].style.setProperty('-webkit-user-select', 'text', 'important');
-            inline[i].style.setProperty('user-select', 'text', 'important');
+          for (var i = 0; i < inline.length && i < 200; i++) {
+            var el = inline[i];
+            if (el.style.getPropertyValue('-webkit-user-select') !== 'text') {
+              el.style.setProperty('-webkit-user-select', 'text', 'important');
+              el.style.setProperty('user-select', 'text', 'important');
+            }
           }
         } catch (e) {}
       }
+      // 节流：阅读页 DOM 变得很勤，每次变更都全量扫一遍会卡。
+      function schedule(){
+        if (pending) { return; }
+        pending = true;
+        setTimeout(apply, 500);
+      }
       apply();
-      document.addEventListener('DOMContentLoaded', apply, true);
-      window.addEventListener('load', apply, true);
+      document.addEventListener('DOMContentLoaded', schedule, true);
+      window.addEventListener('load', schedule, true);
       ['selectstart', 'contextmenu'].forEach(function(name){
         document.addEventListener(name, function(e){ e.stopPropagation(); }, true);
       });
       try {
-        var observer = new MutationObserver(function(){ apply(); });
+        var observer = new MutationObserver(schedule);
         observer.observe(document.documentElement, { childList: true, subtree: true });
       } catch (e) {}
     })();
@@ -209,8 +224,14 @@ private struct WereadReaderWebView: UIViewRepresentable {
         private var jumpMode = false
         /// 阅读器页只校验一次，避免每次翻页都跑一遍。
         private var checkedReader = false
-        /// 正文还没画出来时多等两轮，别把「还在加载」当成「打不开」。
+        /// 正文还没画出来时多等几轮，别把「还在加载」当成「打不开」。
         private var verifyAttempts = 0
+        /// 正文确认画出来了才写缓存，白屏地址绝不能存。
+        private var readerVerified = false
+        /// 已经退回过一次网页书架，避免白屏 → 书架 → 白屏 无限循环。
+        private var fallbackUsed = false
+        /// 阅读器迟迟没有正文时的看门狗。
+        private var watchdog: DispatchWorkItem?
 
         init(parent: WereadReaderWebView) {
             self.parent = parent
@@ -224,6 +245,10 @@ private struct WereadReaderWebView: UIViewRepresentable {
             jumpMode = parent.needsJump
             checkedReader = false
             verifyAttempts = 0
+            readerVerified = false
+            fallbackUsed = false
+            watchdog?.cancel()
+            watchdog = nil
             // 页面里已经登录过就别再灌旧 cookie —— 那会把用户刚登好的会话顶掉。
             let request = URLRequest(url: target)
             if parent.cookie.isEmpty {
@@ -248,16 +273,9 @@ private struct WereadReaderWebView: UIViewRepresentable {
             // 真的跳进阅读器了就把地址记下来，下次点这本书直接秒开。
             if current.contains("/web/reader/") {
                 parent.inReader = true
-                if jumpMode {
-                    // 在网页书架里自己点开的，这个地址一定是对的，直接记下来。
-                    WereadStore.shared.rememberReaderLink(
-                        bookId: parent.bookId,
-                        title: parent.bookTitle,
-                        url: current
-                    )
-                } else {
-                    verifyReader(in: webView, url: current)
-                }
+                // 不再「地址进了 /web/reader/ 就当成功」：hash 过期、正文没画出来
+                // 的时候页面是白的，之前把这种地址也写进缓存，于是每次点都白屏。
+                verifyReader(in: webView, url: current)
                 return
             }
             // 落到书架上：先把这一屏所有书的阅读器地址抄下来，
@@ -288,10 +306,26 @@ private struct WereadReaderWebView: UIViewRepresentable {
 
         /// 阅读器页可能只是「书不存在」的空壳（HTTP 200），看正文判断一下。
         private func verifyReader(in webView: WKWebView, url: String) {
-            guard !checkedReader else { return }
             checkedReader = true
             verifyAttempts = 0
+            readerVerified = false
+            startWatchdog(in: webView)
             checkReaderBody(in: webView, url: url)
+        }
+
+        /// 阅读器页面是纯 JS 画的，卡住时连脚本都不返回；所以看门狗走 Swift 计时，
+        /// 到点还没确认正文就退回网页书架，别让用户对着白板。
+        private func startWatchdog(in webView: WKWebView) {
+            watchdog?.cancel()
+            let item = DispatchWorkItem { [weak self, weak webView] in
+                guard let self = self, let webView = webView else { return }
+                guard !self.readerVerified, self.parent.inReader else { return }
+                self.fallbackToShelf(in: webView)
+            }
+            watchdog = item
+            // 正文最多校验 4 轮（2.5s × 4），看门狗要比它晚一点，
+            // 免得正文刚画出来就被判成白屏。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: item)
         }
 
         /// 正文是 JS 画出来的，`didFinish` 时往往还是白屏。
@@ -299,7 +333,8 @@ private struct WereadReaderWebView: UIViewRepresentable {
         /// 免得把「还在加载」误判成「打不开」把人踢回网页书架。
         private func checkReaderBody(in webView: WKWebView, url: String) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self, weak webView] in
-                guard let self = self, let webView = webView, !self.jumpMode else { return }
+                guard let self = self, let webView = webView else { return }
+                guard self.parent.inReader, !self.fallbackUsed else { return }
                 let script = "(document.body ? (document.body.innerText || '') : '').slice(0, 1500)"
                 webView.evaluateJavaScript(script) { value, _ in
                     let text = ((value as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -308,14 +343,22 @@ private struct WereadReaderWebView: UIViewRepresentable {
                         || text.contains("不存在")
                         || text.contains("已下架")
                     if missing {
-                        self.enterJumpMode(in: webView)
+                        self.fallbackToShelf(in: webView)
                         return
                     }
-                    if text.count < 10, self.verifyAttempts < 2 {
+                    if text.count < 10, self.verifyAttempts < 3 {
                         self.verifyAttempts += 1
                         self.checkReaderBody(in: webView, url: url)
                         return
                     }
+                    if text.count < 10 {
+                        // 白屏：这个地址不能用，别写缓存，退回网页书架让用户自己点。
+                        self.fallbackToShelf(in: webView)
+                        return
+                    }
+                    self.readerVerified = true
+                    self.watchdog?.cancel()
+                    self.watchdog = nil
                     WereadStore.shared.rememberReaderLink(
                         bookId: self.parent.bookId,
                         title: self.parent.bookTitle,
@@ -325,8 +368,31 @@ private struct WereadReaderWebView: UIViewRepresentable {
             }
         }
 
+        /// 阅读器打不开（白屏 / 404 / 卡住）时退回网页书架。
+        private func fallbackToShelf(in webView: WKWebView) {
+            watchdog?.cancel()
+            watchdog = nil
+            guard !fallbackUsed else {
+                parent.isLoading = false
+                return
+            }
+            fallbackUsed = true
+            jumpMode = true
+            checkedReader = false
+            // 保持「已经自动跳过」的状态：退回书架后别再自动点开同一本书，
+            // 否则又进白屏，而 fallbackUsed 已经用完，用户就卡死在白板上了。
+            didAttemptJump = true
+            jumpAttempts = 0
+            parent.inReader = false
+            parent.isLoading = true
+            guard let shelf = URL(string: "https://weread.qq.com/web/shelf") else { return }
+            webView.load(URLRequest(url: shelf))
+        }
+
         private func enterJumpMode(in webView: WKWebView) {
             guard !jumpMode else { return }
+            watchdog?.cancel()
+            watchdog = nil
             jumpMode = true
             checkedReader = true
             didAttemptJump = false

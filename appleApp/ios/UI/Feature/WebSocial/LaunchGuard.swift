@@ -13,6 +13,8 @@ enum LaunchGuard {
     private static let activeKey = "flare.launch.active"
     private static let safeKey = "flare.launch.safeMode"
     private static let cleanKey = "flare.launch.cleanRuns"
+    /// 连续「启动后没活到清标记」的次数。
+    private static let crashKey = "flare.launch.crashes"
 
     private(set) static var safeMode = UserDefaults.standard.bool(forKey: safeKey)
 
@@ -27,8 +29,18 @@ enum LaunchGuard {
         let defaults = UserDefaults.standard
         if defaults.bool(forKey: activeKey) {
             // 上次没走到清标记就死了，进安全模式。
+            let crashes = defaults.integer(forKey: crashKey) + 1
+            defaults.set(crashes, forKey: crashKey)
+            if crashes >= 3 {
+                // 连着三次都死在启动阶段：把最可能把启动路径带崩的 Instagram
+                // 凭证丢掉（用户顶多重登一次），保证 App 还能打开。
+                InstagramStore.purgeStoredCookie()
+                defaults.set(0, forKey: crashKey)
+            }
             defaults.set(true, forKey: safeKey)
             defaults.set(0, forKey: cleanKey)
+        } else {
+            defaults.set(0, forKey: crashKey)
         }
         safeMode = defaults.bool(forKey: safeKey)
         overrideOnce = false

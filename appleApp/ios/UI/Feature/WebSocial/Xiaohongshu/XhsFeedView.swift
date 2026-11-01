@@ -24,6 +24,18 @@ struct XhsFeedView: View {
         .navigationTitle("小红书")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // 独立的刷新按钮：之前刷新藏在「头像 → 菜单」里，用户根本找不到。
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if store.isLoggedIn {
+                    Button {
+                        Task { await store.retry() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(store.isLoading)
+                    .accessibilityLabel("刷新")
+                }
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 if store.isLoggedIn {
                     Menu {

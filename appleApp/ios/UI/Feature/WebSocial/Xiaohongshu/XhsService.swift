@@ -109,6 +109,9 @@ final class XhsService {
         if !xsecToken.isEmpty {
             parts.append("xsec_token=" + Self.encode(xsecToken))
         }
+        // 网页版评论区请求固定带 xsec_source；少了它服务端会认为「来源不明」，
+        // 一律回「当前笔记暂时无法浏览」。
+        parts.append("xsec_source=pc_feed")
         let json = try await get(
             "/api/sns/web/v2/comment/page",
             query: parts.joined(separator: "&")
@@ -256,6 +259,14 @@ final class XhsService {
         let code = XhsJSON.int(json["code"])
         if code == 0 { return }
         let message = XhsJSON.string(json["msg"]) ?? "请求失败（code \(code)）"
+        // 评论区最常见的拒绝就是这句：note_id 对、xsec_token 过期 / 来源对不上。
+        // 原样抛给用户等于什么也没说，换成能指导下一步的话。
+        if message.contains("当前笔记") || message.contains("无法浏览") || message.contains("笔记不存在") {
+            throw XhsError(
+                message: "小红书说这条笔记现在打不开（\(message)）。多半是 xsec_token 过期或被限流：回首页刷新一次再点进来；一直这样就用右上角「网页版」看。",
+                needLogin: false
+            )
+        }
         // -100 = 未登录，461 = 需要验证码，300013 = 签名错误。
         if code == -100 {
             throw XhsError.notLoggedIn

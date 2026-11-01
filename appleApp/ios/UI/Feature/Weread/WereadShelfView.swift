@@ -41,6 +41,11 @@ struct WereadShelfView: View {
                         } label: {
                             Label("重新同步线上书架", systemImage: "arrow.triangle.2.circlepath")
                         }
+                        Button {
+                            store.clearReaderLinks()
+                        } label: {
+                            Label("清除阅读器地址缓存", systemImage: "trash.slash")
+                        }
                         Button(role: .destructive) {
                             store.logout()
                         } label: {

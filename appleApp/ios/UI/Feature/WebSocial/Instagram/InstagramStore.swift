@@ -29,10 +29,29 @@ final class InstagramStore: ObservableObject {
     private var lastLoadMoreCursor: String?
 
     private init() {
+        let stored = defaults.string(forKey: cookieKey) ?? ""
+        let cleaned = InstagramService.sanitizeHeader(stored)
+        // 自愈：老版本可能把带换行 / 中文的脏 cookie 存进过 UserDefaults。
+        // 这种串一旦进了 HTTP 头，setValue 会抛 ObjC 异常（SIGABRT），
+        // 而且覆盖安装不会清 UserDefaults —— 表现就是「登录一次以后再也打不开」。
+        if !stored.isEmpty,
+            cleaned != stored || CookieJar.value(inHeader: cleaned, named: "sessionid") == nil
+        {
+            defaults.removeObject(forKey: cookieKey)
+            defaults.removeObject(forKey: userKey)
+        }
         let cookie = defaults.string(forKey: cookieKey) ?? ""
         isLoggedIn = !cookie.isEmpty
         userName = defaults.string(forKey: userKey) ?? ""
         pushCredentials()
+    }
+
+    /// 启动连续失败时的最后手段：把可能带崩启动路径的凭证丢掉。
+    /// 用户顶多重登一次，总比 App 完全打不开强。
+    static func purgeStoredCookie() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: "instagram.cookie")
+        defaults.removeObject(forKey: "instagram.username")
     }
 
     var cookie: String {

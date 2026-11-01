@@ -32,6 +32,10 @@ final class WereadStore: ObservableObject {
     private let nameKey = "weread.nickname"
     private let linksKey = "weread.readerLinks"
     private let linksByIdKey = "weread.readerLinksById"
+    private let linksEpochKey = "weread.readerLinksEpoch"
+    /// 缓存校验逻辑变了就换这个值：老版本把「白屏地址」也写进过缓存，
+    /// 升级后自动丢一次，省得用户每本书点进去都是白的。
+    private static let linksEpoch = "build77"
 
     private var harvester: WebPageHarvester?
     private var harvesting = false
@@ -46,6 +50,13 @@ final class WereadStore: ObservableObject {
         nickname = defaults.string(forKey: nameKey) ?? ""
         readerLinks = defaults.dictionary(forKey: linksKey) as? [String: String] ?? [:]
         bookLinks = defaults.dictionary(forKey: linksByIdKey) as? [String: String] ?? [:]
+        if defaults.string(forKey: linksEpochKey) != Self.linksEpoch {
+            defaults.removeObject(forKey: linksKey)
+            defaults.removeObject(forKey: linksByIdKey)
+            defaults.set(Self.linksEpoch, forKey: linksEpochKey)
+            readerLinks = [:]
+            bookLinks = [:]
+        }
     }
 
     var cookie: String {
@@ -284,6 +295,18 @@ final class WereadStore: ObservableObject {
         merged[key] = url
         readerLinks = merged
         defaults.set(merged, forKey: linksKey)
+    }
+
+    /// 清掉「书名 / bookId → 阅读器地址」两张缓存。
+    ///
+    /// 缓存里可能留着打不开的地址（上一版把白屏地址也写进去了），
+    /// 清掉之后点书会重新走「网页书架 → 点开 → 记下真地址」。
+    func clearReaderLinks() {
+        bookLinks = [:]
+        readerLinks = [:]
+        defaults.removeObject(forKey: linksByIdKey)
+        defaults.removeObject(forKey: linksKey)
+        defaults.set(Self.linksEpoch, forKey: linksEpochKey)
     }
 
     private func ingestShelf(_ message: WebPageHarvester.Message) {
