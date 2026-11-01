@@ -53,14 +53,17 @@ struct XhsFeedView: View {
         }
         .sheet(isPresented: $showLogin) {
             CookieLoginView(
-                url: "https://www.xiaohongshu.com/explore",
-                title: "登录小红书",
+                url: "https://www.xiaohongshu.com/login",
+                title: "扫码登录小红书",
                 userAgent: XhsSigner.desktopUserAgent,
                 requiredCookieName: "web_session",
                 cookieDomainSuffix: "xiaohongshu.com",
                 // 重新登录必须先把旧会话清掉：不清的话网页认为「已经登录」，
                 // 直接跳回首页，永远拿不到新的 web_session，sheet 就会一开一关。
                 clearCookies: true,
+                // 按 1280 宽排版再整体缩小：不这么做，手机 UA / 窄视口下
+                // 小红书会渲染成手机版登录页，没有二维码，只能手机号收短信。
+                desktopLayout: true,
                 onCancel: { store.restoreSignerCookies() }
             ) { cookies in
                 store.adopt(cookies: cookies)
@@ -178,7 +181,7 @@ struct XhsFeedView: View {
                 .padding(.horizontal, 32)
             HStack(spacing: 12) {
                 Button("重试") {
-                    Task { await store.refresh() }
+                    Task { await store.retry() }
                 }
                 .buttonStyle(.borderedProminent)
                 Button("重新登录") {
@@ -198,7 +201,7 @@ struct XhsFeedView: View {
                 .foregroundStyle(.secondary)
             Text("登录小红书")
                 .font(.headline)
-            Text("扫码或账号密码登录网页版，cookie 会一直留着。掉线了会回到这里。")
+            Text("用小红书 App 扫码登录（页面按桌面版排版，二维码在中间）。cookie 会一直留着，掉线了会回到这里。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

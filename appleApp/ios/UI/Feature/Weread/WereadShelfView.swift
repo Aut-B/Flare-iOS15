@@ -10,6 +10,7 @@ struct WereadShelfView: View {
     @ObservedObject private var store = WereadStore.shared
     @State private var showLogin = false
     @State private var target: WereadReaderTarget?
+    @State private var opening: WereadBook?
 
     private let columns = [GridItem(.adaptive(minimum: 96, maximum: 140), spacing: 16)]
 
@@ -35,6 +36,8 @@ struct WereadShelfView: View {
                             Label("刷新书架", systemImage: "arrow.clockwise")
                         }
                         Button {
+                            // 手动同步是用户的明确意图，安全模式也放行一次。
+                            LaunchGuard.allowThisRun()
                             store.syncWebShelf()
                         } label: {
                             Label("重新同步线上书架", systemImage: "arrow.triangle.2.circlepath")
@@ -58,9 +61,31 @@ struct WereadShelfView: View {
         .fullScreenCover(item: $target) { item in
             WereadReaderView(target: item)
         }
+        .overlay {
+            if let book = opening {
+                ZStack {
+                    Color.black.opacity(0.35).ignoresSafeArea()
+                    VStack(spacing: 14) {
+                        ProgressView()
+                        Text("正在打开《\(book.title)》…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(24)
+                    .background(Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+            }
+        }
         .task {
-            if store.isLoggedIn, store.books.isEmpty {
+            guard store.isLoggedIn else { return }
+            if store.books.isEmpty {
                 await store.refreshShelf()
+            }
+            // 老版本升级上来的用户书架有、readerLinks 是空的，先补一遍。
+            // 一次启动只跑一次，别每切回标签页就重建隐藏网页。
+            if store.readerLinks.isEmpty {
+                store.syncWebShelfIfNeeded()
             }
         }
     }
@@ -107,14 +132,26 @@ struct WereadShelfView: View {
     private func open(_ book: WereadBook) {
         if let url = store.readerLink(for: book) {
             target = WereadReaderTarget(url: url, title: book.title, needsJump: false)
-        } else {
-            // 还没抄到地址：先落到网页书架，进去后自动点开这本书。
-            target = WereadReaderTarget(
-                url: "https://weread.qq.com/web/shelf",
-                title: book.title,
-                needsJump: true
-            )
-            store.syncWebShelf()
+            return
+        }
+        // 还没抄到地址：不要直接把用户扔进网页书架。先在原生界面盖一层
+        // 「正在打开」，后台跑网页书架把这本书的 reader hash 找出来，
+        // 找到就直接进阅读器；实在找不到才退回「网页书架 + 自动点开」。
+        opening = book
+        Task {
+            let url = await store.resolveReaderLink(for: book)
+            await MainActor.run {
+                opening = nil
+                if let url = url {
+                    target = WereadReaderTarget(url: url, title: book.title, needsJump: false)
+                } else {
+                    target = WereadReaderTarget(
+                        url: "https://weread.qq.com/web/shelf",
+                        title: book.title,
+                        needsJump: true
+                    )
+                }
+            }
         }
     }
 

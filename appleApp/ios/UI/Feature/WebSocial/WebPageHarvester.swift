@@ -9,11 +9,13 @@ import WebKit
 /// `a1` 会话这些东西对不上。所以换个思路 —— 让真正的网页自己去请求，
 /// 我们在 `fetch` / `XMLHttpRequest` 上挂个钩子，把响应原样搬回原生。
 ///
-/// 请求是页面发的，签名、cookie、TLS、指纹天然全对，风控无从下手。
+/// 页面挂在窗口最底层：**必须挂在窗口上**，不在视图层级里的 WKWebView 会被
+/// 系统当成不可见页面，`requestAnimationFrame` 和滚动监听都被降频，
+/// 懒加载永远不触发。
 ///
-/// 页面挂在一个 1x1、几乎透明的容器里贴在 key window 最底层。必须挂在窗口上：
-/// 不在视图层级里的 WKWebView 会被系统当成不可见页面，`requestAnimationFrame`
-/// 和滚动监听都被降频，懒加载永远不触发。
+/// 尺寸也很关键：页面按 1280 宽（桌面版）布局，再整体缩到窗口最底层。
+/// 之前直接给 390 宽，小红书会判定成窄屏 / 手机版，压根不请求 `homefeed`，
+/// 表现就是「加载半天没抓到首页数据」。
 final class WebPageHarvester: NSObject, WKNavigationDelegate {
     struct Message {
         let url: String
@@ -21,17 +23,27 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
     }
 
     private static let handlerName = "flareharvest"
+    /// 桌面版布局尺寸（CSS px）。小红书 / 微信读书的 web 端都是按这个宽度做的。
+    private static let layoutSize = CGSize(width: 1280, height: 1600)
+    /// 贴在窗口最底层的那块区域，缩到这么小，用户看不见也点不到。
+    private static let hostSize = CGSize(width: 384, height: 480)
 
     private var webView: WKWebView?
     private var host: UIView?
     private var handler: Handler?
     private var onMessage: ((Message) -> Void)?
     private var onFinish: (() -> Void)?
+    private var onFail: ((String) -> Void)?
 
     private var startURL = ""
     private var userAgent = ""
     private var cookieHeader = ""
     private var cookieDomain = ""
+
+    /// 页面当前地址。用来判断是不是被踢到登录页了。
+    private(set) var currentURL = ""
+    /// 最近一次加载失败的原因。
+    private(set) var lastError: String?
 
     var isRunning: Bool { webView != nil }
 
@@ -44,6 +56,7 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
         cookieDomain: String,
         patterns: [String],
         onFinish: (() -> Void)? = nil,
+        onFail: ((String) -> Void)? = nil,
         onMessage: @escaping (Message) -> Void
     ) {
         let work: () -> Void = { [weak self] in
@@ -55,6 +68,7 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
             self.cookieDomain = cookieDomain
             self.onMessage = onMessage
             self.onFinish = onFinish
+            self.onFail = onFail
             self.build(patterns: patterns)
         }
         if Thread.isMainThread {
@@ -106,6 +120,7 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.allowsInlineMediaPlayback = true
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
 
         let controller = WKUserContentController()
         controller.addUserScript(
@@ -122,12 +137,15 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
         handler = proxy
 
         let view = WKWebView(
-            frame: CGRect(x: 0, y: 0, width: 390, height: 844),
+            frame: CGRect(origin: .zero, size: Self.layoutSize),
             configuration: configuration
         )
         view.customUserAgent = userAgent
         view.isUserInteractionEnabled = false
         view.navigationDelegate = self
+        view.isOpaque = false
+        view.backgroundColor = .clear
+        view.scrollView.isScrollEnabled = true
         webView = view
         attach(view)
 
@@ -139,7 +157,9 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
         if cookieHeader.isEmpty {
             load()
         } else {
-            CookieJar.writeIfAbsent(cookieHeader, domainSuffix: cookieDomain, completion: load)
+            // 这里必须**覆盖写**。`writeIfAbsent` 遇到仓库里残留的过期会话
+            // 就不写了，页面会带着旧 session 被踢去登录页，首页流一条都抓不到。
+            CookieJar.write(cookieHeader, domainSuffix: cookieDomain, completion: load)
         }
     }
 
@@ -156,9 +176,17 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
         host = nil
         webView = nil
         handler = nil
+        currentURL = ""
     }
 
     private func attach(_ view: WKWebView) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.webView === view else { return }
+                self.attach(view)
+            }
+            return
+        }
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
         guard
@@ -166,11 +194,16 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
         else {
             return
         }
-        let container = UIView(frame: CGRect(x: -4, y: -4, width: 2, height: 2))
+        let container = UIView(frame: CGRect(origin: .zero, size: Self.hostSize))
         container.clipsToBounds = true
+        container.backgroundColor = .clear
+        // 不能是 0 / isHidden：WebKit 会把页面当后台页，定时器和滚动监听全被降频。
         container.alpha = 0.02
         container.isUserInteractionEnabled = false
-        view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        let scale = Self.hostSize.width / Self.layoutSize.width
+        view.bounds = CGRect(origin: .zero, size: Self.layoutSize)
+        view.center = CGPoint(x: Self.hostSize.width / 2, y: Self.hostSize.height / 2)
+        view.transform = CGAffineTransform(scaleX: scale, y: scale)
         container.addSubview(view)
         window.addSubview(container)
         window.sendSubviewToBack(container)
@@ -183,8 +216,36 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
         onMessage?(message)
     }
 
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        if let text = webView.url?.absoluteString, !text.isEmpty {
+            currentURL = text
+        }
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if let text = webView.url?.absoluteString, !text.isEmpty {
+            currentURL = text
+        }
+        lastError = nil
         onFinish?()
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFail navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        lastError = error.localizedDescription
+        onFail?(error.localizedDescription)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        lastError = error.localizedDescription
+        onFail?(error.localizedDescription)
     }
 
     private final class Handler: NSObject, WKScriptMessageHandler {
@@ -267,7 +328,24 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
               try {
                 if (xhr.__flareURL && interested(xhr.__flareURL)) {
                   xhr.addEventListener('load', function() {
-                    try { post(xhr.__flareURL, xhr.responseText); } catch (e) {}
+                    try {
+                      var text = '';
+                      var type = xhr.responseType;
+                      // 关键：`responseType = 'json'` 时读 `responseText` 会直接抛
+                      // InvalidStateError，以前被 catch 吞掉，表现就是「一条数据都抓不到」。
+                      if (!type || type === 'text') {
+                        text = xhr.responseText || '';
+                      } else if (type === 'json') {
+                        text = JSON.stringify(xhr.response);
+                      } else if (type === 'arraybuffer' && xhr.response) {
+                        try {
+                          text = new TextDecoder('utf-8').decode(new Uint8Array(xhr.response));
+                        } catch (e) {}
+                      } else {
+                        text = String(xhr.response || '');
+                      }
+                      if (text) { post(xhr.__flareURL, text); }
+                    } catch (e) {}
                   });
                 }
               } catch (e) {}
@@ -282,12 +360,14 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
     /// 找不到滚动容器就退回 `window`，顺手补一个 wheel 事件。
     private static let scrollScript = """
     (function(){
+      var moved = 0;
       try {
-        window.scrollTo(0, document.body.scrollHeight);
-        if (document.documentElement) {
-          document.documentElement.scrollTop = document.documentElement.scrollHeight;
+        var root = document.scrollingElement || document.documentElement;
+        if (root) {
+          root.scrollTop = root.scrollHeight;
+          moved = root.scrollTop;
         }
-        if (document.body) { document.body.scrollTop = document.body.scrollHeight; }
+        window.scrollTo(0, (document.body ? document.body.scrollHeight : 0) + 2000);
       } catch (e) {}
       var best = null;
       var bestHeight = 0;
@@ -305,11 +385,14 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
       if (best) {
         try {
           best.scrollTop = best.scrollHeight;
-          best.dispatchEvent(new WheelEvent('wheel', {deltaY: 1600, bubbles: true, cancelable: true}));
+          best.dispatchEvent(new WheelEvent('wheel', {deltaY: 2400, bubbles: true, cancelable: true}));
         } catch (e) {}
       }
-      try { window.dispatchEvent(new Event('scroll')); } catch (e) {}
-      return best ? '1' : '0';
+      try {
+        window.dispatchEvent(new Event('scroll'));
+        document.dispatchEvent(new Event('scroll'));
+      } catch (e) {}
+      return String(best ? 1 : (moved > 0 ? 1 : 0));
     })()
     """
 }

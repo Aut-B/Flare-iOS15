@@ -261,7 +261,7 @@ final class XhsSigner {
         configuration.websiteDataStore = .default()
         configuration.allowsInlineMediaPlayback = true
         let view = WKWebView(
-            frame: CGRect(x: 0, y: 0, width: 390, height: 844),
+            frame: CGRect(x: 0, y: 0, width: 1280, height: 1600),
             configuration: configuration
         )
         view.customUserAgent = Self.desktopUserAgent
@@ -270,7 +270,8 @@ final class XhsSigner {
         attachToWindow(view)
         // `load` 会作为 `() -> Void` 传出去；不写类型会被推断成 `() -> WKNavigation?`。
         let load: () -> Void = {
-            _ = view.load(URLRequest(url: URL(string: "https://www.xiaohongshu.com/explore")!))
+            guard let url = URL(string: "https://www.xiaohongshu.com/explore") else { return }
+            _ = view.load(URLRequest(url: url))
         }
         let cookies = Self.cookies(fromHeader: cookieHeader)
         if cookies.isEmpty {
@@ -298,7 +299,7 @@ final class XhsSigner {
         container.clipsToBounds = true
         container.alpha = 0.02
         container.isUserInteractionEnabled = false
-        view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        view.frame = CGRect(x: 0, y: 0, width: 1280, height: 1600)
         container.addSubview(view)
         window.addSubview(container)
         window.sendSubviewToBack(container)

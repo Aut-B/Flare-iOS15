@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import WebKit
 
 /// 「网页登录 → 抓 cookie」的通用页面。
@@ -21,11 +22,16 @@ struct CookieLoginView: View {
     /// 打开前先清掉该域名的旧 cookie。重新登录时必须开，
     /// 否则网页会认为「已经登录」，直接跳回首页，永远拿不到新会话。
     var clearCookies: Bool = false
+    /// 按 1280 宽排版再整体缩小。小红书的手机版登录页没有二维码，
+    /// 只有桌面版才有 —— 6s 这种窄屏必须开这个才有得扫。
+    var desktopLayout: Bool = false
     /// 用户点取消时回调（用来把旧 cookie 灌回隐藏页面，避免签名页变成匿名）。
     var onCancel: (() -> Void)? = nil
     let onCookies: ([HTTPCookie]) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    /// 点「完成」时 +1，让 WebView 那边强制把当前 cookie 收下。
+    @State private var finishToken = 0
 
     var body: some View {
         NavigationView {
@@ -34,7 +40,9 @@ struct CookieLoginView: View {
                 userAgent: userAgent,
                 requiredCookieName: requiredCookieName,
                 cookieDomainSuffix: cookieDomainSuffix,
-                clearCookies: clearCookies
+                clearCookies: clearCookies,
+                desktopLayout: desktopLayout,
+                finishToken: finishToken
             ) { cookies in
                 onCookies(cookies)
                 dismiss()
@@ -48,6 +56,11 @@ struct CookieLoginView: View {
                         dismiss()
                     }
                 }
+                // 二维码扫完页面不一定跳转，自动判断也可能慢半拍。
+                // 留一个手动出口，用户点「完成」就直接把当前会话收下。
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { finishToken += 1 }
+                }
             }
         }
         .navigationViewStyle(.stack)
@@ -60,6 +73,8 @@ private struct CookieWebContainer: UIViewRepresentable {
     let requiredCookieName: String
     let cookieDomainSuffix: String
     let clearCookies: Bool
+    let desktopLayout: Bool
+    let finishToken: Int
     let onCookies: ([HTTPCookie]) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -70,21 +85,69 @@ private struct CookieWebContainer: UIViewRepresentable {
         )
     }
 
-    func makeUIView(context: Context) -> WKWebView {
+    func makeUIView(context: Context) -> UIView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
+        // 桌面 UA 只改 `navigator.userAgent`，改不了视口宽度。
+        if userAgent.contains("Macintosh") || userAgent.contains("Windows") {
+            configuration.userContentController.addUserScript(
+                WKUserScript(
+                    source: Self.desktopShim(scaleToFit: !desktopLayout),
+                    injectionTime: .atDocumentStart,
+                    forMainFrameOnly: true
+                )
+            )
+        }
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.customUserAgent = userAgent
         webView.navigationDelegate = context.coordinator
+        webView.allowsBackForwardNavigationGestures = true
         // 先记录「打开前的会话」，再决定要不要清 cookie、要不要加载。
         context.coordinator.begin(webView: webView, url: url, clearCookies: clearCookies)
-        return webView
+        guard desktopLayout else { return webView }
+        return DesktopContainer(webView: webView)
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {}
+    func updateUIView(_ view: UIView, context: Context) {
+        context.coordinator.apply(finishToken: finishToken)
+    }
 
-    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+    func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
         coordinator.stopPolling()
+    }
+
+    /// 让窄屏也按桌面版排版，并且把「手机」特征抹掉。
+    ///
+    /// `scaleToFit` 只给「不套 DesktopContainer」的场景用：靠 `initial-scale`
+    /// 把 1280 宽压进屏幕。套了 DesktopContainer 的必须给 1，
+    /// 否则缩放会叠加两次，二维码小到扫不出来。
+    private static func desktopShim(scaleToFit: Bool) -> String {
+        let initialScale = scaleToFit ? "0.30" : "1"
+        return """
+    (function(){
+      function apply(){
+        try {
+          var head = document.head || document.documentElement;
+          if (!head) return;
+          var meta = document.querySelector('meta[name="viewport"]');
+          if (!meta) {
+            meta = document.createElement('meta');
+            meta.setAttribute('name', 'viewport');
+            head.appendChild(meta);
+          }
+          meta.setAttribute('content', 'width=1280, initial-scale=\(initialScale), minimum-scale=0.1, maximum-scale=5, user-scalable=yes');
+        } catch (e) {}
+      }
+      apply();
+      document.addEventListener('DOMContentLoaded', apply, true);
+      window.addEventListener('load', apply, true);
+      try {
+        Object.defineProperty(navigator, 'platform', { get: function(){ return 'MacIntel'; } });
+        Object.defineProperty(navigator, 'maxTouchPoints', { get: function(){ return 0; } });
+      } catch (e) {}
+    })();
+    """
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
@@ -99,6 +162,14 @@ private struct CookieWebContainer: UIViewRepresentable {
         /// 打开登录页之前仓库里的会话值。只有出现**不同**的值才算登录成功。
         private var baseline: String?
         private var baselineReady = false
+        /// 「完成」按钮按了几次。只在值变化时处理，避免每次刷新都触发。
+        private var lastFinishToken = 0
+        /// 登录页真正加载完的时间。清完 cookie 后页面往往先种一个游客
+        /// `web_session`，这时候收下会话等于白登一次 —— 页面就绪后再等
+        /// 两秒才开始认 cookie。
+        private var armedAt: Date?
+        /// 就绪时把「游客会话」记成新的基线。之后只有**换过**的会话才算登录成功。
+        private var baselineRefreshed = false
 
         init(
             requiredCookieName: String,
@@ -132,6 +203,12 @@ private struct CookieWebContainer: UIViewRepresentable {
                 }
             }
             startPolling()
+            // 有些站点（小红书）会一直有子请求在跑，`didFinish` 迟迟不来。
+            // 兜个底：最迟 10 秒也把基线定下来，别让轮询永远不生效。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+                guard let self = self, !self.finished else { return }
+                if self.armedAt == nil { self.armedAt = Date() }
+            }
         }
 
         private func load() {
@@ -156,6 +233,7 @@ private struct CookieWebContainer: UIViewRepresentable {
 
         private func checkCookies() {
             guard !finished, baselineReady else { return }
+            guard let armed = armedAt, Date().timeIntervalSince(armed) > 2.0 else { return }
             WKWebsiteDataStore.default().httpCookieStore.getAllCookies { [weak self] cookies in
                 guard let self = self, !self.finished else { return }
                 let matched = cookies.filter { $0.domain.contains(self.cookieDomainSuffix) }
@@ -164,6 +242,13 @@ private struct CookieWebContainer: UIViewRepresentable {
                         $0.name == self.requiredCookieName && !$0.value.isEmpty
                     })
                 else {
+                    return
+                }
+                // 第一次走到这里说明页面已经就绪：此刻的会话是游客态，
+                // 记成新基线，免得页面自种的游客 cookie 直接把 sheet 关掉。
+                if !self.baselineRefreshed {
+                    self.baselineRefreshed = true
+                    self.baseline = session.value
                     return
                 }
                 // 值没变 = 还是打开前那套会话，说明用户还没真正登录成功。
@@ -178,9 +263,67 @@ private struct CookieWebContainer: UIViewRepresentable {
             }
         }
 
+        /// 用户点「完成」：直接把当前会话收下，不必等页面跳转或轮询。
+        func apply(finishToken: Int) {
+            guard finishToken != lastFinishToken else { return }
+            lastFinishToken = finishToken
+            guard finishToken > 0 else { return }
+            forceFinish()
+        }
+
+        private func forceFinish() {
+            guard !finished else { return }
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { [weak self] cookies in
+                guard let self = self, !self.finished else { return }
+                let matched = cookies.filter { $0.domain.contains(self.cookieDomainSuffix) }
+                guard matched.contains(where: {
+                    $0.name == self.requiredCookieName && !$0.value.isEmpty
+                }) else { return }
+                self.finished = true
+                self.stopPolling()
+                DispatchQueue.main.async {
+                    self.onCookies(matched)
+                }
+            }
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            armedAt = Date()
             checkCookies()
         }
+    }
+}
+
+/// 按 1280 宽排版，再整体缩放到屏幕宽度。小红书的手机版登录页没有二维码，
+/// 只有桌面版才有；6s 这种窄屏必须走这条路。
+private final class DesktopContainer: UIView {
+    private static let layoutWidth: CGFloat = 1280
+    private static let layoutHeight: CGFloat = 1600
+    private let webView: WKWebView
+
+    init(webView: WKWebView) {
+        self.webView = webView
+        super.init(frame: .zero)
+        clipsToBounds = true
+        backgroundColor = .systemBackground
+        addSubview(webView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let width = max(bounds.width, 1)
+        let height = max(bounds.height, 1)
+        let scale = width / Self.layoutWidth
+        webView.bounds = CGRect(
+            x: 0,
+            y: 0,
+            width: Self.layoutWidth,
+            height: max(Self.layoutHeight, height / max(scale, 0.01))
+        )
+        webView.transform = CGAffineTransform(scaleX: scale, y: scale)
+        webView.center = CGPoint(x: width / 2, y: height / 2)
     }
 }
 

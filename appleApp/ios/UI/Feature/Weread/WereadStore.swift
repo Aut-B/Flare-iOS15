@@ -19,8 +19,9 @@ final class WereadStore: ObservableObject {
     @Published private(set) var isLoading = false
     /// 书名 → 网页阅读器地址（`/web/reader/<hash>`）。
     ///
-    /// 网页阅读器认的是那个 hash，用 `shelf/sync` 给的数字 bookId 自己拼一定
-    /// 404 —— 这也是上一版「点进去白屏」的原因。hash 只能从网页书架的链接里拿。
+    /// 没抄到也不要紧：hash 其实就是 bookId 过一遍 `WereadCrypto.calcHash`，
+    /// 见 `readerLink(for:)`。这张表只是网页里看到的真实地址缓存，
+    /// 用来纠正极少数拼不出来的书。
     @Published private(set) var readerLinks: [String: String] = [:]
     @Published var errorMessage: String?
 
@@ -32,6 +33,9 @@ final class WereadStore: ObservableObject {
     private var harvester: WebPageHarvester?
     private var harvesting = false
     private var harvested: [WereadBook] = []
+    /// 一次启动里只跑一次线上书架同步。隐藏网页很吃 CPU，
+    /// 反复建页面既费电，也容易在旧机型上把进程拖崩。
+    private var syncedThisSession = false
 
     private init() {
         let cookie = defaults.string(forKey: cookieKey) ?? ""
@@ -159,10 +163,11 @@ final class WereadStore: ObservableObject {
 
     /// 打开一个隐藏的真网页跑一遍线上书架：既补齐 `shelf/sync` 漏掉的书，
     /// 也把每本书在网页阅读器里的真实地址（`/web/reader/<hash>`）抄下来。
-    func syncWebShelf(scrolls: Int = 3) {
+    func syncWebShelf(scrolls: Int = 5) {
         let work: () -> Void = { [weak self] in
             guard let self = self else { return }
-            guard self.isLoggedIn, !self.harvesting else { return }
+            guard self.isLoggedIn, !LaunchGuard.webViewsBlocked, !self.harvesting else { return }
+            self.syncedThisSession = true
             self.harvesting = true
             self.harvested = []
             self.harvester?.stop()
@@ -176,7 +181,7 @@ final class WereadStore: ObservableObject {
                 patterns: ["/web/shelf/sync"],
                 onFinish: { [weak self] in
                     // 书架是 JS 渲染的，等它铺完再抄链接。
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
                         self?.extractReaderLinks()
                     }
                 },
@@ -187,11 +192,19 @@ final class WereadStore: ObservableObject {
             // 网页书架也是滚动加载，往下拉几次把书捞全。
             let steps = max(scrolls, 1)
             for index in 1...steps {
-                DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 2.5) { [weak self] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 1.8) { [weak self] in
                     self?.harvester?.scroll()
                 }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double(steps) * 2.5 + 3.0) { [weak self] in
+            // 只抄一次 DOM 是不够的：网页书架是分批渲染的，后面几屏的书
+            // 在第一次抄的时候还没进 DOM，那些书就永远拿不到 reader hash，
+            // 点进去只能退回网页书架再点一次。这里每隔一段时间抄一遍。
+            for delay in [2.6, 4.4, 6.2, 8.0, 9.8, 11.6] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.extractReaderLinks()
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(steps) * 1.8 + 4.2) { [weak self] in
                 self?.finishHarvest()
             }
         }
@@ -202,11 +215,46 @@ final class WereadStore: ObservableObject {
         }
     }
 
+    /// 书架页每次出现都会调，这里挡一道，只在本进程里跑一次。
+    func syncWebShelfIfNeeded() {
+        guard !syncedThisSession else { return }
+        syncWebShelf()
+    }
+
+    /// 点书时调用：有缓存就秒开；没有就现场跑一遍网页书架，最多等 15 秒。
+    /// 这样用户看到的是原生的「正在打开」，而不是先跳进网页书架。
+    func resolveReaderLink(for book: WereadBook, timeout: TimeInterval = 15) async -> String? {
+        if let url = await linkOnMain(for: book) { return url }
+        let alreadyHarvesting = await MainActor.run { self.harvesting }
+        if !alreadyHarvesting {
+            await MainActor.run { self.syncWebShelf(scrolls: 4) }
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let url = await linkOnMain(for: book) { return url }
+            try? await Task.sleep(nanoseconds: 350_000_000)
+        }
+        return await linkOnMain(for: book)
+    }
+
+    private func linkOnMain(for book: WereadBook) async -> String? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                continuation.resume(returning: self.readerLink(for: book))
+            }
+        }
+    }
+
     /// 网页阅读器地址。书名对不上时返回 nil，调用方退回「网页书架 + 自动点开」。
     func readerLink(for book: WereadBook) -> String? {
         let key = Self.normalize(book.title)
         if let url = readerLinks[key], !url.isEmpty { return url }
-        return nil
+        // 兜底：网页阅读器的 hash 就是 bookId 过一遍站点的 id 混淆算法
+        // （`WereadCrypto.calcHash`，章节接口里的 `b` 字段用的也是它）。
+        // 之前不知道这一点，只能等隐藏网页把书架铺完再抄链接，点一本书
+        // 要干等十几秒 —— 用户看到的「点进去先加载半天」就是这个。
+        guard !book.id.isEmpty else { return nil }
+        return "https://weread.qq.com/web/reader/\(WereadCrypto.calcHash(book.id))"
     }
 
     /// 阅读器里真正跳成功以后把地址记下来，下次点这本书就是秒开。
@@ -291,16 +339,21 @@ final class WereadStore: ObservableObject {
     }
 
     private func finishHarvest() {
-        harvesting = false
-        harvester?.stop()
-        harvester = nil
-        if !harvested.isEmpty {
-            var merged = books
-            let known = Set(merged.map { $0.id })
-            merged.append(contentsOf: harvested.filter { !known.contains($0.id) })
-            books = merged
+        // 停页面之前再抄最后一遍，把最后一屏滚出来的书也算上。
+        extractReaderLinks()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self = self else { return }
+            self.harvesting = false
+            self.harvester?.stop()
+            self.harvester = nil
+            if !self.harvested.isEmpty {
+                var merged = self.books
+                let known = Set(merged.map { $0.id })
+                merged.append(contentsOf: self.harvested.filter { !known.contains($0.id) })
+                self.books = merged
+            }
+            self.harvested = []
         }
-        harvested = []
     }
 
     private static func normalize(_ title: String) -> String {

@@ -10,6 +10,8 @@ struct FlareApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        // 上次启动如果没走完看门狗，这一次先停掉隐藏网页，至少保证 App 能打开。
+        LaunchGuard.begin()
         MediaCacheMaintenance.configure()
         configureAudioSessionForMixing()
         configureBarAppearances()
