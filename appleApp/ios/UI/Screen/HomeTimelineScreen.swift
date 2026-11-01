@@ -326,7 +326,6 @@ struct HomeTimelineScreen: View {
                 } loadingContent: {
                     Image(fontAwesome: .gear)
                 }
-                .allowsHitTesting(false)
                 .frame(width: 30, height: 30)
                 .contentShape(Rectangle())
             }
