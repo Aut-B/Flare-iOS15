@@ -28,19 +28,22 @@ internal class AccountTabSyncCoordinator(
 ) {
     init {
         coroutineScope.launch {
-            removeTabsForDeletedAccounts()
+            runCatching { removeTabsForDeletedAccounts() }
         }
         coroutineScope.launch {
-            ensureTabsForExistingAccounts()
+            runCatching { ensureTabsForExistingAccounts() }
         }
         coroutineScope.launch {
             accountRepository.onAdded.collect { account ->
-                addDefaultTabs(account)
+                // 建数据源可能抛（平台没注册 / 凭证解析失败 / DB 里查不到）。
+                // 这个 coroutine 在启动时创建，异常抛出去就是整机闪退 ——
+                // 表现就是「登录成功后闪退」「装上以后再也进不去」。
+                runCatching { addDefaultTabs(account) }
             }
         }
         coroutineScope.launch {
             accountRepository.onRemoved.collect { accountKey ->
-                removeTabsForAccount(accountKey)
+                runCatching { removeTabsForAccount(accountKey) }
             }
         }
     }
@@ -64,9 +67,11 @@ internal class AccountTabSyncCoordinator(
         val extraSlots =
             missing
                 .flatMap { account ->
-                    (accountRepository.getOrCreateDataSource(account) as? TimelineTabConfigurationDataSource)
-                        ?.defaultTabs
-                        .orEmpty()
+                    runCatching {
+                        (accountRepository.getOrCreateDataSource(account) as? TimelineTabConfigurationDataSource)
+                            ?.defaultTabs
+                            .orEmpty()
+                    }.getOrNull().orEmpty()
                 }.map(timelineResolver::toSlot)
         if (extraSlots.isEmpty()) return
         settingsRepository.updateTabSettingsV2 {
@@ -105,9 +110,11 @@ internal class AccountTabSyncCoordinator(
 
     private suspend fun addDefaultTabs(account: UiAccount) {
         val defaultTabs =
-            (accountRepository.getOrCreateDataSource(account) as? TimelineTabConfigurationDataSource)
-                ?.defaultTabs
-                .orEmpty()
+            runCatching {
+                (accountRepository.getOrCreateDataSource(account) as? TimelineTabConfigurationDataSource)
+                    ?.defaultTabs
+                    .orEmpty()
+            }.getOrNull().orEmpty()
         if (defaultTabs.isEmpty()) {
             return
         }

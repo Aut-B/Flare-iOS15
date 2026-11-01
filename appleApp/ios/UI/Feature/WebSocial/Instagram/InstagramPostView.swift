@@ -295,6 +295,11 @@ struct InstagramProfileView: View {
     @State private var isLoading = true
     @State private var errorText: String?
     @State private var selected: IGMedia?
+    /// 主页接口被风控（`feedback_required`）时自动切网页版：
+    /// 同一个页面在浏览器里是能看的，没必要让用户对着一个错误页干瞪眼。
+    @State private var useWeb = false
+
+    private var webURL: String { "https://www.instagram.com/\(userName)/" }
 
     private let columns = [
         GridItem(.flexible(), spacing: 2),
@@ -304,7 +309,9 @@ struct InstagramProfileView: View {
 
     var body: some View {
         Group {
-            if isLoading, media.isEmpty {
+            if useWeb {
+                webFallback
+            } else if isLoading, media.isEmpty {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let errorText = errorText, media.isEmpty {
@@ -321,6 +328,10 @@ struct InstagramProfileView: View {
                         Task { await load() }
                     }
                     .buttonStyle(.borderedProminent)
+                    Button("用网页版打开") {
+                        useWeb = true
+                    }
+                    .buttonStyle(.bordered)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -421,6 +432,45 @@ struct InstagramProfileView: View {
             media = result.media
         } catch {
             errorText = error.localizedDescription
+            // 「没有找到这个账号」是输错了名字，网页也救不了；
+            // 其余（feedback_required / 风控页 / 403）网页版都能正常打开。
+            if !error.localizedDescription.contains("没有找到") {
+                useWeb = true
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var webFallback: some View {
+        VStack(spacing: 0) {
+            if errorText != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                    Text("接口被风控，已切到网页版")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Button("重试原生") {
+                        useWeb = false
+                        Task { await load() }
+                    }
+                    .font(.system(size: 11, weight: .semibold))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.08))
+            }
+            WebPlatformView(
+                url: webURL,
+                title: "@\(userName)",
+                mobileUserAgent: WebPlatformUserAgent.mobile,
+                desktopUserAgent: WebPlatformUserAgent.desktop,
+                initialCookie: InstagramStore.shared.cookie,
+                cookieDomainSuffix: "instagram.com",
+                showsBrowserBar: false
+            )
         }
     }
 }

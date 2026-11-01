@@ -220,7 +220,7 @@ final class InstagramService {
         urlRequest.setValue(asbdID, forHTTPHeaderField: "X-ASBD-ID")
         // 网页版会把这个 claim 带上；缺了的时候点赞容易被当成未登录。
         urlRequest.setValue(
-            CookieJar.value(inHeader: cookie, named: "x-ig-www-claim") ?? "0",
+            Self.sanitizeHeader(CookieJar.value(inHeader: cookie, named: "x-ig-www-claim") ?? "0"),
             forHTTPHeaderField: "X-IG-WWW-Claim"
         )
         urlRequest.setValue("1", forHTTPHeaderField: "X-Instagram-AJAX")
@@ -236,11 +236,13 @@ final class InstagramService {
         urlRequest.setValue("3brTvw==", forHTTPHeaderField: "X-IG-Capabilities")
         urlRequest.setValue("WIFI", forHTTPHeaderField: "X-IG-Connection-Type")
         urlRequest.setValue("Liger", forHTTPHeaderField: "X-FB-HTTP-Engine")
-        if !cookie.isEmpty {
-            urlRequest.setValue(cookie, forHTTPHeaderField: "Cookie")
+        let safeCookie = Self.sanitizeHeader(cookie)
+        if !safeCookie.isEmpty {
+            urlRequest.setValue(safeCookie, forHTTPHeaderField: "Cookie")
         }
-        if !csrfToken.isEmpty {
-            urlRequest.setValue(csrfToken, forHTTPHeaderField: "X-CSRFToken")
+        let safeCSRF = Self.sanitizeHeader(csrfToken)
+        if !safeCSRF.isEmpty {
+            urlRequest.setValue(safeCSRF, forHTTPHeaderField: "X-CSRFToken")
         }
 
         let (data, response) = try await session.data(for: urlRequest)
@@ -283,6 +285,18 @@ final class InstagramService {
             throw IGError(message: "接口返回格式异常", needLogin: false)
         }
         return json
+    }
+
+    /// HTTP 头只能放可见 ASCII。换行 / 中文 / 控制字符会让 `setValue` 抛
+    /// ObjC 异常 —— 那是 SIGABRT，Kotlin 那边也接不住，表现就是登录成功后闪退。
+    static func sanitizeHeader(_ value: String) -> String {
+        var result = ""
+        result.unicodeScalars.reserveCapacity(value.unicodeScalars.count)
+        for scalar in value.unicodeScalars
+        where scalar.isASCII && scalar.value >= 0x20 && scalar.value != 0x7F {
+            result.unicodeScalars.append(scalar)
+        }
+        return result
     }
 
     /// 接口要一个稳定的设备 id，随便造一个存下来就行。

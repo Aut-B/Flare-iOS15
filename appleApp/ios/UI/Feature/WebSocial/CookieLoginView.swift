@@ -229,6 +229,26 @@ enum CookieJar {
     }
 
     /// 把一段 `Cookie:` 串写进 WKWebsiteDataStore（网页版兜底页用）。
+    /// 只在目标域名还没有 cookie 时才写：用户可能在网页里重新登录过，
+    /// 每次都灌旧串等于把他刚登好的会话顶掉。
+    static func writeIfAbsent(
+        _ header: String,
+        domainSuffix: String,
+        completion: @escaping () -> Void
+    ) {
+        let store = WKWebsiteDataStore.default().httpCookieStore
+        store.getAllCookies { cookies in
+            let existing = cookies.filter { cookie in
+                cookie.domain.contains(domainSuffix) && !cookie.value.isEmpty
+            }
+            if existing.isEmpty {
+                write(header, domainSuffix: domainSuffix, completion: completion)
+            } else {
+                DispatchQueue.main.async(execute: completion)
+            }
+        }
+    }
+
     static func write(_ header: String, domainSuffix: String, completion: @escaping () -> Void) {
         let store = WKWebsiteDataStore.default().httpCookieStore
         var cookies: [HTTPCookie] = []

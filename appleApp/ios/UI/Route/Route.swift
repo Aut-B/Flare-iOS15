@@ -3,6 +3,17 @@ import FlareAppleUI
 import KotlinSharedUI
 import FlareAppleCore
 
+/// 登录成功后的返回。
+///
+/// 网页 cookie 登录是在 sheet 里完成的：`resume` 一成功就调 `toHome()`，
+/// 而这时候 SwiftUI 还在关那个 sheet。立刻 pop 导航栈会和 dismiss 动画打架，
+/// UIKit 抛 `NSInternalInconsistencyException`，表现就是「登录成功以后闪退」。
+/// 等 sheet 收完再退。
+@MainActor
+func popAfterLoginSheet(_ goBack: @escaping () -> Void) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.65, execute: goBack)
+}
+
 enum Route: Hashable, Identifiable {
     var id: Int {
         return self.hashValue
@@ -69,11 +80,11 @@ enum Route: Hashable, Identifiable {
                 .navigationTitle(item.title.text)
                 .modifier(ScrollMinimizingNavigationBar())
         case .serviceSelect:
-            ServiceSelectionScreen(toHome: { goBack() })
+            ServiceSelectionScreen(toHome: { popAfterLoginSheet(goBack) })
         case .relogin(let accountKey, let platformId):
             ReloginScreen(
                 target: ReloginTarget(accountKey: accountKey, platformId: platformId),
-                toHome: { goBack() }
+                toHome: { popAfterLoginSheet(goBack) }
             )
         case .statusDetail(let accountType, let statusKey):
             StatusDetailScreen(accountType: accountType, statusKey: statusKey)

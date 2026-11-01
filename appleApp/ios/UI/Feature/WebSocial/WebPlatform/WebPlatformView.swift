@@ -51,7 +51,9 @@ struct WebPlatformView: View {
         self.startDesktop = startDesktop
         self.extraMenuTitle = extraMenuTitle
         self.extraMenuAction = extraMenuAction
-        _desktopMode = State(initialValue: startDesktop)
+        // 记住用户上次选的「桌面版 / 手机版」，下次进来不用再切一遍。
+        let saved = UserDefaults.standard.bool(forKey: "webplatform.desktop.\(title)")
+        _desktopMode = State(initialValue: startDesktop || saved)
     }
 
     private var userAgent: String {
@@ -69,6 +71,9 @@ struct WebPlatformView: View {
                     }
                 }
             }
+        }
+        .onChange(of: desktopMode) { value in
+            UserDefaults.standard.set(value, forKey: "webplatform.desktop.\(title)")
         }
     }
 
@@ -236,7 +241,7 @@ private struct WebPlatformWebView: UIViewRepresentable {
         if initialCookie.isEmpty || cookieDomainSuffix.isEmpty {
             start()
         } else {
-            CookieJar.write(initialCookie, domainSuffix: cookieDomainSuffix, completion: start)
+            CookieJar.writeIfAbsent(initialCookie, domainSuffix: cookieDomainSuffix, completion: start)
         }
         return webView
     }

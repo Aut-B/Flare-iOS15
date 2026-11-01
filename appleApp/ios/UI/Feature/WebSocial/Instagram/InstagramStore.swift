@@ -51,12 +51,15 @@ final class InstagramStore: ObservableObject {
     /// 直接吃一段原始 cookie 串（Kotlin 登录成功后通过 `InstagramBridge` 同步过来）。
     @discardableResult
     func adopt(cookieHeader raw: String) -> Bool {
-        let header =
+        let normalized =
             raw
                 .replacingOccurrences(of: "\r\n", with: "; ")
                 .replacingOccurrences(of: "\n", with: "; ")
                 .replacingOccurrences(of: "\r", with: "; ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+        // 只留可见 ASCII：cookie 里混进换行 / 中文时，`URLRequest.setValue`
+        // 会抛 ObjC 异常直接闪退（Kotlin 也接不住）。
+        let header = InstagramService.sanitizeHeader(normalized)
         guard CookieJar.value(inHeader: header, named: "sessionid") != nil else { return false }
         // Kotlin 每次取数都会把同一份 cookie 同步过来。内容没变就直接返回，
         // 否则会把用户名清空、反复请求 currentUser，时间线看起来一直在闪。
