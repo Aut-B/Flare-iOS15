@@ -202,7 +202,7 @@ enum IGJSON {
     static func comment(_ value: Any?) -> IGComment? {
         guard let object = object(value) else { return nil }
         guard let text = string(object["text"]) else { return nil }
-        let user = object(object["user"]) ?? [:]
+        let user = IGJSON.object(object["user"]) ?? [:]
         let id = identifier(object["pk"]) ?? identifier(object["id"]) ?? UUID().uuidString
         return IGComment(
             id: id,
