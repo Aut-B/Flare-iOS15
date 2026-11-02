@@ -36,6 +36,16 @@ struct XhsNote: Identifiable, Hashable {
     let isVideo: Bool
     /// 首图宽高比（宽 / 高），用来定版式高度。
     let aspect: CGFloat
+    /// 图片地址统一成 https。
+    ///
+    /// 小红书偶尔会下发 `http://sns-webpic...`：iOS 的 ATS 直接拦掉，
+    /// 表现就是「第一张能看、第二张一片灰」。`//` 开头的协议相对地址同理。
+    static func normalizedImageURL(_ raw: String) -> String {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix("//") { value = "https:" + value }
+        if value.hasPrefix("http://") { value = "https://" + value.dropFirst(7) }
+        return value
+    }
     /// 视频直链。首页流里就带着，有它就能原生播放，不用再请求详情。
     var videoURL: String? = nil
     /// 当前账号有没有点过赞 / 收藏。
@@ -148,26 +158,26 @@ enum XhsJSON {
             if let text = string(value) { return (text, 0) }
             return nil
         }
-        var url = string(object["url_default"])
-            ?? string(object["urlDefault"])
-            ?? string(object["url_pre"])
-            ?? string(object["url"])
-        var aspect: CGFloat = 0
-        if url == nil {
-            for info in array(object["info_list"]) {
-                if let candidate = string(info["url"]) {
-                    url = candidate
-                    break
-                }
-            }
+        var candidates: [String] = []
+        for key in ["url_default", "urlDefault", "url_pre", "urlPre", "url"] {
+            if let value = string(object[key]), !value.isEmpty { candidates.append(value) }
         }
+        for info in array(object["info_list"]) {
+            if let value = string(info["url"]), !value.isEmpty { candidates.append(value) }
+        }
+        // iOS 15 的 UIImage 解不了 avif。服务端偶尔还是会先给 avif，
+        // 这里优先挑 jpg / 非 avif 的地址，实在没有才用第一个。
+        let url = candidates.first(where: { $0.lowercased().contains(".jpg") || $0.lowercased().contains(".jpeg") })
+            ?? candidates.first(where: { !$0.lowercased().contains("avif") })
+            ?? candidates.first
+        var aspect: CGFloat = 0
         let width = CGFloat(int(object["width"]))
         let height = CGFloat(int(object["height"]))
         if width > 0, height > 0 {
             aspect = width / height
         }
         guard let resolved = url else { return nil }
-        return (resolved, aspect)
+        return (normalizedImageURL(resolved), aspect)
     }
 
     /// 视频直链。`video.media.stream` 里按编码分了 h264 / h265 / av1 三档，

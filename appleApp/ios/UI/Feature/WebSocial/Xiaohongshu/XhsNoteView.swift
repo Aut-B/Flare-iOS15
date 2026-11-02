@@ -454,6 +454,8 @@ struct XhsNoteView: View {
             let full = try await XhsService.shared.note(id: note.id, xsecToken: note.xsecToken)
             await MainActor.run {
                 detail = full
+                // 详情里的图可能比首页卡片多：页码越界会直接显示空白。
+                if page >= full.images.count { page = 0 }
                 liked = full.liked || liked
                 collected = full.collected || collected
                 if !full.likedCount.isEmpty { likeCount = full.likedCount }

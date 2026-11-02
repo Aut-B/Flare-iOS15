@@ -127,7 +127,15 @@ private struct WereadReaderWebView: UIViewRepresentable {
     private static let selectionScript = """
     (function(){
       var styleId = 'flare-select-style';
-      var css = 'body, body * { -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default !important; }';
+      // 只放开「正文段落」，不要把 body 整页放开。
+      // 以前 body * 全开，长按一下整页就被当成一个可选块，一拖就是全页，
+      // 微信读书自己的划词菜单也认不出「你选的是哪一段」。
+      var css = 'html, body { -webkit-user-select: none !important; user-select: none !important; }' +
+        'p, p *, li, li *, blockquote, blockquote *, td, td *,' +
+        '.readerChapterContent p, .readerChapterContent p *,' +
+        '#renderTargetContent p, #renderTargetContent p *,' +
+        '.app_content p, .app_content p *' +
+        ' { -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default !important; }';
       var pending = false;
       function apply(){
         pending = false;
@@ -144,7 +152,7 @@ private struct WereadReaderWebView: UIViewRepresentable {
           // MutationObserver 回调都再产生一条 mutation，自己触发自己，
           // 主线程被微任务塞满 —— 阅读页就永远画不出来（白屏）。
           if (style.textContent !== css) { style.textContent = css; }
-          var inline = document.querySelectorAll('[style*="user-select"]');
+          var inline = document.querySelectorAll('p[style*="user-select"], p [style*="user-select"], .readerChapterContent [style*="user-select"], #renderTargetContent [style*="user-select"]');
           for (var i = 0; i < inline.length && i < 200; i++) {
             var el = inline[i];
             if (el.style.getPropertyValue('-webkit-user-select') !== 'text') {
@@ -181,6 +189,9 @@ private struct WereadReaderWebView: UIViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.allowsInlineMediaPlayback = true
+        // 长按选择按「字符」而不是「块」：默认的 dynamic 在微信读书这种
+        // 嵌套 div 的正文里会把整段（甚至整页）当成一个可选块，一拖就是全页。
+        configuration.selectionGranularity = .character
         configuration.mediaTypesRequiringUserActionForPlayback = []
         // 微信读书的阅读页默认把文字设成不可选（它想自己做划线交互），
         // 结果 WKWebView 里长按既不出选择手柄，也没法写想法。这里强行放开。

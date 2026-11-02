@@ -8,10 +8,15 @@ import UIKit
 @main
 struct FlareApp: App {
     @Environment(\.scenePhase) private var scenePhase
+    /// 上次启动连续失败时先停在安全模式界面，保证 App 至少能打开。
+    /// 注意：必须在 `LaunchGuard.begin()` 之后再取初值，否则拿到的是上一次运行的值，
+    /// 第一次该进安全界面时会被跳过。
+    @State private var showRecovery: Bool
 
     init() {
         // 上次启动如果没走完看门狗，这一次先停掉隐藏网页，至少保证 App 能打开。
         LaunchGuard.begin()
+        _showRecovery = State(initialValue: LaunchGuard.recoveryMode)
         MediaCacheMaintenance.configure()
         configureAudioSessionForMixing()
         configureBarAppearances()
@@ -25,15 +30,19 @@ struct FlareApp: App {
             swiftPlatformTextRenderer: PlatformTextRenderer.shared,
             swiftOnDeviceAI: FoundationModelOnDeviceAI.shared
         )
-        // 小红书的接口要 X-S / X-T，这两个值只能在网页里算。Kotlin 侧只定义了
-        // 协议，真正的请求还是走这边已经跑通的 XhsService（隐藏 WKWebView 签名）。
-        XhsBridgeHolder.shared.bridge = XhsSwiftBridge()
-        // Instagram 登录成功后把 cookie 同步给原生 InstagramStore，
-        // 侧边栏的原生页就不用再登录一次。
-        InstagramBridgeHolder.shared.bridge = InstagramSwiftBridge()
-        // 微信读书在「添加账号」里登录成功后，cookie 要交给原生的 WereadStore，
-        // 书架页才会立刻变成已登录状态。
-        WeReadBridgeHolder.shared.bridge = WereadSwiftBridge()
+        // 三个 Bridge 只是把网页登录拿到的 cookie 转交给原生 Store，本身不建页面。
+        // 但仍然放到首帧之后：冷启动那一秒里少做一点事，少一个崩的机会。
+        DispatchQueue.main.async {
+            // 小红书的接口要 X-S / X-T，这两个值只能在网页里算。Kotlin 侧只定义了
+            // 协议，真正的请求还是走这边已经跑通的 XhsService（隐藏 WKWebView 签名）。
+            XhsBridgeHolder.shared.bridge = XhsSwiftBridge()
+            // Instagram 登录成功后把 cookie 同步给原生 InstagramStore，
+            // 侧边栏的原生页就不用再登录一次。
+            InstagramBridgeHolder.shared.bridge = InstagramSwiftBridge()
+            // 微信读书在「添加账号」里登录成功后，cookie 要交给原生的 WereadStore，
+            // 书架页才会立刻变成已登录状态。
+            WeReadBridgeHolder.shared.bridge = WereadSwiftBridge()
+        }
     }
     var body: some Scene {
         WindowGroup {
@@ -66,10 +75,23 @@ struct FlareApp: App {
 
     @ViewBuilder
     private var appRoot: some View {
-        if #available(iOS 18.0, *) {
+        if showRecovery {
+            LaunchRecoveryView(
+                onRetry: {
+                    LaunchGuard.exitRecovery()
+                    showRecovery = false
+                },
+                onPurgeInstagram: {
+                    LaunchGuard.purgeInstagramAndExitRecovery()
+                    showRecovery = false
+                }
+            )
+        } else if #available(iOS 18.0, *) {
             FlareRoot()
+                .onAppear { LaunchGuard.markFullUIShown() }
         } else {
             BackportFlareRoot()
+                .onAppear { LaunchGuard.markFullUIShown() }
         }
     }
     
@@ -101,5 +123,54 @@ struct FlareApp: App {
         if #available(iOS 15.0, *) {
             tabBar.scrollEdgeAppearance = tab
         }
+    }
+}
+
+/// 启动连续失败时的最后一道防线。
+///
+/// 这里不碰任何 Store / WebView / Kotlin 状态，只放两个按钮：
+/// 重新画主界面，或者清掉最可能出问题的 Instagram 登录后再画。
+/// 只要这个界面能出来，用户就不用重装（也就不会丢账号）。
+private struct LaunchRecoveryView: View {
+    let onRetry: () -> Void
+    let onPurgeInstagram: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 42))
+                .foregroundStyle(.orange)
+            Text("上次启动没有正常结束")
+                .font(.headline)
+            Text("为了不让 App 一直闪退，这次先停在安全模式：后台网页和自动刷新都关掉了，账号数据都还在，不用重装。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button {
+                onRetry()
+            } label: {
+                Text("重新加载界面")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(maxWidth: 240)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.borderedProminent)
+            Button {
+                onPurgeInstagram()
+            } label: {
+                Text("清掉 Instagram 登录后重试")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(maxWidth: 240)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.bordered)
+            Text("如果重新加载又闪退，回来点第二个按钮。小红书、微信读书的登录不受影响。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemGroupedBackground))
     }
 }

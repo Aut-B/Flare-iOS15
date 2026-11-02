@@ -160,9 +160,10 @@ final class XhsStore: ObservableObject {
             self.isLoadingMore = false
             self.loadMoreFailed = false
             self.errorMessage = nil
-            self.notes = []
             self.hasMore = true
             self.receivedAnything = false
+            // 这里**不清空** notes：刷新失败时旧内容还在，用户不会对着一片空白。
+            // 成功时 `merge(replace: true)` 会整批换掉。
         }
         // 签名页早点拉起来：等用户点开笔记再创建，评论区要多等十几秒。
         XhsSigner.shared.warmUp()
@@ -470,21 +471,33 @@ final class XhsStore: ObservableObject {
             )
         } catch {
             // 卡片上的 xsec_token 会过期。过期后服务端一律回「当前笔记暂时无法浏览」，
-            // 这时用详情接口换一个新 token 再试一次，比让用户自己去网页版强。
-            guard
-                let fresh = try? await XhsService.shared.note(
-                    id: note.id,
-                    xsecToken: note.xsecToken,
-                    timeout: 6,
-                    attempts: 1
-                ),
-                !fresh.xsecToken.isEmpty,
-                fresh.xsecToken != note.xsecToken
-            else { throw error }
+            // 这时用详情接口换一个新 token 再试一次；换不到就退回原 token，
+            // 再换一个 xsec_source 试一次 —— 网页从笔记页进来时用的是 pc_note。
+            let fresh = try? await XhsService.shared.note(
+                id: note.id,
+                xsecToken: note.xsecToken,
+                timeout: 8,
+                attempts: 1
+            )
+            let token: String
+            if let value = fresh?.xsecToken, !value.isEmpty {
+                token = value
+            } else {
+                token = note.xsecToken
+            }
+            if let page = try? await XhsService.shared.comments(
+                noteId: note.id,
+                xsecToken: token,
+                cursor: cursor,
+                xsecSource: "pc_feed"
+            ) {
+                return page
+            }
             return try await XhsService.shared.comments(
                 noteId: note.id,
-                xsecToken: fresh.xsecToken,
-                cursor: cursor
+                xsecToken: token,
+                cursor: cursor,
+                xsecSource: "pc_note"
             )
         }
     }

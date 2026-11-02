@@ -12,6 +12,8 @@ struct XhsFeedView: View {
     @State private var selected: XhsNote?
     @State private var userTarget: XhsUserTarget?
     @State private var actionError: String?
+    /// 下拉刷新是否已经触发过，防止一次手势连发多次请求。
+    @State private var pullArmed = true
 
     var body: some View {
         Group {
@@ -30,7 +32,11 @@ struct XhsFeedView: View {
                     Button {
                         Task { await store.retry() }
                     } label: {
-                        Image(systemName: "arrow.clockwise")
+                        if store.isLoading {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
                     }
                     .disabled(store.isLoading)
                     .accessibilityLabel("刷新")
@@ -120,39 +126,61 @@ struct XhsFeedView: View {
 
     private var feed: some View {
         ScrollView {
-            if store.isLoading, store.notes.isEmpty {
-                VStack(spacing: 12) {
-                    ProgressView()
-                    Text("正在从网页版取首页…")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                // iOS 15 的 ScrollView 没有 .refreshable，用偏移量自己判断下拉。
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: XhsPullOffsetKey.self,
+                        value: proxy.frame(in: .named("xhsFeed")).minY
+                    )
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.top, 80)
-            } else if let message = store.errorMessage, store.notes.isEmpty {
-                errorState(message)
-            } else {
-                VStack(spacing: 10) {
-                    HStack(alignment: .top, spacing: 10) {
-                        ForEach(Array(columns.enumerated()), id: \.offset) { _, bucket in
-                            column(bucket)
-                        }
+                .frame(height: 0)
+
+                if store.isLoading, store.notes.isEmpty {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("正在从网页版取首页…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
-                    loadMoreFooter
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 80)
+                } else if let message = store.errorMessage, store.notes.isEmpty {
+                    errorState(message)
+                } else {
+                    VStack(spacing: 10) {
+                        HStack(alignment: .top, spacing: 10) {
+                            ForEach(Array(columns.enumerated()), id: \.offset) { _, bucket in
+                                column(bucket)
+                            }
+                        }
+                        loadMoreFooter
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.top, 10)
                 }
-                .padding(.horizontal, 10)
-                .padding(.top, 10)
             }
         }
-        .refreshable {
-            await store.refresh()
+        .coordinateSpace(name: "xhsFeed")
+        .onPreferenceChange(XhsPullOffsetKey.self) { value in
+            handlePull(value)
         }
+    }
+
+    /// 下拉超过 80pt 触发一次刷新；回弹到顶部附近才重新上膛，避免一次下拉连发。
+    private func handlePull(_ offset: CGFloat) {
+        if offset < 20 {
+            pullArmed = true
+            return
+        }
+        guard offset > 80, pullArmed, !store.isLoading else { return }
+        pullArmed = false
+        Task { await store.refresh() }
     }
 
     /// 按累计高度分列。列数跟着屏宽走：6s 竖屏两列，iPad 上三列。
     private var columns: [[XhsNote]] {
-        let width = UIScreen.main.bounds.width
-        let count = max(2, min(4, Int(width / 200)))
+        let count = columnCount
         var buckets = Array(repeating: [XhsNote](), count: count)
         var heights = Array(repeating: CGFloat(0), count: count)
         for note in store.notes {
@@ -161,14 +189,21 @@ struct XhsFeedView: View {
                 target = index
             }
             buckets[target].append(note)
-            heights[target] += estimatedHeight(note, columnCount: count)
+            heights[target] += estimatedHeight(note)
         }
         return buckets
     }
 
-    private func estimatedHeight(_ note: XhsNote, columnCount: Int) -> CGFloat {
-        let width = (UIScreen.main.bounds.width - CGFloat(columnCount - 1) * 10 - 20) / CGFloat(columnCount)
-        let imageHeight = width / max(note.aspect, 0.4)
+    private var columnCount: Int {
+        max(2, min(4, Int(UIScreen.main.bounds.width / 200)))
+    }
+
+    private var cardWidth: CGFloat {
+        (UIScreen.main.bounds.width - CGFloat(columnCount - 1) * 10 - 20) / CGFloat(columnCount)
+    }
+
+    private func estimatedHeight(_ note: XhsNote) -> CGFloat {
+        let imageHeight = cardWidth / max(note.aspect, 0.4)
         let textHeight: CGFloat = note.displayTitle.isEmpty ? 36 : 62
         return imageHeight + textHeight + 10
     }
@@ -178,6 +213,7 @@ struct XhsFeedView: View {
             ForEach(bucket) { note in
                 XhsNoteCard(
                     note: note,
+                    width: cardWidth,
                     onOpen: { selected = note },
                     onUser: {
                         guard !note.user.id.isEmpty else { return }
@@ -293,6 +329,8 @@ struct XhsFeedView: View {
 
 struct XhsNoteCard: View {
     let note: XhsNote
+    /// 这一列的卡片宽度。多图横滑要靠它算每张图的大小。
+    var width: CGFloat = 0
     /// 点整张卡：进笔记详情。
     var onOpen: () -> Void = {}
     /// 点头像 / 昵称：进这个人的主页。
@@ -302,22 +340,7 @@ struct XhsNoteCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            XhsImageView(url: note.cover)
-                .aspectRatio(note.aspect, contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .clipped()
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(alignment: .bottomTrailing) {
-                    if note.isVideo {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.white)
-                            .padding(4)
-                            .background(Color.black.opacity(0.35))
-                            .clipShape(Circle())
-                            .padding(6)
-                    }
-                }
+            media
 
             if !note.displayTitle.isEmpty {
                 Text(note.displayTitle)
@@ -374,6 +397,62 @@ struct XhsNoteCard: View {
         .contentShape(Rectangle())
         .onTapGesture { onOpen() }
     }
+
+    private var cardWidth: CGFloat {
+        width > 0 ? width : max(UIScreen.main.bounds.width / 2 - 15, 120)
+    }
+
+    private var mediaHeight: CGFloat {
+        cardWidth / max(note.aspect, 0.4)
+    }
+
+    /// 多图笔记在卡片上就能横滑看后面的图，不再只显示封面。
+    /// 用 `ScrollView` 而不是 `TabView(.page)`：后者每个卡片都是一个
+    /// UICollectionView，6s 上滚两屏就卡死，还会撞上批量更新闪退。
+    private var media: some View {
+        ZStack(alignment: .topTrailing) {
+            if note.images.count > 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 2) {
+                        ForEach(Array(note.images.prefix(9).enumerated()), id: \.offset) { _, url in
+                            XhsImageView(url: url)
+                                .frame(width: cardWidth, height: mediaHeight)
+                                .clipped()
+                        }
+                    }
+                }
+                .frame(height: mediaHeight)
+            } else {
+                XhsImageView(url: note.cover)
+                    .frame(width: cardWidth, height: mediaHeight)
+                    .clipped()
+            }
+
+            if note.images.count > 1 {
+                Text("\(note.images.count) 图")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.black.opacity(0.38))
+                    .clipShape(Capsule())
+                    .padding(6)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(alignment: .bottomTrailing) {
+            if note.isVideo {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white)
+                    .padding(4)
+                    .background(Color.black.opacity(0.35))
+                    .clipShape(Circle())
+                    .padding(6)
+            }
+        }
+    }
 }
 
 /// 图片缓存。`AsyncImage` 每次滚回来都重新下载，6s 上就是「一直卡」，
@@ -410,18 +489,41 @@ final class XhsImageCache {
             return
         }
         waiters[url] = [completion]
+        load(url, original: url, retry: true)
+    }
+
+    /// 小红书图床对 Referer / UA 有要求，个别机型还要避开 `!` 样式后缀。
+    /// `original` 是最初请求的 key：回退到原图后结果仍要交回原来的等待者，
+    /// 否则 `finish` 找不到 waiter，界面就一直灰着。
+    private func load(_ url: String, original: String, retry: Bool) {
         guard let target = URL(string: url) else {
-            finish(url, image: nil)
+            finish(original, image: nil)
             return
         }
-        session.dataTask(with: target) { [weak self] data, _, _ in
+        var request = URLRequest(url: target)
+        request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
+        request.setValue(WebPlatformUserAgent.desktop, forHTTPHeaderField: "User-Agent")
+        request.setValue("image/webp,image/apng,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        session.dataTask(with: request) { [weak self] data, _, _ in
             let image = data.flatMap { UIImage(data: $0) }
             DispatchQueue.main.async {
-                self?.finish(url, image: image)
+                guard let self = self else { return }
+                if image == nil, retry, let fallback = Self.originalURL(url), fallback != url {
+                    // 末尾的 `!xxx` 是图床的处理样式（webp / 裁切），
+                    // iOS 15 上偶尔解不出来，退回原图再试一次。
+                    self.load(fallback, original: original, retry: false)
+                    return
+                }
+                self.finish(original, image: image)
             }
         }.resume()
     }
 
+    private static func originalURL(_ url: String) -> String? {
+        guard let index = url.lastIndex(of: "!") else { return nil }
+        let value = String(url[url.startIndex..<index])
+        return value.isEmpty ? nil : value
+    }
     private func finish(_ url: String, image: UIImage?) {
         if let image = image {
             cache.setObject(image, forKey: url as NSString)
@@ -460,6 +562,12 @@ struct XhsImageView: View {
             }
         }
         .onAppear { load() }
+        // 详情页换图 / 卡片换图时 URL 会变，但视图身份不变：
+        // 不重新加载就会一直显示上一张（或者一直灰着）。
+        .onChange(of: url) { _ in
+            image = nil
+            load()
+        }
     }
 
     private func load() {
@@ -476,5 +584,12 @@ struct XhsImageView: View {
                 self.image = loaded
             }
         }
+    }
+}
+
+private struct XhsPullOffsetKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }

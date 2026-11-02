@@ -38,7 +38,7 @@ final class XhsService {
             "category": follow ? "homefeed.follow" : "homefeed_recommend",
             "search_key": "",
             "need_num": 20,
-            "image_formats": ["jpg", "webp", "avif"],
+            "image_formats": ["jpg", "webp"],
             "need_filter_image": false,
         ]
 
@@ -64,7 +64,7 @@ final class XhsService {
     ) async throws -> XhsNote {
         var payload: [String: Any] = [
             "source_note_id": id,
-            "image_formats": ["jpg", "webp", "avif"],
+            "image_formats": ["jpg", "webp"],
             "extra": ["need_body_topic": "1"],
         ]
         if !xsecToken.isEmpty {
@@ -108,20 +108,21 @@ final class XhsService {
     func comments(
         noteId: String,
         xsecToken: String,
-        cursor: String?
+        cursor: String?,
+        xsecSource: String = "pc_feed"
     ) async throws -> (items: [XhsComment], next: String?) {
         var parts = [
             "note_id=" + Self.encode(noteId),
             "cursor=" + Self.encode(cursor ?? ""),
             "top_comment_id=",
-            "image_formats=jpg,webp,avif",
+            "image_formats=jpg,webp",
         ]
         if !xsecToken.isEmpty {
             parts.append("xsec_token=" + Self.encode(xsecToken))
         }
         // 网页版评论区请求固定带 xsec_source；少了它服务端会认为「来源不明」，
         // 一律回「当前笔记暂时无法浏览」。
-        parts.append("xsec_source=pc_feed")
+        parts.append("xsec_source=" + Self.encode(xsecSource))
         // 评论是用户点了就要看的：签名页没起来时宁可快速失败一次，
         // 也别让评论区空白转四十秒。
         let json = try await get(
@@ -158,7 +159,7 @@ final class XhsService {
             "num=30",
             "cursor=" + Self.encode(cursor ?? ""),
             "user_id=" + Self.encode(userId),
-            "image_formats=jpg,webp,avif",
+            "image_formats=jpg,webp",
         ].joined(separator: "&")
         let json: [String: Any]
         do {
@@ -170,7 +171,7 @@ final class XhsService {
                     "num": 30,
                     "cursor": cursor ?? "",
                     "user_id": userId,
-                    "image_formats": ["jpg", "webp", "avif"],
+                    "image_formats": ["jpg", "webp"],
                 ]
             )
         }
