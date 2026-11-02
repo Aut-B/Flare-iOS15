@@ -16,7 +16,22 @@ struct FlareApp: App {
     init() {
         // 上次启动如果没走完看门狗，这一次先停掉隐藏网页，至少保证 App 能打开。
         LaunchGuard.begin()
-        _showRecovery = State(initialValue: LaunchGuard.recoveryMode)
+        let recovering = LaunchGuard.recoveryMode
+        _showRecovery = State(initialValue: recovering)
+        // 崩溃兜底界面**不碰 Kotlin**。
+        //
+        // 15 Pro Max 上是「登录 Instagram 成功那一刻开始，每次冷启动都闪退」。
+        // 崩溃可能就发生在 Koin 建容器 / 恢复账号与标签栏这一段，而那段代码在
+        // App.init 里同步跑：只要它崩，SwiftUI 根本没机会画安全模式界面，
+        // 用户看到的就是「点了图标闪一下就没了」，装新版也救不回来。
+        // 所以进兜底时把整段初始化跳过去，先把界面画出来，让用户能做出选择。
+        if !recovering {
+            bootstrap()
+        }
+    }
+
+    /// Kotlin / Firebase / 桥接的初始化。只在**不进兜底界面**时调用。
+    private func bootstrap() {
         MediaCacheMaintenance.configure()
         configureAudioSessionForMixing()
         configureBarAppearances()
@@ -48,13 +63,20 @@ struct FlareApp: App {
         WindowGroup {
             // iOS 15 没有 Observation 框架，必须在根部建立 perception 追踪作用域。
             WithPerceptionTracking {
-                FlareTheme {
-                    root
-                }
-                .modifier(IOSTimelineListEnvironment())
-                .ugoiraExportStatus()
-                .backportOnChange(of: scenePhase) { _, phase in
-                    MediaCacheMaintenance.handleScenePhase(phase)
+                if showRecovery {
+                    // 兜底界面必须在 FlareTheme **外面**：FlareTheme 里会
+                    // new KotlinPresenter(EnvironmentSettingsPresenter())，而兜底路径
+                    // 压根没初始化 Kotlin，包在里面等于白兜底。
+                    recoveryScreen
+                } else {
+                    FlareTheme {
+                        root
+                    }
+                    .modifier(IOSTimelineListEnvironment())
+                    .ugoiraExportStatus()
+                    .backportOnChange(of: scenePhase) { _, phase in
+                        MediaCacheMaintenance.handleScenePhase(phase)
+                    }
                 }
             }
         }
@@ -73,20 +95,28 @@ struct FlareApp: App {
         #endif
     }
 
+    /// 兜底界面：纯 SwiftUI，不碰 Kotlin / Store / WebView。
+    private var recoveryScreen: some View {
+        LaunchRecoveryView(
+            onRetry: {
+                // 兜底界面没初始化 Kotlin，没法在原地接着跑主界面：
+                // 记下「下次正常启动」的标记后退出，用户再点一次图标即可。
+                // 注意：这里**不能**把 showRecovery 置 false —— 那会让 SwiftUI
+                // 立刻去渲染 FlareRoot()，而 Kotlin 容器压根没建，0.8 秒内又崩一次。
+                LaunchGuard.prepareRelaunch()
+                LaunchGuard.relaunch()
+            },
+            onPurgeInstagram: {
+                LaunchGuard.purgeInstagramAndExitRecovery()
+                LaunchGuard.prepareRelaunch()
+                LaunchGuard.relaunch()
+            }
+        )
+    }
+
     @ViewBuilder
     private var appRoot: some View {
-        if showRecovery {
-            LaunchRecoveryView(
-                onRetry: {
-                    LaunchGuard.exitRecovery()
-                    showRecovery = false
-                },
-                onPurgeInstagram: {
-                    LaunchGuard.purgeInstagramAndExitRecovery()
-                    showRecovery = false
-                }
-            )
-        } else if #available(iOS 18.0, *) {
+        if #available(iOS 18.0, *) {
             FlareRoot()
                 .onAppear { LaunchGuard.markFullUIShown() }
         } else {
@@ -142,7 +172,7 @@ private struct LaunchRecoveryView: View {
                 .foregroundStyle(.orange)
             Text("上次启动没有正常结束")
                 .font(.headline)
-            Text("为了不让 App 一直闪退，这次先停在安全模式：后台网页和自动刷新都关掉了，账号数据都还在，不用重装。")
+            Text("为了不让 App 一直闪退，这次先停在安全模式：后台网页和自动刷新都关掉了，账号数据都还在，不用重装。\n点下面的按钮后 App 会自动关闭，请再点一次图标打开。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

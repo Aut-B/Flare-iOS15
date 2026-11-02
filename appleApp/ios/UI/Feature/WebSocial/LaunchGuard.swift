@@ -100,6 +100,28 @@ enum LaunchGuard {
         UserDefaults.standard.set(false, forKey: recoveryKey)
     }
 
+    /// 兜底界面上点完按钮：把状态收拾成「下次是一次干净启动」，然后退出进程。
+    ///
+    /// 兜底界面为了不被 Kotlin 初始化带崩，整段初始化是跳过的，所以没法在原地
+    /// 接着画主界面 —— 只能让用户再点一次图标，重新走一遍完整的 App.init。
+    static func prepareRelaunch() {
+        let defaults = UserDefaults.standard
+        defaults.set(false, forKey: activeKey)
+        defaults.set(0, forKey: crashKey)
+        defaults.set(false, forKey: recoveryKey)
+        // 下次仍然先按安全模式起：万一还崩，也不会一上来就把隐藏网页全拉起来。
+        defaults.set(true, forKey: safeKey)
+        recoveryMode = false
+        safeMode = true
+    }
+
+    /// 稍等一下再退出，让「请重新打开」这句提示有机会被看到。
+    static func relaunch() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            exit(0)
+        }
+    }
+
     /// 连主界面都画不出来时：清掉 Instagram 凭证再试一次。
     static func purgeInstagramAndExitRecovery() {
         InstagramStore.purgeStoredCookie()

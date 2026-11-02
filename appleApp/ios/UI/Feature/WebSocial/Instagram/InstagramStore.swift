@@ -147,6 +147,10 @@ final class InstagramStore: ObservableObject {
 
     func refreshIfNeeded() async {
         guard isLoggedIn, !loaded else { return }
+        // 安全模式（上次启动没走完看门狗）下不要一进 App 就自动拉时间线：
+        // 少一个开机就发请求、开机就解一大坨 JSON 的崩溃机会。
+        // 用户手动点刷新不受影响。
+        guard !LaunchGuard.safeMode else { return }
         await refresh()
     }
 
