@@ -420,7 +420,13 @@ final class XhsSigner {
 
     /// 必须在主线程调用。
     private func ensureWebView() -> WKWebView {
-        if let webView = webView { return webView }
+        if let webView = webView {
+            // 上次创建时窗口还没就绪（`attachToWindow` 会直接返回），
+            // 页面就一直在窗口外面，rAF 被冻住，签名永远算不出来。
+            // 每次拿到已有的页面都补挂一次。
+            if host == nil { attachToWindow(webView) }
+            return webView
+        }
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.allowsInlineMediaPlayback = true
