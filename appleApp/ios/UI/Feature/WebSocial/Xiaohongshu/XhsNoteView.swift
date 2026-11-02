@@ -110,8 +110,11 @@ struct XhsNoteView: View {
             player?.pause()
         }
         .task {
-            await loadDetail()
+            // 评论和详情并行。以前是先 await 详情（签名页冷启动能到二十秒），
+            // 评论区才开始请求，用户看到的就是「评论要加载半天」。
+            async let detailTask: Void = loadDetail()
             loadComments(reset: true)
+            await detailTask
         }
     }
 
@@ -307,6 +310,11 @@ struct XhsNoteView: View {
                         .buttonStyle(.bordered)
                 }
                 .padding(.horizontal, 14)
+            } else if comments.isEmpty, commentsLoading {
+                // 先给骨架，别让评论区空白一片让人以为坏了。
+                ForEach(0..<3, id: \.self) { _ in
+                    commentSkeleton
+                }
             } else if comments.isEmpty, commentsLoaded {
                 Text("还没有评论")
                     .font(.caption)
@@ -331,6 +339,26 @@ struct XhsNoteView: View {
                 }
             }
         }
+    }
+
+    private var commentSkeleton: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Circle()
+                .fill(Color(.tertiarySystemFill))
+                .frame(width: 26, height: 26)
+            VStack(alignment: .leading, spacing: 6) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color(.tertiarySystemFill))
+                    .frame(width: 76, height: 9)
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color(.tertiarySystemFill))
+                    .frame(height: 10)
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color(.tertiarySystemFill))
+                    .frame(width: 180, height: 10)
+            }
+        }
+        .padding(.horizontal, 14)
     }
 
     private var composer: some View {

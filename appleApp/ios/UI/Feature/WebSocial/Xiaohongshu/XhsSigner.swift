@@ -78,6 +78,14 @@ final class XhsSigner {
         throw XhsError.signFailed
     }
 
+    /// 提前把隐藏网页拉起来。冷启动时页面要跑十几秒 JS，
+    /// 等用户点开笔记再创建，评论区就要多等十几秒。
+    func warmUp() {
+        DispatchQueue.main.async {
+            _ = self.ensureWebView()
+        }
+    }
+
     /// 重新加载页面，签名脚本崩了的时候用。
     func reset() {
         DispatchQueue.main.async {
@@ -137,18 +145,20 @@ final class XhsSigner {
         host: String,
         query: String? = nil,
         payload: [String: Any]? = nil,
-        commonHeader: String = ""
+        commonHeader: String = "",
+        timeout: TimeInterval = 12,
+        attempts: Int = 2
     ) async throws -> PageResult {
         await MainActor.run {
             _ = self.ensureWebView()
         }
         var lastError: Error = XhsError.signFailed
-        for attempt in 0..<2 {
+        for attempt in 0..<max(attempts, 1) {
             if attempt > 0 {
                 await reloadPage()
             }
             do {
-                try await waitUntilReady(timeout: attempt == 0 ? 12 : 10)
+                try await waitUntilReady(timeout: attempt == 0 ? timeout : min(timeout, 8))
             } catch {
                 lastError = error
                 continue

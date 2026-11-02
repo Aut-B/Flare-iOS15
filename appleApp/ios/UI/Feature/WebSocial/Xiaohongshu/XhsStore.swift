@@ -19,6 +19,8 @@ final class XhsStore: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var isLoadingMore = false
     @Published private(set) var hasMore = true
+    /// 上一页是不是失败了。失败时页脚给「点此重试」，不再是一片灰。
+    @Published private(set) var loadMoreFailed = false
     /// 当前是不是「关注」流。
     @Published private(set) var following = false
     @Published var errorMessage: String?
@@ -31,6 +33,14 @@ final class XhsStore: ObservableObject {
     private var emptyScrolls = 0
     /// 这一轮刷新里有没有拿到过数据（接口和 DOM 都算）。
     private var receivedAnything = false
+    /// 首页流的翻页游标（`cursor_score`）。有了它翻页就不用靠「滚网页碰运气」。
+    private var cursorScore = ""
+    /// 每次刷新 +1：晚到的旧请求不许再改列表。
+    private var generation = 0
+    /// 页脚节流：底部卡片每次进出屏幕都会触发 `onAppear`。
+    private var lastLoadMoreAt = Date.distantPast
+    /// 隐藏网页当前加载的是不是「关注」流。
+    private var harvesterFollow: Bool?
 
     private static let recommendURL = "https://www.xiaohongshu.com/explore"
     private static let followURL = "https://www.xiaohongshu.com/explore?channel_id=homefeed.follow"
@@ -131,6 +141,8 @@ final class XhsStore: ObservableObject {
         loaded = false
         emptyScrolls = 0
         hasMore = true
+        loadMoreFailed = false
+        cursorScore = ""
         notes = []
         Task { await self.refresh() }
     }
@@ -138,26 +150,40 @@ final class XhsStore: ObservableObject {
     func refresh() async {
         guard isLoggedIn else { return }
         pushCredentials()
+        generation += 1
+        let token = generation
+        cursorScore = ""
+        emptyScrolls = 0
+        lastLoadMoreAt = Date.distantPast
         DispatchQueue.main.async {
             self.isLoading = true
+            self.isLoadingMore = false
+            self.loadMoreFailed = false
             self.errorMessage = nil
             self.notes = []
             self.hasMore = true
-            self.emptyScrolls = 0
             self.receivedAnything = false
         }
+        // 签名页早点拉起来：等用户点开笔记再创建，评论区要多等十几秒。
+        XhsSigner.shared.warmUp()
         startHarvester(reload: true)
-        // 网页首屏要跑一会儿 JS。接口和 DOM 两条路都算，谁先到用谁。
-        scheduleDOMHarvest(delays: [2.5, 5.0, 7.5, 10.0, 13.0])
+        // 网页首屏要跑一会儿 JS，DOM / `__INITIAL_STATE__` 是兜底。
+        scheduleDOMHarvest(delays: [2.5, 5.0])
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+        // 超时要在发请求**之前**挂上：接口自己最多耗 12 秒，
+        // 挂晚了用户就得对着转圈等两倍时间。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
             guard let self = self else { return }
-            guard self.isLoading else { return }
+            guard token == self.generation, self.isLoading else { return }
             self.isLoading = false
             if self.notes.isEmpty {
                 self.errorMessage = self.failureMessage()
             }
         }
+
+        // 首页流优先走 `homefeed` 接口：它带 `cursor_score`，能一直往下翻，
+        // 也比网页首屏那份服务端渲染的通用列表更接近 App 里的推荐流。
+        _ = await loadFeedPage(reset: true, token: token)
     }
 
     /// 用户点「重试」：安全模式也放行一次，别让人卡在「什么都点不动」。
@@ -169,21 +195,77 @@ final class XhsStore: ObservableObject {
     func loadMore() async {
         guard isLoggedIn, !isLoading, !isLoadingMore, hasMore else { return }
         guard !notes.isEmpty else { return }
-        DispatchQueue.main.async { self.isLoadingMore = true }
+        // 底部卡片出现在屏幕上会反复触发，2 秒内只放行一次。
+        let now = Date()
+        guard now.timeIntervalSince(lastLoadMoreAt) > 2 else { return }
+        lastLoadMoreAt = now
+        let token = generation
+        DispatchQueue.main.async {
+            self.isLoadingMore = true
+            self.loadMoreFailed = false
+        }
+
+        if await loadFeedPage(reset: false, token: token) { return }
+        guard token == generation else { return }
+
+        // 接口没给下一页：退回「滚隐藏网页 + 抄 DOM」。
         if let harvester = harvester, harvester.isRunning {
             harvester.scroll()
         } else {
             startHarvester(reload: false)
         }
-        scheduleDOMHarvest(delays: [2.2])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+        scheduleDOMHarvest(delays: [1.6, 3.2])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             guard let self = self else { return }
-            guard self.isLoadingMore else { return }
+            guard token == self.generation, self.isLoadingMore else { return }
             self.isLoadingMore = false
-            self.emptyScrolls += 1
-            if self.emptyScrolls >= 3 {
-                self.hasMore = false
+            // 失败就是失败，别顺手把 `hasMore` 关掉：以前连续两次超时就
+            // 永久变成「没有更多了」，用户怎么点都出不来第二页。
+            self.loadMoreFailed = true
+        }
+    }
+
+    /// 页脚「点此重试」：绕过 2 秒节流，不然刚失败立刻点会像没反应。
+    func retryLoadMore() async {
+        lastLoadMoreAt = Date.distantPast
+        await loadMore()
+    }
+
+    /// 直接问 `homefeed` 要一页。拿到（或明确不用再试）返回 true。
+    @discardableResult
+    private func loadFeedPage(reset: Bool, token: Int) async -> Bool {
+        do {
+            let page = try await XhsService.shared.homeFeed(
+                cursor: reset ? nil : cursorScore,
+                follow: following,
+                refreshType: reset ? 1 : 2,
+                noteIndex: reset ? 0 : notes.count
+            )
+            guard token == generation else { return true }
+            if page.notes.isEmpty {
+                // 接口明确回了空：这就是最后一页，别再让用户对着
+                // 「加载失败，点此重试」反复点。首屏为空则交给 DOM 兜底。
+                if !reset {
+                    DispatchQueue.main.async {
+                        self.hasMore = false
+                        self.isLoadingMore = false
+                    }
+                    // 已经知道是最后一页，直接收工：再走 DOM 兜底会让
+                    // 页脚在「没有更多了」和「加载失败」之间来回跳。
+                    return true
+                }
+                return false
             }
+            if let next = page.next, !next.isEmpty { cursorScore = next }
+            merge(page.notes, replace: reset)
+            return true
+        } catch {
+            guard token == generation else { return true }
+            if let xhs = error as? XhsError, xhs.needLogin {
+                logout()
+                return true
+            }
+            return false
         }
     }
 
@@ -215,13 +297,20 @@ final class XhsStore: ObservableObject {
         }
         let work: () -> Void = { [weak self] in
             guard let self = self else { return }
-            if !reload, let existing = self.harvester, existing.isRunning {
-                existing.scroll()
+            // 页面还活着就只 reload。重建一个 1280x1600 的 WKWebView 在 6s /
+            // 15 Pro Max 上要十几秒，用户看到的就是「点了刷新没反应」。
+            if
+                let existing = self.harvester,
+                existing.isRunning,
+                self.harvesterFollow == self.following
+            {
+                if reload { existing.reload() }
                 return
             }
             self.harvester?.stop()
             let harvester = WebPageHarvester()
             self.harvester = harvester
+            self.harvesterFollow = self.following
             harvester.start(
                 url: self.following ? Self.followURL : Self.recommendURL,
                 userAgent: WebPlatformUserAgent.desktop,
@@ -230,10 +319,10 @@ final class XhsStore: ObservableObject {
                 patterns: ["/api/sns/web/v1/homefeed", "homefeed"],
                 onFinish: { [weak self] in
                     // 页面渲染完再把 DOM 抄一遍，双保险。
-                    self?.scheduleDOMHarvest(delays: [2.5])
+                    self?.scheduleDOMHarvest(delays: [2.0])
                 },
                 onFail: { [weak self] _ in
-                    self?.scheduleDOMHarvest(delays: [1.5])
+                    self?.scheduleDOMHarvest(delays: [1.2])
                 },
                 onMessage: { [weak self] message in
                     self?.ingest(message)
@@ -261,10 +350,16 @@ final class XhsStore: ObservableObject {
             if code == -100 {
                 logout()
                 errorMessage = XhsError.notLoggedIn.message
-            } else {
-                errorMessage = "小红书返回 code \(code)，稍后点「重试」"
+                isLoading = false
+                return
             }
-            isLoading = false
+            // 网页自己发的那次 homefeed 被风控挡了，不代表一条都拿不到：
+            // DOM / `__INITIAL_STATE__` 兜底经常还有数据。有内容就别拿
+            // 「请求失败 code -1」去盖住正常列表。
+            if notes.isEmpty {
+                errorMessage = "小红书返回 code \(code)，稍后点「重试」"
+                isLoading = false
+            }
             return
         }
 
@@ -377,7 +472,12 @@ final class XhsStore: ObservableObject {
             // 卡片上的 xsec_token 会过期。过期后服务端一律回「当前笔记暂时无法浏览」，
             // 这时用详情接口换一个新 token 再试一次，比让用户自己去网页版强。
             guard
-                let fresh = try? await XhsService.shared.note(id: note.id, xsecToken: note.xsecToken),
+                let fresh = try? await XhsService.shared.note(
+                    id: note.id,
+                    xsecToken: note.xsecToken,
+                    timeout: 6,
+                    attempts: 1
+                ),
                 !fresh.xsecToken.isEmpty,
                 fresh.xsecToken != note.xsecToken
             else { throw error }
@@ -425,17 +525,33 @@ final class XhsStore: ObservableObject {
 
     // MARK: - 列表
 
-    private func merge(_ batch: [XhsNote]) {
-        let known = Set(notes.map { $0.id })
-        let fresh = batch.filter { !known.contains($0.id) }
-        guard !fresh.isEmpty else { return }
-        notes.append(contentsOf: fresh)
-        receivedAnything = true
-        emptyScrolls = 0
-        loaded = true
-        errorMessage = nil
-        isLoading = false
-        isLoadingMore = false
+    private func merge(_ batch: [XhsNote], replace: Bool = false) {
+        let work: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            var base = replace ? [XhsNote]() : self.notes
+            let known = Set(base.map { $0.id })
+            let fresh = batch.filter { !known.contains($0.id) }
+            if !fresh.isEmpty {
+                base.append(contentsOf: fresh)
+                self.notes = base
+                self.receivedAnything = true
+                self.emptyScrolls = 0
+                self.loaded = true
+                self.errorMessage = nil
+                self.isLoading = false
+            }
+            if !fresh.isEmpty || replace {
+                self.isLoading = false
+            }
+            // 不管有没有新内容，这一轮翻页都结束了，页脚必须收起来。
+            self.isLoadingMore = false
+        }
+        // `ingest` 在主线程，接口请求在后台；统一回主线程改 `@Published`。
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
     }
 
     private static func note(fromDOM item: [String: Any]) -> XhsNote? {

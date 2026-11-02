@@ -21,12 +21,17 @@ final class XhsService {
     // MARK: - 首页
 
     /// `follow == true` 时取关注流，否则是推荐流。
-    func homeFeed(cursor: String?, follow: Bool) async throws -> (notes: [XhsNote], next: String?) {
+    func homeFeed(
+        cursor: String?,
+        follow: Bool,
+        refreshType: Int = 1,
+        noteIndex: Int = 0
+    ) async throws -> (notes: [XhsNote], next: String?) {
         let payload: [String: Any] = [
             "cursor_score": cursor ?? "",
             "num": 20,
-            "refresh_type": 1,
-            "note_index": 0,
+            "refresh_type": refreshType,
+            "note_index": noteIndex,
             "unread_begin_note_id": "",
             "unread_end_note_id": "",
             "unread_note_count": 0,
@@ -51,7 +56,12 @@ final class XhsService {
 
     // MARK: - 笔记详情
 
-    func note(id: String, xsecToken: String = "") async throws -> XhsNote {
+    func note(
+        id: String,
+        xsecToken: String = "",
+        timeout: TimeInterval = 12,
+        attempts: Int = 2
+    ) async throws -> XhsNote {
         var payload: [String: Any] = [
             "source_note_id": id,
             "image_formats": ["jpg", "webp", "avif"],
@@ -61,7 +71,7 @@ final class XhsService {
             payload["xsec_token"] = xsecToken
             payload["xsec_source"] = "pc_feed"
         }
-        let json = try await post("/api/sns/web/v1/feed", payload: payload)
+        let json = try await post("/api/sns/web/v1/feed", payload: payload, timeout: timeout, attempts: attempts)
         let data = XhsJSON.object(json["data"]) ?? [:]
         guard let note = XhsJSON.array(data["items"]).compactMap({ XhsJSON.note($0) }).first else {
             throw XhsError(message: "笔记已删除或不可见", needLogin: false)
@@ -112,9 +122,13 @@ final class XhsService {
         // 网页版评论区请求固定带 xsec_source；少了它服务端会认为「来源不明」，
         // 一律回「当前笔记暂时无法浏览」。
         parts.append("xsec_source=pc_feed")
+        // 评论是用户点了就要看的：签名页没起来时宁可快速失败一次，
+        // 也别让评论区空白转四十秒。
         let json = try await get(
             "/api/sns/web/v2/comment/page",
-            query: parts.joined(separator: "&")
+            query: parts.joined(separator: "&"),
+            timeout: 5,
+            attempts: 1
         )
         let data = XhsJSON.object(json["data"]) ?? [:]
         let items = XhsJSON.array(data["comments"]).compactMap { XhsJSON.comment($0) }
@@ -188,19 +202,45 @@ final class XhsService {
 
     // MARK: - 底层
 
-    private func post(_ path: String, payload: [String: Any]) async throws -> [String: Any] {
-        try await send(path: path, method: "POST", query: nil, payload: payload)
+    private func post(
+        _ path: String,
+        payload: [String: Any],
+        timeout: TimeInterval = 12,
+        attempts: Int = 2
+    ) async throws -> [String: Any] {
+        try await send(
+            path: path,
+            method: "POST",
+            query: nil,
+            payload: payload,
+            timeout: timeout,
+            attempts: attempts
+        )
     }
 
-    private func get(_ path: String, query: String?) async throws -> [String: Any] {
-        try await send(path: path, method: "GET", query: query, payload: nil)
+    private func get(
+        _ path: String,
+        query: String?,
+        timeout: TimeInterval = 12,
+        attempts: Int = 2
+    ) async throws -> [String: Any] {
+        try await send(
+            path: path,
+            method: "GET",
+            query: query,
+            payload: nil,
+            timeout: timeout,
+            attempts: attempts
+        )
     }
 
     private func send(
         path: String,
         method: String,
         query: String?,
-        payload: [String: Any]?
+        payload: [String: Any]?,
+        timeout: TimeInterval = 12,
+        attempts: Int = 2
     ) async throws -> [String: Any] {
         var attempt = 0
         while true {
@@ -212,7 +252,9 @@ final class XhsService {
                     host: host,
                     query: query,
                     payload: payload,
-                    commonHeader: commonHeader()
+                    commonHeader: commonHeader(),
+                    timeout: timeout,
+                    attempts: attempts
                 )
             } catch let error as XhsError {
                 throw error

@@ -185,6 +185,13 @@ struct XhsFeedView: View {
                     },
                     onLike: { toggleLike(note) }
                 )
+                // 每列最后一张卡出现在屏幕上时再要下一页。
+                // 以前是底部一个 1pt 的透明条，滚出屏幕再滚回来会反复触发，
+                // 而且加载失败时那片区域就是一片灰。
+                .onAppear {
+                    guard note.id == bucket.last?.id else { return }
+                    Task { await store.loadMore() }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
@@ -204,23 +211,30 @@ struct XhsFeedView: View {
         }
     }
 
-    @ViewBuilder
+    /// 固定高度：翻页时高度不跳，用户不会看到「下面一片灰」。
     private var loadMoreFooter: some View {
-        if store.isLoadingMore {
-            ProgressView()
-                .padding(.vertical, 16)
-        } else if !store.hasMore {
-            Text("没有更多了")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 16)
-        } else {
-            Color.clear
-                .frame(height: 1)
-                .onAppear {
-                    Task { await store.loadMore() }
+        ZStack {
+            if store.isLoadingMore {
+                ProgressView()
+            } else if store.loadMoreFailed {
+                Button {
+                    Task { await store.retryLoadMore() }
+                } label: {
+                    Text("加载失败，点此重试")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
+                .buttonStyle(.plain)
+            } else if !store.hasMore {
+                Text("没有更多了")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Color.clear
+            }
         }
+        .frame(height: 52)
+        .frame(maxWidth: .infinity)
     }
 
     private func errorState(_ message: String) -> some View {

@@ -122,9 +122,8 @@ private struct WereadReaderWebView: UIViewRepresentable {
 
     /// 让阅读页的文字可以被长按选中。
     ///
-    /// 微信读书自己接管了 `touchstart` / `selectstart`，还会给正文容器写
-    /// `user-select: none`。CSS 用 `!important` 盖掉，事件在捕获阶段掐断，
-    /// 这样系统原生的选择手柄、复制/查询/翻译菜单就能正常出来。
+    /// 微信读书会给正文容器写 `user-select: none`，CSS 用 `!important` 盖掉即可。
+    /// 事件不能拦：它自己的划词菜单（划线 / 写想法）就挂在 `selectstart` 上。
     private static let selectionScript = """
     (function(){
       var styleId = 'flare-select-style';
@@ -164,9 +163,9 @@ private struct WereadReaderWebView: UIViewRepresentable {
       apply();
       document.addEventListener('DOMContentLoaded', schedule, true);
       window.addEventListener('load', schedule, true);
-      ['selectstart', 'contextmenu'].forEach(function(name){
-        document.addEventListener(name, function(e){ e.stopPropagation(); }, true);
-      });
+      // 这里**不要**再拦 selectstart / contextmenu。微信读书的划线、想法菜单
+      // 就是监听这两个事件的，捕获阶段一 stopPropagation，它自己的菜单也弹不
+      // 出来，用户只剩系统菜单（复制 / 查询），根本写不了想法。
       try {
         var observer = new MutationObserver(schedule);
         observer.observe(document.documentElement, { childList: true, subtree: true });
@@ -323,18 +322,20 @@ private struct WereadReaderWebView: UIViewRepresentable {
                 self.fallbackToShelf(in: webView)
             }
             watchdog = item
-            // 正文最多校验 4 轮（2.5s × 4），看门狗要比它晚一点，
+            // 正文最多校验 7 轮（1.5s × 7 ≈ 10.5s），看门狗要比它晚一点，
             // 免得正文刚画出来就被判成白屏。
-            DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 16, execute: item)
         }
 
         /// 正文是 JS 画出来的，`didFinish` 时往往还是白屏。
         /// 只看明确的「这本书不在这里」；白屏就再等一轮，最多三轮，
         /// 免得把「还在加载」误判成「打不开」把人踢回网页书架。
         private func checkReaderBody(in webView: WKWebView, url: String) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self, weak webView] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak webView] in
                 guard let self = self, let webView = webView else { return }
-                guard self.parent.inReader, !self.fallbackUsed else { return }
+                // 不要再挡 `fallbackUsed`：白屏退回书架、自动重新点开之后，
+                // 这一轮仍然要校验正文并缓存真地址。
+                guard self.parent.inReader else { return }
                 let script = "(document.body ? (document.body.innerText || '') : '').slice(0, 1500)"
                 webView.evaluateJavaScript(script) { value, _ in
                     let text = ((value as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -346,12 +347,21 @@ private struct WereadReaderWebView: UIViewRepresentable {
                         self.fallbackToShelf(in: webView)
                         return
                     }
-                    if text.count < 10, self.verifyAttempts < 3 {
+                    // 白屏有两种：地址真的不能用，和「JS 还在画」。
+                    // 以前 4.5 秒没字就弹回网页书架，书架又要重新加载一遍，
+                    // 用户看到的就是「白屏 → 转圈 → 白屏」，比单纯等还慢。
+                    if text.count < 10, self.verifyAttempts < 6 {
                         self.verifyAttempts += 1
                         self.checkReaderBody(in: webView, url: url)
                         return
                     }
                     if text.count < 10 {
+                        // 已经弹过一次书架了：再弹只会更慢，把页面留给用户，
+                        // 顶部的刷新按钮还能自己重试。
+                        if self.fallbackUsed {
+                            self.parent.isLoading = false
+                            return
+                        }
                         // 白屏：这个地址不能用，别写缓存，退回网页书架让用户自己点。
                         self.fallbackToShelf(in: webView)
                         return
@@ -372,16 +382,14 @@ private struct WereadReaderWebView: UIViewRepresentable {
         private func fallbackToShelf(in webView: WKWebView) {
             watchdog?.cancel()
             watchdog = nil
-            guard !fallbackUsed else {
-                parent.isLoading = false
-                return
-            }
+            // 第一次白屏：退回书架后**再自动点一次**（这一轮书架 DOM 已经渲染过，
+            // 能拿到这本书真正的阅读器地址，比让用户自己再点一遍快得多）。
+            // 第二次还白屏：就停在书架上让用户自己点，别再来回弹。
+            let secondTime = fallbackUsed
             fallbackUsed = true
             jumpMode = true
             checkedReader = false
-            // 保持「已经自动跳过」的状态：退回书架后别再自动点开同一本书，
-            // 否则又进白屏，而 fallbackUsed 已经用完，用户就卡死在白板上了。
-            didAttemptJump = true
+            didAttemptJump = secondTime
             jumpAttempts = 0
             parent.inReader = false
             parent.isLoading = true
@@ -435,13 +443,13 @@ private struct WereadReaderWebView: UIViewRepresentable {
         private func scheduleJump(in webView: WKWebView) {
             // 已经进阅读器了就别再折腾书架，否则会把正文页滚走。
             if parent.inReader { return }
-            guard jumpAttempts < 14 else {
+            guard jumpAttempts < 24 else {
                 // 实在找不到就把遮罩撤掉，让用户自己在网页书架上点。
                 parent.isLoading = false
                 return
             }
-            // 第一次稍微等一下让书架铺开，之后半秒一次，快速试。
-            let delay = jumpAttempts == 0 ? 0.8 : 0.6
+            // 书架是 JS 渲染的，第一次多等一点让它铺开，之后 0.35 秒试一次。
+            let delay = jumpAttempts == 0 ? 0.45 : 0.35
             jumpAttempts += 1
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak webView] in
                 guard let self = self, let webView = webView else { return }
@@ -454,7 +462,7 @@ private struct WereadReaderWebView: UIViewRepresentable {
                     if found {
                         // 有些卡片走的是 SPA 路由，点完不会立刻换地址。
                         // 隔几秒还没进阅读器就再试一轮，免得停在书架上一动不动。
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self, weak webView] in
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self, weak webView] in
                             guard let self = self, let webView = webView else { return }
                             if self.parent.inReader { return }
                             let current = webView.url?.absoluteString ?? ""
