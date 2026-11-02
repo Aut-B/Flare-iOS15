@@ -177,7 +177,7 @@ enum XhsJSON {
             aspect = width / height
         }
         guard let resolved = url else { return nil }
-        return (normalizedImageURL(resolved), aspect)
+        return (XhsNote.normalizedImageURL(resolved), aspect)
     }
 
     /// 视频直链。`video.media.stream` 里按编码分了 h264 / h265 / av1 三档，
