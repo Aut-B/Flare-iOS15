@@ -17,6 +17,7 @@ permissions:
 
 env:
   GRADLE_JVM_ARGS: "-Xmx12G -Dfile.encoding=UTF-8"
+  KOTLIN_VERSION: "2.4.20"
 
 jobs:
   # 1) 冒烟：在模拟器里真的装一次、启动一次。
@@ -38,25 +39,31 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Cache Gradle & Konan
+      - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-            ~/.konan
-          key: gradle-sim-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', '**/*.gradle.properties', 'gradle/libs.versions.toml') }}
+          key: gradle-v2-sim-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', '**/*.gradle.properties', 'gradle/libs.versions.toml') }}
           restore-keys: |
-            gradle-sim-${{ runner.os }}-
-            gradle-${{ runner.os }}-
+            gradle-v2-sim-${{ runner.os }}-
+
+      - name: Cache Konan (per Kotlin version)
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-v2-sim-${{ runner.os }}-${{ env.KOTLIN_VERSION }}
+          restore-keys: |
+            konan-v2-sim-${{ runner.os }}-
 
       - name: Cache DerivedData
         uses: actions/cache@v4
         with:
           path: appleApp/DerivedData
-          key: derived-sim-${{ runner.os }}-${{ hashFiles('appleApp/**/*.swift', 'appleApp/project.yml') }}
+          key: derived-v2-sim-${{ runner.os }}-${{ hashFiles('appleApp/**/*.swift', 'appleApp/project.yml') }}
           restore-keys: |
-            derived-sim-${{ runner.os }}-
+            derived-v2-sim-${{ runner.os }}-
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -189,24 +196,31 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Cache Gradle & Konan
+      - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-            ~/.konan
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', '**/*.gradle.properties', 'gradle/libs.versions.toml') }}
+          key: gradle-v2-device-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', '**/*.gradle.properties', 'gradle/libs.versions.toml') }}
           restore-keys: |
-            gradle-${{ runner.os }}-
+            gradle-v2-device-${{ runner.os }}-
+
+      - name: Cache Konan (per Kotlin version)
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-v2-device-${{ runner.os }}-${{ env.KOTLIN_VERSION }}
+          restore-keys: |
+            konan-v2-device-${{ runner.os }}-
 
       - name: Cache DerivedData
         uses: actions/cache@v4
         with:
           path: appleApp/DerivedData
-          key: derived-${{ runner.os }}-${{ hashFiles('appleApp/**/*.swift', 'appleApp/project.yml') }}
+          key: derived-v2-device-${{ runner.os }}-${{ hashFiles('appleApp/**/*.swift', 'appleApp/project.yml') }}
           restore-keys: |
-            derived-${{ runner.os }}-
+            derived-v2-
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -218,6 +232,7 @@ jobs:
       - name: Build unsigned IPA (iOS 15, device)
         working-directory: appleApp
         run: |
+          set -o pipefail
           chmod +x ../gradlew
           xcodebuild \
             -project Flare.xcodeproj \
@@ -233,7 +248,8 @@ jobs:
             DEVELOPMENT_TEAM= \
             CODE_SIGN_IDENTITY="" \
             -skipPackagePluginValidation \
-            -skipMacroValidation
+            -skipMacroValidation \
+            2>&1 | tee build-device.log
 
       - name: Package IPA
         run: |
@@ -262,6 +278,35 @@ jobs:
             冒烟结果：${{ needs.smoke.result }}
             固定下载地址（永远是最新一版）：
             https://github.com/${{ github.repository }}/releases/download/ios15-latest/Flare-iOS15.ipa
+
+      - name: Upload device build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: device-build-log-build${{ github.run_number }}
+          path: appleApp/build-device.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Open issue on device build failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          LOG=$(grep -n -m 40 -E 'error:|Internal compiler error|FAILED|Unresolved reference' appleApp/build-device.log 2>/dev/null | head -n 60 || echo '(no matching lines)')
+          {
+            echo "- commit: \`${{ github.sha }}\`"
+            echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "- artifact: device-build-log-build${{ github.run_number }}"
+            echo ""
+            echo '```'
+            echo "$LOG"
+            echo '```'
+          } > /tmp/issue-device.md
+          gh issue create \
+            --title "iOS 设备构建失败: build ${{ github.run_number }}" \
+            --body-file /tmp/issue-device.md || true
 
       - name: Summary
         run: |

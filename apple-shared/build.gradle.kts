@@ -46,6 +46,7 @@ kotlin {
             appleTarget.binaries.framework {
                 baseName = "KotlinSharedUI"
                 isStatic = true
+                binaryOption("bundleId", "dev.dimension.flare.KotlinSharedUI")
 
                 if (appleTarget.name.startsWith("macos")) {
                     linkerOpts.add("-lsqlite3")
