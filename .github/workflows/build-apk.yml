@@ -2,8 +2,6 @@ name: Build Flare APK (Android)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ ios15-build ]
 
 jobs:
   build:
