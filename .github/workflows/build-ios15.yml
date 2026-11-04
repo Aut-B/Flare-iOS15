@@ -13,6 +13,7 @@ concurrency:
 
 permissions:
   contents: write
+  issues: write
 
 env:
   GRADLE_JVM_ARGS: "-Xmx12G -Dfile.encoding=UTF-8"
@@ -24,6 +25,8 @@ jobs:
     name: Simulator smoke test
     runs-on: macos-26
     timeout-minutes: 75
+    outputs:
+      built: ${{ steps.mark.outputs.built }}
 
     steps:
       - name: Checkout
@@ -89,7 +92,11 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             -skipPackagePluginValidation \
             -skipMacroValidation \
-            -quiet
+            2>&1 | tee build-sim.log
+
+      - name: Mark build ok
+        id: mark
+        run: echo "built=true" >> "$GITHUB_OUTPUT"
 
       - name: Install and launch, fail on crash
         run: |
@@ -138,15 +145,37 @@ jobs:
             screenshot-30s.png
             flare-sim.log
             crash/
+            appleApp/build-sim.log
           if-no-files-found: ignore
           retention-days: 14
 
-  # 2) 正式 IPA。冒烟挂了也照出包（公共仓库不烧额度），
-  #    但结论仍是失败，红叉一眼能看见。
+      # 失败自动开 Issue：把编译/闪退的关键日志贴进去，不用人肉复现
+      - name: Open issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          LOG=$(tail -n 80 appleApp/build-sim.log 2>/dev/null || echo "(no build log)")
+          {
+            echo "- commit: \`${{ github.sha }}\`"
+            echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "- artifacts: smoke-build${{ github.run_number }}"
+            echo ""
+            echo '```'
+            echo "$LOG"
+            echo '```'
+          } > /tmp/issue-body.md
+          gh issue create \
+            --title "CI 冒烟失败: build ${{ github.run_number }}" \
+            --body-file /tmp/issue-body.md || true
+
+  # 2) 正式 IPA。冒烟挂的是“启动闪退”时也照出包（方便真机验），
+  #    但编译没过就直接跳过，省一小时。
   ipa:
     name: Release IPA
     needs: smoke
-    if: always() && needs.smoke.result != 'cancelled'
+    if: always() && needs.smoke.outputs.built == 'true'
     runs-on: macos-26
     timeout-minutes: 150
 
