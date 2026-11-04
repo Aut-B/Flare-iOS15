@@ -234,22 +234,29 @@ jobs:
         run: |
           set -o pipefail
           chmod +x ../gradlew
-          xcodebuild \
-            -project Flare.xcodeproj \
-            -scheme iOS \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath DerivedData \
-            -archivePath /tmp/Flare.xcarchive \
-            archive \
-            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            DEVELOPMENT_TEAM= \
-            CODE_SIGN_IDENTITY="" \
-            -skipPackagePluginValidation \
-            -skipMacroValidation \
-            2>&1 | tee build-device.log
+          archive() {
+            xcodebuild \
+              -project Flare.xcodeproj \
+              -scheme iOS \
+              -configuration Release \
+              -sdk iphoneos \
+              -derivedDataPath DerivedData \
+              -archivePath /tmp/Flare.xcarchive \
+              archive \
+              CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              DEVELOPMENT_TEAM= \
+              CODE_SIGN_IDENTITY="" \
+              -skipPackagePluginValidation \
+              -skipMacroValidation \
+              2>&1 | tee -a build-device.log
+          }
+          if archive; then exit 0; fi
+          echo "::warning::第一次设备构建失败，清中间产物后自动重试一次"
+          ../gradlew --stop || true
+          rm -rf /tmp/Flare.xcarchive DerivedData/Build/Products
+          archive
 
       - name: Package IPA
         run: |

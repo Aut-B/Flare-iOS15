@@ -19,6 +19,14 @@ plugins {
 }
 
 subprojects {
+    // Kotlin/Native 2.4.20 在给 cryptography-provider-cryptokit 生成 CryptoKitAesGcm 的 itable
+    // 时会触发编译器 ICE（no implementation found for AES.keyDecoder），只在 iphoneos 的 Release
+    // 链接阶段出现，直接导致 IPA 打不出来。本项目只用到 SHA-256，cryptography-provider-apple
+    // （CommonCrypto）已覆盖，所以全局排除 cryptokit。
+    configurations.configureEach {
+        exclude(group = "dev.whyoleg.cryptography", module = "cryptography-provider-cryptokit")
+    }
+
     pluginManager.withPlugin("io.insert-koin.compiler.plugin") {
         extensions.configure<KoinGradleExtension> {
             logSeverity.set("info")
