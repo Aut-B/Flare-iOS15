@@ -176,6 +176,59 @@ jobs:
           gh issue create \
             --title "CI 冒烟失败: build ${{ github.run_number }}" \
             --body-file /tmp/issue-body.md || true
+  # 0) 纯逻辑测试：小红书 JSON 解析、微信读书书架排序/分组。
+  #    不联网、不碰 Kotlin、不装 App，几分钟出结果 —— 这类 bug 不用等到手机上才发现。
+  logic-tests:
+    name: Logic tests (XHS / Weread)
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: appleApp
+        run: xcodegen generate
+
+      - name: Create simulator
+        run: |
+          set -euo pipefail
+          DEVTYPE=$(xcrun simctl list devicetypes -j | jq -r '[.devicetypes[] | select(.name | test("^iPhone"))][0].name')
+          RUNTIME=$(xcrun simctl list runtimes -j | jq -r '[.runtimes[] | select(.isAvailable and (.identifier | test("iOS")))] | sort_by(.version | split(".") | map(tonumber? // 0)) | last | .identifier')
+          echo "simulator: $DEVTYPE / $RUNTIME"
+          UDID=$(xcrun simctl create FlareLogicCI "$DEVTYPE" "$RUNTIME")
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+
+      - name: Run logic tests
+        working-directory: appleApp
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project Flare.xcodeproj \
+            -scheme LogicTests \
+            -destination "id=$UDID" \
+            -derivedDataPath DerivedDataLogic \
+            -resultBundlePath "$RUNNER_TEMP/logic.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            2>&1 | tee logic-tests.log
+
+      - name: Upload logic test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logic-tests-${{ github.run_number }}
+          path: |
+            appleApp/logic-tests.log
+            ${{ runner.temp }}/logic.xcresult
+          if-no-files-found: ignore
+          retention-days: 14
 
   # 2) 正式 IPA。冒烟挂的是“启动闪退”时也照出包（方便真机验），
   #    但编译没过就直接跳过，省一小时。

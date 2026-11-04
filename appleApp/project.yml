@@ -276,6 +276,22 @@ targets:
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/TimelineUnitTestHost.app/TimelineUnitTestHost
         BUNDLE_LOADER: $(TEST_HOST)
 
+  # 纯逻辑测试：只编这几个文件，不碰 Kotlin / SwiftUI / 网络，
+  # 所以能在几十秒内跑完，CI 上每次提交都跑。
+  LogicTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: iosTestsLogic
+      - path: ios/UI/Feature/WebSocial/Xiaohongshu/XhsModels.swift
+      - path: ios/UI/Feature/Weread/WereadModels.swift
+      - path: ios/UI/Feature/Weread/WereadShelfSections.swift
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dimension.flare.logic-tests
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+
   TimelineControllerTests:
     type: bundle.unit-test
     platform: iOS
@@ -534,6 +550,15 @@ schemes:
       config: Debug
       targets:
         - MediaViewerInteractionTests
+
+  LogicTests:
+    build:
+      targets:
+        LogicTests: all
+    test:
+      config: Debug
+      targets:
+        - LogicTests
 
   macOS:
     build:

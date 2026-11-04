@@ -79,49 +79,11 @@ struct WereadShelfView: View {
     }
 
     // MARK: - 排序与分组
+    //
+    // 具体规则在 WereadShelfSections 里（纯数据变换，有单元测试盯着）。
 
-    /// 按最近阅读倒序。`updatedAt` 全是 0 的老数据保持接口原顺序，
-    /// 免得「一升级顺序全乱」。
-    private var sortedBooks: [WereadBook] {
-        store.books
-            .enumerated()
-            .sorted { left, right in
-                if left.element.updatedAt == right.element.updatedAt {
-                    return left.offset < right.offset
-                }
-                return left.element.updatedAt > right.element.updatedAt
-            }
-            .map { $0.element }
-    }
-
-    /// 线上书架的分组（`shelf/sync` 里的 `bookGroups`）。
-    /// 一个分组都认不出来就平铺，不硬造「最近阅读 / 全部」这种假分组。
-    private var shelfSections: [ShelfSection] {
-        let sorted = sortedBooks
-        var order: [String] = []
-        var buckets: [String: [WereadBook]] = [:]
-        for book in sorted where !book.group.isEmpty {
-            if buckets[book.group] == nil { order.append(book.group) }
-            buckets[book.group, default: []].append(book)
-        }
-        var result = order.map { name in
-            ShelfSection(id: name, title: name, books: buckets[name] ?? [])
-        }
-        let ungrouped = sorted.filter { $0.group.isEmpty }
-        if !ungrouped.isEmpty {
-            if result.isEmpty {
-                result = [ShelfSection(id: "__all__", title: "", books: ungrouped)]
-            } else {
-                result.append(ShelfSection(id: "__ungrouped__", title: "未分组", books: ungrouped))
-            }
-        }
-        return result
-    }
-
-    private struct ShelfSection: Identifiable {
-        let id: String
-        let title: String
-        let books: [WereadBook]
+    private var shelfSections: [WereadShelfSection] {
+        WereadShelfSections.make(store.books)
     }
 
     // MARK: - 书架
