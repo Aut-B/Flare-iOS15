@@ -1,36 +1,160 @@
 name: Build Flare iOS 15 IPA (TrollStore)
 
+# 触发：push 到 ios15-build，或手动 Run workflow
 on:
   workflow_dispatch:
   push:
     branches: [ ios15-build ]
 
-jobs:
-  build:
-    # GitHub 官方 macOS 26 运行器，预装 Xcode 26.6（Swift 6.2）。
-    # 上游用 xcode-27 标签（自托管/付费），免费账号用 macos-26 即可。
-    runs-on: macos-26
-    # 全量编译（Kotlin/Native + 整个 Swift 模块）约 65-70 分钟，
-    # 给到 150 分钟留足余量；真卡死了也别烧满默认的 6 小时。
-    timeout-minutes: 150
+# 同一分支只保留最新一次，旧的自动取消，不排队烧时间
+concurrency:
+  group: ios15-${{ github.ref }}
+  cancel-in-progress: true
 
-    env:
-      GRADLE_JVM_ARGS: "-Xmx12G -Dfile.encoding=UTF-8"
+permissions:
+  contents: write
+
+env:
+  GRADLE_JVM_ARGS: "-Xmx12G -Dfile.encoding=UTF-8"
+
+jobs:
+  # 1) 冒烟：在模拟器里真的装一次、启动一次。
+  #    编译错、一开机就闪退，20 分钟内就变红，不用等一小时。
+  smoke:
+    name: Simulator smoke test
+    runs-on: macos-26
+    timeout-minutes: 75
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 21 (Kotlin Multiplatform 需要)
+      - name: Set up JDK 21 (Kotlin Multiplatform)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Show Xcode version (调试用)
-        run: xcodebuild -version
+      - name: Cache Gradle & Konan
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.konan
+          key: gradle-sim-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', '**/*.gradle.properties', 'gradle/libs.versions.toml') }}
+          restore-keys: |
+            gradle-sim-${{ runner.os }}-
+            gradle-${{ runner.os }}-
 
-      # 多轮迭代靠这两个缓存把耗时压下来：Gradle/Kotlin 依赖与 Xcode 增量编译产物。
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: appleApp/DerivedData
+          key: derived-sim-${{ runner.os }}-${{ hashFiles('appleApp/**/*.swift', 'appleApp/project.yml') }}
+          restore-keys: |
+            derived-sim-${{ runner.os }}-
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: appleApp
+        run: xcodegen generate
+
+      - name: Build for iOS Simulator
+        working-directory: appleApp
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Flare.xcodeproj \
+            -scheme iOS \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath DerivedData \
+            build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            -quiet
+
+      - name: Install and launch, fail on crash
+        run: |
+          set -euo pipefail
+          APP="$GITHUB_WORKSPACE/appleApp/DerivedData/Build/Products/Debug-iphonesimulator/Flare.app"
+          if [ ! -d "$APP" ]; then echo "::error::Flare.app was not produced"; exit 1; fi
+
+          DEVTYPE=$(xcrun simctl list devicetypes -j | jq -r '[.devicetypes[] | select(.name | test("^iPhone"))][0].name')
+          RUNTIME=$(xcrun simctl list runtimes -j | jq -r '[.runtimes[] | select(.isAvailable and (.identifier | test("iOS")))] | last | .identifier')
+          echo "simulator: $DEVTYPE / $RUNTIME"
+          UDID=$(xcrun simctl create FlareCI "$DEVTYPE" "$RUNTIME")
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" "$APP"
+          xcrun simctl launch "$UDID" dev.dimension.flare
+          sleep 30
+          xcrun simctl io "$UDID" screenshot screenshot-30s.png
+
+          if xcrun simctl spawn "$UDID" launchctl list | grep -q 'dev.dimension.flare'; then
+            echo "OK: still running 30s after launch"
+          else
+            echo "::error::process gone within 30s (launch crash)"
+            xcrun simctl spawn "$UDID" log show --last 3m --predicate 'process == "Flare"' > flare-sim.log 2>&1 || true
+            mkdir -p crash
+            cp "$HOME"/Library/Logs/DiagnosticReports/*.ips crash/ 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: UI tests (non-blocking)
+        continue-on-error: true
+        working-directory: appleApp
+        run: |
+          xcodebuild test \
+            -project Flare.xcodeproj \
+            -scheme iOS \
+            -destination "id=$UDID" \
+            -derivedDataPath DerivedData \
+            -only-testing:iOSInteractionTests \
+            -only-testing:MediaViewerInteractionTests \
+            -resultBundlePath "$RUNNER_TEMP/uitests.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            -quiet || true
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-build${{ github.run_number }}
+          path: |
+            screenshot-30s.png
+            flare-sim.log
+            crash/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # 2) 正式 IPA。冒烟挂了也照出包（公共仓库不烧额度），
+  #    但结论仍是失败，红叉一眼能看见。
+  ipa:
+    name: Release IPA
+    needs: smoke
+    if: always() && needs.smoke.result != 'cancelled'
+    runs-on: macos-26
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Kotlin Multiplatform)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - name: Cache Gradle & Konan
         uses: actions/cache@v4
         with:
@@ -45,7 +169,7 @@ jobs:
       - name: Cache DerivedData
         uses: actions/cache@v4
         with:
-          path: DerivedData
+          path: appleApp/DerivedData
           key: derived-${{ runner.os }}-${{ hashFiles('appleApp/**/*.swift', 'appleApp/project.yml') }}
           restore-keys: |
             derived-${{ runner.os }}-
@@ -53,15 +177,14 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      - name: Generate Xcode project (appleApp)
-        run: |
-          cd appleApp
-          xcodegen generate
+      - name: Generate Xcode project
+        working-directory: appleApp
+        run: xcodegen generate
 
       - name: Build unsigned IPA (iOS 15, device)
+        working-directory: appleApp
         run: |
-          chmod +x gradlew
-          cd appleApp
+          chmod +x ../gradlew
           xcodebuild \
             -project Flare.xcodeproj \
             -scheme iOS \
@@ -70,6 +193,7 @@ jobs:
             -derivedDataPath DerivedData \
             -archivePath /tmp/Flare.xcarchive \
             archive \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             DEVELOPMENT_TEAM= \
@@ -79,12 +203,37 @@ jobs:
 
       - name: Package IPA
         run: |
+          rm -rf Payload Flare-iOS15.ipa
           mkdir -p Payload
           cp -r /tmp/Flare.xcarchive/Products/Applications/Flare.app Payload/
-          zip -r Flare-iOS15.ipa Payload
+          zip -qry Flare-iOS15.ipa Payload
+          ls -lh Flare-iOS15.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Flare-iOS15-ipa
+          name: Flare-iOS15-ipa-build${{ github.run_number }}
           path: Flare-iOS15.ipa
+          retention-days: 30
+
+      - name: Publish to Releases (fixed link)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios15-latest
+          name: "Flare iOS15 - build ${{ github.run_number }}"
+          prerelease: true
+          files: Flare-iOS15.ipa
+          body: |
+            build ${{ github.run_number }} / ${{ github.sha }}
+            冒烟结果：${{ needs.smoke.result }}
+            固定下载地址（永远是最新一版）：
+            https://github.com/${{ github.repository }}/releases/download/ios15-latest/Flare-iOS15.ipa
+
+      - name: Summary
+        run: |
+          {
+            echo "### Flare iOS15 build ${{ github.run_number }}"
+            echo ""
+            echo "- smoke: ${{ needs.smoke.result }}"
+            echo "- 下载: https://github.com/${{ github.repository }}/releases/download/ios15-latest/Flare-iOS15.ipa"
+          } >> "$GITHUB_STEP_SUMMARY"

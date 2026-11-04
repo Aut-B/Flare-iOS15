@@ -1,9 +1,9 @@
-name: Build Flare iOS 15 IPA (TrollStore)
+name: Build Flare iOS 15 IPA (upstream copy, manual only)
 
+# 和 build-ios15.yml 内容重复。这里只留手动触发，
+# 否则每次 push 都会跑两份一模一样的构建，白等一小时。
 on:
   workflow_dispatch:
-  push:
-    branches: [ ios15-build ]
 
 jobs:
   build:
