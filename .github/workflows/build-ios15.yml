@@ -62,6 +62,18 @@ jobs:
         working-directory: appleApp
         run: xcodegen generate
 
+      # 必须先建具体设备。用 -sdk iphonesimulator 或 generic destination 编译时，
+      # SwiftPM 的宏插件会被丢到 Debug-iphonesimulator 下，编译器找不到就报
+      # "external macro implementation type could not be found"。
+      - name: Create simulator
+        run: |
+          set -euo pipefail
+          DEVTYPE=$(xcrun simctl list devicetypes -j | jq -r '[.devicetypes[] | select(.name | test("^iPhone"))][0].name')
+          RUNTIME=$(xcrun simctl list runtimes -j | jq -r '[.runtimes[] | select(.isAvailable and (.identifier | test("iOS")))] | sort_by(.version | split(".") | map(tonumber? // 0)) | last | .identifier')
+          echo "simulator: $DEVTYPE / $RUNTIME"
+          UDID=$(xcrun simctl create FlareCI "$DEVTYPE" "$RUNTIME")
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
+
       - name: Build for iOS Simulator
         working-directory: appleApp
         run: |
@@ -70,8 +82,7 @@ jobs:
             -project Flare.xcodeproj \
             -scheme iOS \
             -configuration Debug \
-            -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
+            -destination "platform=iOS Simulator,id=$UDID" \
             -derivedDataPath DerivedData \
             build \
             CODE_SIGNING_ALLOWED=NO \
@@ -85,12 +96,6 @@ jobs:
           set -euo pipefail
           APP="$GITHUB_WORKSPACE/appleApp/DerivedData/Build/Products/Debug-iphonesimulator/Flare.app"
           if [ ! -d "$APP" ]; then echo "::error::Flare.app was not produced"; exit 1; fi
-
-          DEVTYPE=$(xcrun simctl list devicetypes -j | jq -r '[.devicetypes[] | select(.name | test("^iPhone"))][0].name')
-          RUNTIME=$(xcrun simctl list runtimes -j | jq -r '[.runtimes[] | select(.isAvailable and (.identifier | test("iOS")))] | last | .identifier')
-          echo "simulator: $DEVTYPE / $RUNTIME"
-          UDID=$(xcrun simctl create FlareCI "$DEVTYPE" "$RUNTIME")
-          echo "UDID=$UDID" >> "$GITHUB_ENV"
 
           xcrun simctl boot "$UDID"
           xcrun simctl bootstatus "$UDID" -b
