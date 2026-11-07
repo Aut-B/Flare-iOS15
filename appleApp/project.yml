@@ -365,6 +365,20 @@ targets:
         TEST_TARGET_NAME: iOS
         SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
 
+  AppSmokeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: iosAppSmokeTests
+    dependencies:
+      - target: iOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dimension.flare.app-smoke-tests
+        TEST_TARGET_NAME: iOS
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+
   macOS:
     templates: [FirebaseOptionalApp]
     type: application
@@ -550,6 +564,15 @@ schemes:
       config: Debug
       targets:
         - MediaViewerInteractionTests
+
+  AppSmokeUITests:
+    build:
+      targets:
+        AppSmokeUITests: all
+    test:
+      config: Debug
+      targets:
+        - AppSmokeUITests
 
   LogicTests:
     build:

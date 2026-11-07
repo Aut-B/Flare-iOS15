@@ -143,6 +143,29 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             -quiet || true
 
+
+      # 逐个 tab 点一遍并截图：只判「崩不崩」，不判业务数据（CI 里没有账号）。
+      # 截图随 artifact 上传，不用装到手机上就能看到每个标签页长什么样。
+      - name: Tab sweep screenshots (non-blocking)
+        continue-on-error: true
+        working-directory: appleApp
+        run: |
+          set -uo pipefail
+          RESULT="$RUNNER_TEMP/tabsweep.xcresult"
+          xcodebuild test \
+            -project Flare.xcodeproj \
+            -scheme AppSmokeUITests \
+            -destination "id=$UDID" \
+            -derivedDataPath DerivedData \
+            -resultBundlePath "$RESULT" \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee tabsweep.log || true
+          mkdir -p tabsweep-shots
+          xcrun xcresulttool export attachments \
+            --path "$RESULT" \
+            --output-path tabsweep-shots || true
+          ls -R tabsweep-shots || true
+
       - name: Upload smoke artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -153,6 +176,8 @@ jobs:
             flare-sim.log
             crash/
             appleApp/build-sim.log
+            appleApp/tabsweep-shots/
+            appleApp/tabsweep.log
           if-no-files-found: ignore
           retention-days: 14
 
@@ -229,6 +254,27 @@ jobs:
             ${{ runner.temp }}/logic.xcresult
           if-no-files-found: ignore
           retention-days: 14
+
+      # 逻辑测试挂了也开 Issue：这类失败 5 分钟就出结果，不用等人翻 CI
+      - name: Open issue on logic test failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          LOG=$(tail -n 80 appleApp/logic-tests.log 2>/dev/null || echo "(no log)")
+          {
+            echo "- commit: \`${{ github.sha }}\`"
+            echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "- artifacts: logic-tests-${{ github.run_number }}"
+            echo ""
+            echo "```"
+            echo "$LOG"
+            echo "```"
+          } > /tmp/logic-issue.md
+          gh issue create \
+            --title "逻辑测试失败: build ${{ github.run_number }}" \
+            --body-file /tmp/logic-issue.md || true
 
   # 2) 正式 IPA。冒烟挂的是“启动闪退”时也照出包（方便真机验），
   #    但编译没过就直接跳过，省一小时。
