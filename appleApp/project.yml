@@ -283,6 +283,7 @@ targets:
     platform: iOS
     sources:
       - path: iosTestsLogic
+      - path: ios/UI/Feature/WebSocial/Instagram/InstagramStateIsolator.swift
       - path: ios/UI/Feature/WebSocial/Xiaohongshu/XhsModels.swift
       - path: ios/UI/Feature/Weread/WereadModels.swift
       - path: ios/UI/Feature/Weread/WereadShelfSections.swift
@@ -290,6 +291,7 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: dev.dimension.flare.logic-tests
+        OTHER_LDFLAGS: "$(inherited) -lsqlite3"
         SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
 
   TimelineControllerTests:

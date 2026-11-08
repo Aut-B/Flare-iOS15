@@ -86,13 +86,17 @@ internal class RepositoryAccountService(
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun allAccountServicesFlow(): Flow<List<AccountMicroblogDataSource>> =
         repository.allAccounts.mapLatest { accounts ->
-            accounts.filter { it.platformAvailable }.map { account ->
-                AccountMicroblogDataSource(
-                    accountKey = account.accountKey,
-                    platformId = account.platformId,
-                    dataSource = repository.getOrCreateDataSource(account),
-                )
-            }
+            accounts
+                .filter { it.platformAvailable }
+                .mapNotNull { account ->
+                    runCatching {
+                        AccountMicroblogDataSource(
+                            accountKey = account.accountKey,
+                            platformId = account.platformId,
+                            dataSource = repository.getOrCreateDataSource(account),
+                        )
+                    }.getOrNull()
+                }
         }
 
     override fun <T : Any> addAccount(

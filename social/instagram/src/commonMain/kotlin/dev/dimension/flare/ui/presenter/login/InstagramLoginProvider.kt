@@ -134,7 +134,7 @@ private class InstagramWebCookieLoginHandler(
                     ),
                 credential = credential,
                 serializer = InstagramCredential.serializer(),
-            )
+            ).join()
             // 原生 Instagram 页有自己的 Store；把同一份 cookie 同步过去，
             // 否则从侧边栏进原生页会重新显示「登录 Instagram」。
             InstagramBridgeHolder.bridge?.adopt(credential.cookie)

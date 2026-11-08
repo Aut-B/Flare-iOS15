@@ -40,11 +40,6 @@ enum LaunchGuard {
                 // 连着两次：连主界面都别画了，先停到安全模式界面。
                 defaults.set(true, forKey: recoveryKey)
             }
-            if crashes >= 3 {
-                // 第三次还崩：把最可能把启动路径带崩的 Instagram 凭证丢掉。
-                // 只清 Instagram，小红书 / 微信读书的登录态不受影响。
-                InstagramStore.purgeStoredCookie()
-            }
         } else {
             defaults.set(0, forKey: crashKey)
         }
@@ -76,6 +71,7 @@ enum LaunchGuard {
         guard !fullUIShown else { return }
         fullUIShown = true
         let defaults = UserDefaults.standard
+        InstagramStateIsolator.clearQuarantinePendingOnFullUI()
         // 用户可能是从安全模式界面点进来的，重新开始计时。
         defaults.set(true, forKey: activeKey)
         DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
@@ -124,7 +120,7 @@ enum LaunchGuard {
 
     /// 连主界面都画不出来时：清掉 Instagram 凭证再试一次。
     static func purgeInstagramAndExitRecovery() {
-        InstagramStore.purgeStoredCookie()
+        InstagramStateIsolator.requestQuarantineOnNextLaunch()
         UserDefaults.standard.set(0, forKey: crashKey)
         exitRecovery()
     }

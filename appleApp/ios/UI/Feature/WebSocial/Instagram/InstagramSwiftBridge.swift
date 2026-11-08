@@ -7,6 +7,7 @@ import KotlinSharedUI
 /// 侧边栏里的 Instagram 入口。登录成功时同步一次，用户不用再登一遍。
 final class InstagramSwiftBridge: NSObject, InstagramBridge {
     func adopt(cookie: String) -> Bool {
+        guard !InstagramStateIsolator.suppressAdoptionThisLaunch else { return false }
         // 先做纯字符串校验，完全不碰 Store：Kotlin 可能从任意线程 / 协程
         // 上下文调进来，而 Store 是主线程对象。
         let normalized =

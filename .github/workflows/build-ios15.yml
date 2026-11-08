@@ -151,8 +151,6 @@ jobs:
       - name: Tab sweep screenshots
         id: tabsweep
         if: always()
-        continue-on-error: true
-        # 失败只留日志和截图，不阻塞出包
         working-directory: appleApp
         run: |
           set -uo pipefail
@@ -162,6 +160,7 @@ jobs:
             -scheme AppSmokeUITests \
             -destination "id=$UDID" \
             -derivedDataPath DerivedData \
+            -only-testing:AppSmokeUITests/InstagramCrashRecoveryUITests/testCorruptInstagramStateStillLaunches \
             -resultBundlePath "$RESULT" \
             CODE_SIGNING_ALLOWED=NO \
             -skipPackagePluginValidation \
@@ -312,7 +311,7 @@ jobs:
   ipa:
     name: Release IPA
     needs: smoke
-    if: always() && needs.smoke.outputs.built == 'true'
+    if: needs.smoke.result == 'success'
     runs-on: macos-26
     timeout-minutes: 150
 

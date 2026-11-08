@@ -49,9 +49,9 @@ final class InstagramStore: ObservableObject {
     /// 启动连续失败时的最后手段：把可能带崩启动路径的凭证丢掉。
     /// 用户顶多重登一次，总比 App 完全打不开强。
     static func purgeStoredCookie() {
-        let defaults = UserDefaults.standard
-        defaults.removeObject(forKey: "instagram.cookie")
-        defaults.removeObject(forKey: "instagram.username")
+        InstagramStateIsolator.requestQuarantineOnNextLaunch()
+        UserDefaults.standard.removeObject(forKey: "instagram.cookie")
+        UserDefaults.standard.removeObject(forKey: "instagram.username")
     }
 
     var cookie: String {
@@ -61,6 +61,7 @@ final class InstagramStore: ObservableObject {
     // MARK: - 登录态
 
     func adopt(cookies: [HTTPCookie]) {
+        guard !InstagramStateIsolator.suppressAdoptionThisLaunch else { return }
         let header = CookieJar.header(cookies, domainSuffix: "instagram.com")
         guard adopt(cookieHeader: header) else { return }
         // 顺手把 cookie 灌进 URLSession 共享仓库，网页兜底页也能直接用。
@@ -70,6 +71,7 @@ final class InstagramStore: ObservableObject {
     /// 直接吃一段原始 cookie 串（Kotlin 登录成功后通过 `InstagramBridge` 同步过来）。
     @discardableResult
     func adopt(cookieHeader raw: String) -> Bool {
+        guard !InstagramStateIsolator.suppressAdoptionThisLaunch else { return false }
         let normalized =
             raw
                 .replacingOccurrences(of: "\r\n", with: "; ")
