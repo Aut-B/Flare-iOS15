@@ -149,6 +149,7 @@ jobs:
       # 逐个 tab 点一遍并截图：只判「崩不崩」，不判业务数据（CI 里没有账号）。
       # 截图随 artifact 上传，不用装到手机上就能看到每个标签页长什么样。
       - name: Tab sweep screenshots
+        id: tabsweep
         if: always()
         continue-on-error: true
         # 失败只留日志和截图，不阻塞出包
@@ -175,6 +176,26 @@ jobs:
           fi
           ls -R tabsweep-shots || true
           exit $BUILD_RC
+
+      - name: Open issue on tab sweep failure
+        if: always() && steps.tabsweep.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          LOG=$(tail -n 80 appleApp/tabsweep.log 2>/dev/null || echo "(no tab sweep log)")
+          {
+            echo "- commit: \`${{ github.sha }}\`"
+            echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "- artifacts: smoke-build${{ github.run_number }}"
+            echo ""
+            echo '```'
+            echo "$LOG"
+            echo '```'
+          } > /tmp/tabsweep-issue.md
+          gh issue create \
+            --title "标签页冒烟失败: build ${{ github.run_number }}" \
+            --body-file /tmp/tabsweep-issue.md || true
 
       - name: Upload smoke artifacts
         if: always()
