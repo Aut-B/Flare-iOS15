@@ -130,6 +130,8 @@ jobs:
 
       - name: UI tests (non-blocking)
         continue-on-error: true
+        if: always()
+        # 失败只留日志和截图，不阻塞出包
         working-directory: appleApp
         run: |
           xcodebuild test \
@@ -146,8 +148,10 @@ jobs:
 
       # 逐个 tab 点一遍并截图：只判「崩不崩」，不判业务数据（CI 里没有账号）。
       # 截图随 artifact 上传，不用装到手机上就能看到每个标签页长什么样。
-      - name: Tab sweep screenshots (non-blocking)
+      - name: Tab sweep screenshots
+        if: always()
         continue-on-error: true
+        # 失败只留日志和截图，不阻塞出包
         working-directory: appleApp
         run: |
           set -uo pipefail
@@ -155,16 +159,22 @@ jobs:
           xcodebuild test \
             -project Flare.xcodeproj \
             -scheme AppSmokeUITests \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
             -destination "id=$UDID" \
             -derivedDataPath DerivedData \
             -resultBundlePath "$RESULT" \
             CODE_SIGNING_ALLOWED=NO \
-            2>&1 | tee tabsweep.log || true
+            2>&1 | tee tabsweep.log
+          BUILD_RC=$?
           mkdir -p tabsweep-shots
-          xcrun xcresulttool export attachments \
-            --path "$RESULT" \
-            --output-path tabsweep-shots || true
+          if [ -d "$RESULT" ]; then
+            xcrun xcresulttool export attachments \
+              --path "$RESULT" \
+              --output-path tabsweep-shots || true
+          fi
           ls -R tabsweep-shots || true
+          exit $BUILD_RC
 
       - name: Upload smoke artifacts
         if: always()
