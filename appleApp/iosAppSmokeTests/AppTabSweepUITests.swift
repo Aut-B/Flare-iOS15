@@ -16,7 +16,7 @@ final class AppTabSweepUITests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
 
-        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 90), "启动 90 秒内没有进入前台")
+        XCTAssertEqual(app.state, .runningForeground, "启动 90 秒内没有进入前台")
 
         let started = Date()
         Thread.sleep(forTimeInterval: 8)
