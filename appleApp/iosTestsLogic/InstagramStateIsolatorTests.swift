@@ -60,8 +60,16 @@ final class InstagramStateIsolatorTests: XCTestCase {
     private func temporaryDatabasePath() -> String {
         let directory = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent("app.db").path
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let path = directory.appendingPathComponent("app.db").path
+        XCTAssertTrue(
+            FileManager.default.createFile(atPath: path, contents: nil),
+            "Could not create temporary SQLite database"
+        )
+        return path
     }
 
     private func queryAccountKeys(at path: String) -> [String] {

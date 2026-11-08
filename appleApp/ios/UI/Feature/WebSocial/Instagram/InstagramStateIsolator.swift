@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 import WebKit
 
-enum InstagramStateIsolator: @unchecked Sendable {
+nonisolated enum InstagramStateIsolator: @unchecked Sendable {
     static let quarantineEpoch = 5
     static let quarantinePendingKey = "flare.instagram.quarantine.pending"
 
@@ -10,17 +10,17 @@ enum InstagramStateIsolator: @unchecked Sendable {
     private static let forceKey = "flare.instagram.quarantine.force"
     private static var defaults: UserDefaults { .standard }
 
-    private final class State: @unchecked Sendable {
+    nonisolated private final class State: @unchecked Sendable {
         private let lock = NSLock()
         private var suppressed = false
 
-        func isSuppressed() -> Bool {
+        nonisolated func isSuppressed() -> Bool {
             lock.lock()
             defer { lock.unlock() }
             return suppressed
         }
 
-        func setSuppressed(_ value: Bool) {
+        nonisolated func setSuppressed(_ value: Bool) {
             lock.lock()
             defer { lock.unlock() }
             suppressed = value
@@ -31,7 +31,7 @@ enum InstagramStateIsolator: @unchecked Sendable {
         force || epoch < quarantineEpoch
     }
 
-    nonisolated(unsafe) private static let state = State()
+    private static let state = State()
     nonisolated(unsafe) private static var quarantineCompleted = true
 
     nonisolated static var needsQuarantine: Bool {
@@ -64,7 +64,7 @@ enum InstagramStateIsolator: @unchecked Sendable {
         return true
     }
 
-    private nonisolated static func purgeInstagramState() {
+    nonisolated private static func purgeInstagramState() {
         state.setSuppressed(true)
         quarantineCompleted = false
 
@@ -83,12 +83,12 @@ enum InstagramStateIsolator: @unchecked Sendable {
         clearQuarantinePending()
     }
 
-    private nonisolated static func purgeUserDefaults() {
+    nonisolated private static func purgeUserDefaults() {
         defaults.removeObject(forKey: "instagram.cookie")
         defaults.removeObject(forKey: "instagram.username")
     }
 
-    private nonisolated static func purgeSharedHTTPCookies() {
+    nonisolated private static func purgeSharedHTTPCookies() {
         let storage = HTTPCookieStorage.shared
         for cookie in storage.cookies ?? [] where isInstagramDomain(cookie.domain) {
             storage.deleteCookie(cookie)
@@ -119,7 +119,7 @@ enum InstagramStateIsolator: @unchecked Sendable {
         )
     }
 
-    private nonisolated static func purgeDatabase() {
+    nonisolated private static func purgeDatabase() {
         guard let root = applicationSupportDirectory() else { return }
         let directory = root.appendingPathComponent("databases", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -128,7 +128,7 @@ enum InstagramStateIsolator: @unchecked Sendable {
         purgeDatabase(at: path)
     }
 
-    private nonisolated static func purgeWebsiteData() {
+    nonisolated private static func purgeWebsiteData() {
         let store = WKWebsiteDataStore.default()
         let cookieStore = store.httpCookieStore
         cookieStore.getAllCookies { cookies in
@@ -151,7 +151,7 @@ enum InstagramStateIsolator: @unchecked Sendable {
         }
     }
 
-    private nonisolated static func applicationSupportDirectory() -> URL? {
+    nonisolated private static func applicationSupportDirectory() -> URL? {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
     }
 
@@ -199,7 +199,7 @@ enum InstagramStateIsolator: @unchecked Sendable {
     }
     #endif
 
-    private nonisolated static func isInstagramDomain(_ domain: String) -> Bool {
+    nonisolated private static func isInstagramDomain(_ domain: String) -> Bool {
         let normalized = domain.lowercased()
         return normalized.contains("instagram.com")
             || normalized.contains("cdninstagram.com")
