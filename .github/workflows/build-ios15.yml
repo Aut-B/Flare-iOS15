@@ -159,12 +159,12 @@ jobs:
           xcodebuild test \
             -project Flare.xcodeproj \
             -scheme AppSmokeUITests \
-            -skipPackagePluginValidation \
-            -skipMacroValidation \
             -destination "id=$UDID" \
             -derivedDataPath DerivedData \
             -resultBundlePath "$RESULT" \
             CODE_SIGNING_ALLOWED=NO \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
             2>&1 | tee tabsweep.log
           BUILD_RC=$?
           mkdir -p tabsweep-shots
