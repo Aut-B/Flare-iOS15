@@ -770,4 +770,6 @@
 <string name="ugoira_resolution_unsupported">此裝置無法匯出原始尺寸。是否匯出最長邊不超過 1920 像素的影片？</string>
 <string name="ugoira_export_smaller">匯出較小尺寸的 MP4</string>
 <string name="ugoira_export_progress">正在儲存 MP4：%1$d%%</string>
+    <string name="weibo_friends_circle_title">好友圈</string>
+    <string name="weibo_private_following_title">悄悄關注</string>
 </resources>

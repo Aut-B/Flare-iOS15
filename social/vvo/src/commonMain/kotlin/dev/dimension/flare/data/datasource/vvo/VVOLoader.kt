@@ -200,7 +200,7 @@ internal class VVOLoader(
             try {
                 service.updateVisibility(
                     id = statusKey.id,
-                    visibility = visibility.toVvoVisible(),
+                    visibility = visibility.toVvoVisible() ?: "0",
                     st = st,
                 )
             } catch (throwable: Throwable) {
@@ -221,11 +221,11 @@ internal class VVOLoader(
      */
     private suspend fun ensureWriteLogin(): String {
         service.refreshCredentialForWrite()
-        return ensureLogin()
+        return ensureLogin(freshConfig = true)
     }
 
-    private suspend fun ensureLogin(): String {
-        val config = service.config()
+    private suspend fun ensureLogin(freshConfig: Boolean = false): String {
+        val config = if (freshConfig) service.freshConfig() else service.config()
         if (config.data?.login != true) {
             throw LoginExpiredException(
                 accountKey = accountKey,

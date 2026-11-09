@@ -154,13 +154,15 @@ internal class VVOService private constructor(
                 }
     }
 
-    override suspend fun config(): VVOResponse<Config> {
+    override suspend fun config(): VVOResponse<Config> = config(allowCached = true)
+
+    private suspend fun config(allowCached: Boolean): VVOResponse<Config> {
         // 每次刷新时间线都串行打一次 api/config 会白等一个 RTT（弱网下就是 1~2 秒）。
         // 登录态在短时间内不会变，这里缓存结果，写操作失败时再主动失效。
         var owned: CompletableDeferred<VVOResponse<Config>>? = null
         val pending =
             configMutex.withLock {
-                val cached = cachedConfig
+                val cached = if (allowCached) cachedConfig else null
                 if (cached != null &&
                     cached.data?.login == true &&
                     Clock.System.now().toEpochMilliseconds() - cachedConfigAtEpochMillis < configCacheTtl.inWholeMilliseconds
@@ -347,6 +349,12 @@ internal class VVOService private constructor(
         if (refreshed != null) {
             invalidateConfigCache()
         }
+    }
+
+    /** 写操作每次重新取 st；登录态缓存只用于只读请求。 */
+    suspend fun freshConfig(): VVOResponse<Config> {
+        invalidateConfigCache()
+        return config(allowCached = false)
     }
 
     private suspend fun refreshChocolate(

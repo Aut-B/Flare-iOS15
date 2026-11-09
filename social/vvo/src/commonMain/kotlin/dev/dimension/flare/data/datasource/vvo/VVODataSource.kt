@@ -1,6 +1,7 @@
 package dev.dimension.flare.data.datasource.vvo
 
 import androidx.paging.ExperimentalPagingApi
+import androidx.paging.Pager
 import dev.dimension.flare.common.CacheData
 import dev.dimension.flare.common.FileItem
 import dev.dimension.flare.common.MemCacheable
@@ -16,6 +17,8 @@ import dev.dimension.flare.data.datasource.microblog.NotificationTimelineDataSou
 import dev.dimension.flare.data.datasource.microblog.PostEvent
 import dev.dimension.flare.data.datasource.microblog.ProfileTab
 import dev.dimension.flare.data.datasource.microblog.datasource.NotificationDataSource
+import dev.dimension.flare.data.datasource.microblog.datasource.PinnableTimelineTabDataSource
+import dev.dimension.flare.data.datasource.microblog.datasource.PinnableTimelineTabSection
 import dev.dimension.flare.data.datasource.microblog.datasource.PostDataSource
 import dev.dimension.flare.data.datasource.microblog.datasource.RelationDataSource
 import dev.dimension.flare.data.datasource.microblog.datasource.TimelineTabConfigurationDataSource
@@ -29,6 +32,7 @@ import dev.dimension.flare.data.datasource.microblog.handler.UserHandler
 import dev.dimension.flare.data.datasource.microblog.paging.PagingRequest
 import dev.dimension.flare.data.datasource.microblog.paging.PagingResult
 import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
+import dev.dimension.flare.data.datasource.microblog.pagingConfig
 import dev.dimension.flare.data.model.IconType
 import dev.dimension.flare.data.model.tab.ShortcutSpec
 import dev.dimension.flare.data.model.tab.TimelineSpec
@@ -85,6 +89,7 @@ internal class VVODataSource(
     UserDataSource,
     RelationDataSource,
     TimelineTabConfigurationDataSource,
+    PinnableTimelineTabDataSource,
     PostDataSource,
     PostEventHandler.Handler {
     private val imageCompressor: ImageCompressor by koinInject()
@@ -111,6 +116,22 @@ internal class VVODataSource(
         }
     }
 
+    override val pinnableTimelineTabs: List<PinnableTimelineTabSection> by lazy {
+        listOf(
+            PinnableTimelineTabSection(
+                title = UiStrings.List,
+                data = Pager(config = pagingConfig) { VVOGroupPagingSource(service, accountKey) }.flow,
+            ),
+        )
+    }
+
+    fun groupTimeline(groupId: String): RemoteLoader<UiTimelineV2> =
+        VVOFeedTimelineRemoteMediator(service, accountKey, VVOFeed.Group(groupId))
+
+    fun friendsCircleTimeline(): RemoteLoader<UiTimelineV2> = VVOFeedTimelineRemoteMediator(service, accountKey, VVOFeed.Circle)
+
+    fun privateFollowingTimeline(): RemoteLoader<UiTimelineV2> = VVOFeedTimelineRemoteMediator(service, accountKey, VVOFeed.Private)
+
     override val defaultTabs by lazy {
         persistentListOf(
             CommonTimelineSpecs.home
@@ -134,6 +155,8 @@ internal class VVODataSource(
             ),
             VvoPlatformSpec.favoriteTimelineSpec.candidate(TimelineSpec.AccountBasedData(accountKey)),
             VvoPlatformSpec.likedTimelineSpec.candidate(TimelineSpec.AccountBasedData(accountKey)),
+            VvoPlatformSpec.friendsCircleTimelineSpec.candidate(TimelineSpec.AccountBasedData(accountKey)),
+            VvoPlatformSpec.privateFollowingTimelineSpec.candidate(TimelineSpec.AccountBasedData(accountKey)),
         )
     }
 
@@ -161,6 +184,22 @@ internal class VVODataSource(
                 target =
                     ShortcutSpec.Target.Timeline(
                         VvoPlatformSpec.likedTimelineSpec.candidate(TimelineSpec.AccountBasedData(accountKey)),
+                    ),
+            ),
+            ShortcutSpec(
+                title = UiStrings.WeiboFriendsCircle,
+                icon = UiIcon.Follow,
+                target =
+                    ShortcutSpec.Target.Timeline(
+                        VvoPlatformSpec.friendsCircleTimelineSpec.candidate(TimelineSpec.AccountBasedData(accountKey)),
+                    ),
+            ),
+            ShortcutSpec(
+                title = UiStrings.WeiboPrivateFollowing,
+                icon = UiIcon.Eye,
+                target =
+                    ShortcutSpec.Target.Timeline(
+                        VvoPlatformSpec.privateFollowingTimelineSpec.candidate(TimelineSpec.AccountBasedData(accountKey)),
                     ),
             ),
         )
@@ -404,8 +443,7 @@ internal class VVODataSource(
         val mediaId = mediaIds.joinToString(",")
         val referenceStatus = data.referenceStatus
         val composeStatus = referenceStatus?.composeStatus
-        // 可见范围始终传合法值（0 公开 / 1 仅自己 / 6 互相关注 / 10 仅粉丝），
-        // 避免 null 被序列化成非法值后整条请求被判异常。
+        // 公开时不传 visible，与网页版 / 官方客户端一致；其余范围仍保留旧菜单语义。
         val visible = data.visibility.toVvoVisible()
         try {
             if (composeStatus is ComposeStatus.VVOComment) {
@@ -659,11 +697,11 @@ internal class VVODataSource(
      */
     private suspend fun ensureWriteLogin(): String {
         service.refreshCredentialForWrite()
-        return ensureLogin()
+        return ensureLogin(freshConfig = true)
     }
 
-    private suspend fun ensureLogin(): String {
-        val config = service.config()
+    private suspend fun ensureLogin(freshConfig: Boolean = false): String {
+        val config = if (freshConfig) service.freshConfig() else service.config()
         if (config.data?.login != true) {
             throw LoginExpiredException(
                 accountKey = accountKey,
@@ -695,19 +733,18 @@ internal class VVODataSource(
 
 /**
  * 微博「谁可以看」对应的 visible 值（与网页版 / App 一致）：
- * 0 公开、1 仅自己可见、6 互相关注（好友圈）、10 仅粉丝可见。
- * 始终返回合法值，不返回 null，避免表单里出现空值/非法值。
+ * 公开不传该字段，1 仅自己可见、6 互相关注（好友圈）、10 仅粉丝可见。
  */
-internal fun UiTimelineV2.Post.Visibility.toVvoVisible(): String =
+internal fun UiTimelineV2.Post.Visibility.toVvoVisible(): String? =
     when (this) {
         UiTimelineV2.Post.Visibility.Private -> "1"
         UiTimelineV2.Post.Visibility.Mutual -> "6"
         UiTimelineV2.Post.Visibility.Followers -> "10"
-        // 公开，以及微博没有对应语义的取值，统一按公开处理
+        // 公开，以及微博没有对应语义的取值，统一省略 visible
         UiTimelineV2.Post.Visibility.Public,
         UiTimelineV2.Post.Visibility.Home,
         UiTimelineV2.Post.Visibility.Specified,
-        UiTimelineV2.Post.Visibility.Channel -> "0"
+        UiTimelineV2.Post.Visibility.Channel -> null
     }
 
 /**

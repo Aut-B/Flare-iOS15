@@ -445,4 +445,6 @@
     <string name="timeline_load_missing_posts">加载缺失的内容</string>
     <string name="timeline_loading_missing_posts">正在加载缺失的内容…</string>
     <string name="timeline_retry_missing_posts">加载失败，点击重试。</string>
+    <string name="weibo_friends_circle_title">好友圈</string>
+    <string name="weibo_private_following_title">悄悄关注</string>
 </resources>

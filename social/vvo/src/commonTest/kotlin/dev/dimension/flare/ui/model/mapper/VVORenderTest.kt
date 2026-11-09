@@ -104,6 +104,58 @@ class VVORenderTest {
     }
 
     @Test
+    fun livePhotoWithPlaybackUrlIsRenderedAsVideo() {
+        val status =
+            createStatus(
+                id = "status-live-photo",
+                user = createUser(1L, "live-photo-user"),
+                text = "live photo",
+                pics =
+                    JSON.encodeToJsonElement(
+                        ListSerializer(StatusPic.serializer()),
+                        listOf(
+                            StatusPic(
+                                pid = "pic-live-photo",
+                                type = "livephoto",
+                                videoSrc = "https://video.example.test/live.mov",
+                                url = "https://media.example.test/preview.jpg",
+                            ),
+                        ),
+                    ),
+            )
+
+        val rendered = assertIs<UiTimelineV2.Post>(status.render(accountKey))
+        val media = assertIs<UiMedia.Video>(rendered.images.single())
+        assertEquals("https://video.example.test/live.mov", media.url)
+        assertEquals("https://media.example.test/preview.jpg", media.thumbnailUrl)
+    }
+
+    @Test
+    fun livePhotoWithoutPlaybackUrlRemainsImage() {
+        val status =
+            createStatus(
+                id = "status-live-photo-still",
+                user = createUser(1L, "live-photo-user"),
+                text = "live photo",
+                pics =
+                    JSON.encodeToJsonElement(
+                        ListSerializer(StatusPic.serializer()),
+                        listOf(
+                            StatusPic(
+                                pid = "pic-live-photo-still",
+                                type = "livephoto",
+                                videoSrc = "  ",
+                                url = "https://media.example.test/still.jpg",
+                            ),
+                        ),
+                    ),
+            )
+
+        val rendered = assertIs<UiTimelineV2.Post>(status.render(accountKey))
+        assertIs<UiMedia.Image>(rendered.images.single())
+    }
+
+    @Test
     fun quoteIsRecognized() {
         val quoted =
             createStatus(
@@ -143,6 +195,7 @@ class VVORenderTest {
         for (family in config.overflow.toList()) {
             config = PostActionLayoutHelpers.moveTo(config, family, PostActionPlacement.Hidden)
         }
+        config = PostActionLayoutHelpers.moveTo(config, PostActionFamily.Screenshot, PostActionPlacement.Hidden)
         assertTrue(config.overflow.isEmpty())
 
         val actions = post.actions.applyPostActionLayout(config)

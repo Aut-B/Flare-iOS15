@@ -734,4 +734,6 @@
     <string name="home_timeline_view_latest">View latest</string>
     <string name="settings_remember_home_timeline_position">Remember Home reading position</string>
     <string name="settings_remember_home_timeline_position_description">Keep your place after refreshing and reopening. Use View latest to jump to new posts.</string>
+    <string name="weibo_friends_circle_title">Friends Circle</string>
+    <string name="weibo_private_following_title">Private Following</string>
 </resources>

@@ -587,4 +587,6 @@
     <string name="timeline_load_missing_posts">Load missing posts</string>
     <string name="timeline_loading_missing_posts">Loading missing posts…</string>
     <string name="timeline_retry_missing_posts">Could not load posts. Tap to retry.</string>
+    <string name="weibo_friends_circle_title">Friends Circle</string>
+    <string name="weibo_private_following_title">Private Following</string>
 </resources>
