@@ -100,4 +100,34 @@ final class XhsQueryEncodingTests: XCTestCase {
 
         XCTAssertTrue(query.contains("cursor=&") || query.hasSuffix("cursor="), query)
     }
+
+    // MARK: - 用户主页 query
+
+    /// 用户主页（`user_posted`）和评论是同一个病根：`image_formats` 的逗号
+    /// 以前是字面量拼进去的，没走编码。
+    func testUserPostedQueryEncodesImageFormats() {
+        let query = XhsQuery.userPostedQuery(userId: "u1", cursor: nil)
+
+        XCTAssertTrue(query.contains("image_formats=jpg%2Cwebp"), query)
+        XCTAssertFalse(query.contains("image_formats=jpg,webp"), query)
+    }
+
+    func testUserPostedQueryEncodesUserIdAndKeepsNum() {
+        let query = XhsQuery.userPostedQuery(userId: "u1", cursor: "cur1")
+
+        XCTAssertTrue(query.contains("user_id=u1"), query)
+        XCTAssertTrue(query.contains("cursor=cur1"), query)
+        XCTAssertTrue(query.contains("num=30"), query)
+    }
+
+    /// user_id 里出现分隔符时不能把 query 拆坏。
+    func testUserPostedQueryEscapesSeparatorsInUserId() {
+        let query = XhsQuery.userPostedQuery(userId: "a&b=c+d", cursor: nil)
+
+        XCTAssertFalse(query.contains("user_id=a&b"), query)
+        XCTAssertTrue(query.contains("user_id=a%26b%3Dc%2Bd"), query)
+        // 分隔符被编码后，整条 query 仍然只有三个 `&`（num / cursor / user_id /
+        // image_formats 四个键之间）。
+        XCTAssertEqual(query.components(separatedBy: "&").count, 4, query)
+    }
 }

@@ -48,4 +48,23 @@ enum XhsQuery {
         parts.append("xsec_source=" + encode(xsecSource))
         return parts.joined(separator: "&")
     }
+
+    /// 用户主页笔记列表（`/api/sns/web/v1/user_posted`）的 query 串。
+    ///
+    /// 和评论同一个病根：`image_formats` 以前是直接拼字面量 `jpg,webp`，
+    /// 逗号没走编码。这条 query 同样原样进 `_webmsxyw`，所以一样会让 `X-S`
+    /// 对不上。用户主页整页空白 / 一直转圈就是它的表现之一。
+    static func userPostedQuery(
+        userId: String,
+        cursor: String?,
+        num: Int = 30
+    ) -> String {
+        let parts = [
+            "num=" + String(num),
+            "cursor=" + encode(cursor ?? ""),
+            "user_id=" + encode(userId),
+            "image_formats=" + encode("jpg,webp"),
+        ]
+        return parts.joined(separator: "&")
+    }
 }

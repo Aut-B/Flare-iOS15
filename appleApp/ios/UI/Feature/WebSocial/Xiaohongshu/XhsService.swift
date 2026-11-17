@@ -169,12 +169,9 @@ final class XhsService {
     /// 某个用户公开的笔记。网页版是 GET + query，老版本也见过 POST，
     /// 两种都试一遍，免得一个接口改版就整页空白。
     func userNotes(userId: String, cursor: String?) async throws -> (notes: [XhsNote], next: String?) {
-        let query = [
-            "num=30",
-            "cursor=" + Self.encode(cursor ?? ""),
-            "user_id=" + Self.encode(userId),
-            "image_formats=jpg,webp",
-        ].joined(separator: "&")
+        // 走 `XhsQuery.userPostedQuery`：`image_formats` 的逗号必须编码成
+        // `%2C`，理由同评论区 —— 这条 query 也原样参与 `_webmsxyw` 签名。
+        let query = XhsQuery.userPostedQuery(userId: userId, cursor: cursor)
         let json: [String: Any]
         do {
             json = try await get("/api/sns/web/v1/user_posted", query: query)
