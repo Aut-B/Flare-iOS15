@@ -18,9 +18,44 @@ public final class ProxySessionConfigurator: NSObject, AppleProxySessionConfigur
             return
         }
         if connection.mode == .system { return }
-        configuration.proxyConfigurations = [Self.proxyConfiguration(connection)]
+        // `proxyConfigurations` 是 iOS 17 起才有的 API。deploymentTarget 是 15.0，
+        // 不守卫会直接编译失败（"'ProxyConfiguration' is only available in iOS 17.0
+        // or newer"）。iOS 15/16 退回 URLSession 一直支持的 connectionProxyDictionary。
+        if #available(iOS 17.0, *) {
+            configuration.proxyConfigurations = [Self.proxyConfiguration(connection)]
+        } else {
+            Self.applyLegacyProxy(configuration, connection: connection)
+        }
     }
 
+    /// iOS 15/16 的代理回退。
+    ///
+    /// `URLSessionConfiguration.connectionProxyDictionary` 从 iOS 7 就有，
+    /// 支持 HTTPS 与 SOCKS 两类代理，字段名是固定字符串键。
+    nonisolated static func applyLegacyProxy(_ configuration: URLSessionConfiguration, connection: ProxyConnection) {
+        guard connection.mode == .proxy,
+              let host = connection.host, let port = connection.port,
+              (1...65535).contains(port.intValue) else { return }
+        let value = port.intValue
+        switch connection.protocol {
+        case .https:
+            configuration.connectionProxyDictionary = [
+                "HTTPSEnable": 1,
+                "HTTPSProxy": host,
+                "HTTPSPort": value,
+            ]
+        case .socks5:
+            configuration.connectionProxyDictionary = [
+                "SOCKSEnable": 1,
+                "SOCKSProxy": host,
+                "SOCKSPort": value,
+            ]
+        default:
+            break
+        }
+    }
+
+    @available(iOS 17.0, *)
     nonisolated static func proxyConfiguration(_ connection: ProxyConnection) -> Network.ProxyConfiguration {
         guard connection.mode == .proxy,
               let host = connection.host, let port = connection.port,

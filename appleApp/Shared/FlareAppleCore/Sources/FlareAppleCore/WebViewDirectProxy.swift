@@ -2,6 +2,8 @@ import Foundation
 @preconcurrency import Network
 
 // WKWebsiteDataStore has no direct override. A loopback SOCKS tunnel bypasses system proxies without rewriting web requests.
+// 整个类依赖 `Network.ProxyConfiguration`（iOS 17+），所以在 iOS 15/16 上不可用。
+@available(iOS 17.0, *)
 @MainActor
 final class WebViewDirectProxy {
     let listener: NWListener

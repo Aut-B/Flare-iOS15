@@ -10,6 +10,7 @@ public final class WebViewProxyRoute: ObservableObject {
     private let snapshot: ProxySnapshot
     public var key: String { snapshot.key }
     public var isValid: Bool { snapshot.isValid && !closed }
+    @available(iOS 17.0, *)
     private var directProxy: WebViewDirectProxy?
     private var unsubscribe: (() -> Void)?
     private var stopLoading: [() -> Void] = []
@@ -24,15 +25,23 @@ public final class WebViewProxyRoute: ObservableObject {
 
     func prepare(cookies: [HTTPCookie]) async throws {
         let connection = snapshot.connection
-        if connection.mode == .direct {
-            let proxy = try WebViewDirectProxy()
-            directProxy = proxy
-            dataStore.proxyConfigurations = [try await proxy.start()]
-        } else if connection.mode == .proxy {
-            // shortcut: WebKit bypasses loopback targets; revisit if a public bypass override becomes available.
-            dataStore.proxyConfigurations = [ProxySessionConfigurator.proxyConfiguration(connection)]
-        } else if connection.mode != .system {
-            throw URLError(.unsupportedURL)
+        if #available(iOS 17.0, *) {
+            if connection.mode == .direct {
+                let proxy = try WebViewDirectProxy()
+                directProxy = proxy
+                dataStore.proxyConfigurations = [try await proxy.start()]
+            } else if connection.mode == .proxy {
+                // shortcut: WebKit bypasses loopback targets; revisit if a public bypass override becomes available.
+                dataStore.proxyConfigurations = [ProxySessionConfigurator.proxyConfiguration(connection)]
+            } else if connection.mode != .system {
+                throw URLError(.unsupportedURL)
+            }
+        } else {
+            // iOS 15/16：WKWebsiteDataStore 没有 proxyConfigurations，WebView 只能走
+            // 系统默认网络（直连）。仅「显式代理」模式无法支持，直接拒绝而不是静默直连。
+            if connection.mode == .proxy {
+                throw URLError(.unsupportedURL)
+            }
         }
         for cookie in cookies {
             try Task.checkCancellation()
@@ -71,8 +80,10 @@ public final class WebViewProxyRoute: ObservableObject {
         unsubscribe = nil
         stopLoading.forEach { $0() }
         stopLoading.removeAll()
-        directProxy?.stop()
-        directProxy = nil
+        if #available(iOS 17.0, *) {
+            directProxy?.stop()
+            directProxy = nil
+        }
     }
 }
 
