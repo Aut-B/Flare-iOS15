@@ -47,19 +47,12 @@ enum LaunchCrashTrace {
             raise(SIGABRT)
         }
 
-        // 信号处理里只用下标索引，不做查找。
-        // 用 `sigaction` 而不是 `signal`：后者只接受顶层函数指针，拿不到捕获得来的状态。
+        // 信号处理必须是无捕获的顶层 C 函数：`sigaction` 的 `__sa_handler` 是
+        // `@convention(c)` 指针，捕获了上下文的闭包根本转换不过去（编译期报错）。
+        // 所以这里挂 `flareSignalHandler`，它通过文件级 `fatalTable` 取表。
         for sig in fatalSignals {
             var action = sigaction()
-            action.__sigaction_u.__sa_handler = { received in
-                // 只做整数比较 + 数组索引，不调用任何 Swift 方法。
-                for (position, known) in fatalSignals.enumerated() where known == received {
-                    fatalTable?.write(position)
-                    break
-                }
-                signal(received, SIG_DFL)
-                raise(received)
-            }
+            action.__sigaction_u.__sa_handler = flareSignalHandler
             // 空掩码：处理期间不额外屏蔽别的信号，避免二次崩溃丢失现场。
             sigemptyset(&action.sa_mask)
             // 处理完自动恢复默认动作，即使 handler 里没走到 raise 也不会卡死。
@@ -110,6 +103,23 @@ private nonisolated(unsafe) var fatalTable: FatalTable?
 /// 放成文件级 `let`：`signalLines` 在 install 阶段就构造好，签名里再复用它，
 /// 信号处理里不做任何查找。
 private let fatalSignals: [Int32] = [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE]
+
+/// 信号处理器本体。
+///
+/// 必须是**无捕获的顶层函数**并标 `@convention(c)`：`sigaction.__sa_handler`
+/// 就是 C 函数指针，捕获了上下文的闭包在编译期就转换失败。这里只能通过
+/// 文件级变量 `fatalTable` 取预烘好的常量表。
+///
+/// 函数体内只做整数比较、数组下标与 `write`/`raise`，不构造 String、
+/// 不做新分配、不触发 Swift 静态懒初始化 —— 这些都是 async-signal-safe 的要求。
+private let flareSignalHandler: @convention(c) (Int32) -> Void = { received in
+    for (position, known) in fatalSignals.enumerated() where known == received {
+        fatalTable?.write(position)
+        break
+    }
+    signal(received, SIG_DFL)
+    raise(received)
+}
 
 private struct FatalTable {
     /// 同上，但挂在实例上：信号处理里不触发 `static let` 的懒初始化检查。
