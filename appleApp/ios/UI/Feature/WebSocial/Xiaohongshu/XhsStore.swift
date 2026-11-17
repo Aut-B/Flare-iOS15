@@ -372,7 +372,7 @@ final class XhsStore: ObservableObject {
         for item in XhsJSON.array(payload["items"]) {
             // 首页流里混着 `model_type != note` 的推荐位，跳过。
             if let type = XhsJSON.string(item["model_type"]), type != "note" { continue }
-            if let note = XhsJSON.note(item) { batch.append(note) }
+            if let note = XhsJSON.note(item, defaultSource: "pc_feed") { batch.append(note) }
         }
         guard !batch.isEmpty else { return }
         merge(batch)
@@ -405,7 +405,7 @@ final class XhsStore: ObservableObject {
             }
             var batch: [XhsNote] = []
             for item in list {
-                guard let note = Self.note(fromDOM: item) else { continue }
+                guard let note = Self.note(fromDOM: item, source: "pc_feed") else { continue }
                 batch.append(note)
             }
             guard !batch.isEmpty else { return }
@@ -426,7 +426,7 @@ final class XhsStore: ObservableObject {
             }
             var batch: [XhsNote] = []
             for item in list {
-                guard let note = Self.note(fromDOM: item) else { continue }
+                guard let note = Self.note(fromDOM: item, source: "pc_feed") else { continue }
                 batch.append(note)
             }
             guard !batch.isEmpty else { return }
@@ -470,7 +470,13 @@ final class XhsStore: ObservableObject {
         var lastError: Error?
 
         // 从笔记页进评论区时网页用的是 `pc_note`；首页卡片进详情则可能是
-        // `pc_feed`。两个都试，别因为一个来源对不上就整页「无法浏览」。
+        // `pc_feed`。先把笔记自己带的来源排在最前 —— 从用户主页 / 搜索点进来的
+        // token 是 `pc_user` / `pc_search` 发的，只试这两个固定来源永远对不上。
+        var sources: [String] = []
+        for candidate in [note.xsecSource, "pc_note", "pc_feed"] where !candidate.isEmpty {
+            if !sources.contains(candidate) { sources.append(candidate) }
+        }
+
         func attempt(_ token: String, _ source: String) async throws -> (items: [XhsComment], next: String?)? {
             // 公开笔记的 token 可能本来就是空的：`XhsService` 只在非空时拼
             // `xsec_token`，所以空 token 也是合法请求，别在这里直接放弃。
@@ -488,23 +494,41 @@ final class XhsStore: ObservableObject {
             }
         }
 
-        if let page = try await attempt(token, "pc_note") { return page }
-        if let page = try await attempt(token, "pc_feed") { return page }
-
         // 换到新 token 后写回列表：否则下次进评论区又拿旧 token 连试两次，
-        // 用户看到的就是「每次都要等半天才出评论」。
-        func remember(_ value: String) {
-            guard !value.isEmpty, value != note.xsecToken else { return }
+        // 用户看到的就是「每次都要等半天才出评论」。来源一起写回 ——
+        // 不记的话每次都要把 pc_note / pc_feed / 自身来源全试一遍。
+        //
+        // 不能拿 `value != note.xsecToken` 当唯一条件：token 可能没变，
+        // 但来源是这次才试出来的，那也要记下来。
+        //
+        // 定义必须排在第一次调用之前：Swift 的局部函数不做提升。
+        func remember(_ value: String, source: String? = nil) {
+            guard !value.isEmpty else { return }
+            let tokenChanged = value != note.xsecToken
+            let sourceChanged = source.map { !$0.isEmpty && $0 != note.xsecSource } ?? false
+            guard tokenChanged || sourceChanged else { return }
             DispatchQueue.main.async {
                 if let index = self.notes.firstIndex(where: { $0.id == note.id }) {
-                    self.notes[index].xsecToken = value
+                    if tokenChanged { self.notes[index].xsecToken = value }
+                    if sourceChanged, let source = source {
+                        self.notes[index].xsecSource = source
+                    }
                 }
+            }
+        }
+
+        for source in sources {
+            if let page = try await attempt(token, source) {
+                // 第一轮就成功也要记来源：从用户主页进来的笔记，第一次是靠
+                // 枚举试出来的，不记下来下次还要再枚举一遍。
+                remember(token, source: source)
+                return page
             }
         }
 
         // 卡片上的 xsec_token 会过期。过期后服务端一律回「当前笔记暂时无法浏览」，
         // 这时用详情接口换一个新 token。详情接口本身也要选对来源。
-        for source in ["pc_note", "pc_feed"] {
+        for source in sources {
             guard
                 let fresh = try? await XhsService.shared.note(
                     id: note.id,
@@ -518,13 +542,16 @@ final class XhsStore: ObservableObject {
                 continue
             }
             token = fresh.xsecToken
-            if let page = try await attempt(token, source) {
-                remember(token)
-                return page
+            // 详情接口回的 token 自带来源，优先按它自己的来，其次才是别的。
+            var retries: [String] = []
+            for candidate in [fresh.xsecSource, source] + sources where !candidate.isEmpty {
+                if !retries.contains(candidate) { retries.append(candidate) }
             }
-            if let page = try await attempt(token, source == "pc_note" ? "pc_feed" : "pc_note") {
-                remember(token)
-                return page
+            for retrySource in retries {
+                if let page = try await attempt(token, retrySource) {
+                    remember(token, source: retrySource)
+                    return page
+                }
             }
             break
         }
@@ -601,7 +628,7 @@ final class XhsStore: ObservableObject {
         }
     }
 
-    private static func note(fromDOM item: [String: Any]) -> XhsNote? {
+    private static func note(fromDOM item: [String: Any], source: String) -> XhsNote? {
         guard let id = item["id"] as? String, !id.isEmpty else { return nil }
         guard let cover = item["cover"] as? String, !cover.isEmpty else { return nil }
         let title = (item["title"] as? String) ?? ""
@@ -634,7 +661,9 @@ final class XhsStore: ObservableObject {
             isVideo: isVideo,
             aspect: aspect,
             videoURL: videoURL,
-            xsecToken: token
+            xsecToken: token,
+            // DOM 抓到的 token 是从卡片 <a href> 里抠的，来源就是当时那个页面。
+            xsecSource: source
         )
     }
 

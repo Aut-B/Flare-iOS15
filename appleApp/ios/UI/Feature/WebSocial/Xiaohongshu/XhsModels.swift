@@ -57,6 +57,13 @@ struct XhsNote: Identifiable, Hashable {
     /// 小红书 2023 年之后给笔记加了 `xsec_token`，评论、用户主页这些接口
     /// 都要带上它，否则会被当成「来源不明」直接拒掉。
     var xsecToken: String = ""
+    /// 这个 `xsec_token` 是从哪儿拿的（`pc_feed` / `pc_note` / `pc_user` / `pc_search` ...）。
+    ///
+    /// 服务端会校验 token 和 `xsec_source` 是否配对：首页卡片发的 token 拿
+    /// `xsec_source=pc_user` 去请求评论会回「当前笔记暂时无法浏览」。以前这里
+    /// 硬编码只试 `pc_feed` / `pc_note` 两种，从用户主页或搜索点进来的笔记就
+    /// 永远对不上，表现为「详情能看、评论打不开」。
+    var xsecSource: String = "pc_feed"
 
     var cover: String? { images.first }
 
@@ -199,7 +206,7 @@ enum XhsJSON {
         return nil
     }
 
-    static func note(_ value: Any?) -> XhsNote? {
+    static func note(_ value: Any?, defaultSource: String = "pc_feed") -> XhsNote? {
         guard let raw = object(value) else { return nil }
         // 首页流里是 `{id, model_type, note_card}`，详情接口里也是这个形状。
         let card = object(raw["note_card"]) ?? raw
@@ -250,7 +257,14 @@ enum XhsJSON {
             xsecToken: string(raw["xsec_token"])
                 ?? string(source["xsec_token"])
                 ?? string(data["xsec_token"])
-                ?? ""
+                ?? "",
+            // 卡片上有时会回 `xsec_source`，有就照抄；没有的话由调用方
+            // （首页 = pc_feed、用户主页 = pc_user、搜索 = pc_search）自己填。
+            // 详情接口同样可能把它放在 `data` 层，跟 xsec_token 一样三级回退。
+            xsecSource: string(raw["xsec_source"])
+                ?? string(source["xsec_source"])
+                ?? string(data["xsec_source"])
+                ?? defaultSource
         )
     }
 

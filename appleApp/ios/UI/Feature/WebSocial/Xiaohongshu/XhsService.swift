@@ -48,7 +48,9 @@ final class XhsService {
         for item in XhsJSON.array(data["items"]) {
             // 首页流里混着 `model_type != note` 的推荐位，跳过。
             if let type = XhsJSON.string(item["model_type"]), type != "note" { continue }
-            if let note = XhsJSON.note(item) { notes.append(note) }
+            if let note = XhsJSON.note(item, defaultSource: follow ? "pc_homefeed_follow" : "pc_feed") {
+                notes.append(note)
+            }
         }
         let next = XhsJSON.string(data["cursor_score"])
         return (notes, next)
@@ -74,7 +76,7 @@ final class XhsService {
         }
         let json = try await post("/api/sns/web/v1/feed", payload: payload, timeout: timeout, attempts: attempts)
         let data = XhsJSON.object(json["data"]) ?? [:]
-        guard let note = XhsJSON.array(data["items"]).compactMap({ XhsJSON.note($0) }).first else {
+        guard let note = XhsJSON.array(data["items"]).compactMap({ XhsJSON.note($0, defaultSource: xsecSource) }).first else {
             throw XhsError(message: "笔记已删除或不可见", needLogin: false)
         }
         return note
@@ -106,29 +108,40 @@ final class XhsService {
 
     // MARK: - 评论
 
+    /// 评论区请求的 query 串。
+    ///
+    /// 真正的实现在 `XhsQuery`：那份不依赖 UIKit/WebKit，能被纯逻辑测试
+    /// （`LogicTests`）直接编译进去断言。这里只是转一层，避免逻辑分叉。
+    static func commentQuery(
+        noteId: String,
+        xsecToken: String,
+        cursor: String?,
+        xsecSource: String
+    ) -> String {
+        XhsQuery.commentQuery(
+            noteId: noteId,
+            xsecToken: xsecToken,
+            cursor: cursor,
+            xsecSource: xsecSource
+        )
+    }
+
     func comments(
         noteId: String,
         xsecToken: String,
         cursor: String?,
         xsecSource: String = "pc_feed"
     ) async throws -> (items: [XhsComment], next: String?) {
-        var parts = [
-            "note_id=" + Self.encode(noteId),
-            "cursor=" + Self.encode(cursor ?? ""),
-            "top_comment_id=",
-            "image_formats=jpg,webp",
-        ]
-        if !xsecToken.isEmpty {
-            parts.append("xsec_token=" + Self.encode(xsecToken))
-        }
-        // 网页版评论区请求固定带 xsec_source；少了它服务端会认为「来源不明」，
-        // 一律回「当前笔记暂时无法浏览」。
-        parts.append("xsec_source=" + Self.encode(xsecSource))
         // 评论是用户点了就要看的，但 5 秒对 6s 上的签名页太短：页面还在
         // 初始化时会连续失败。给到 10 秒、两次尝试，仍然比默认 12 秒短。
         let json = try await get(
             "/api/sns/web/v2/comment/page",
-            query: parts.joined(separator: "&"),
+            query: Self.commentQuery(
+                noteId: noteId,
+                xsecToken: xsecToken,
+                cursor: cursor,
+                xsecSource: xsecSource
+            ),
             timeout: 10,
             attempts: 2
         )
@@ -177,7 +190,7 @@ final class XhsService {
             )
         }
         let data = XhsJSON.object(json["data"]) ?? [:]
-        let notes = XhsJSON.array(data["notes"]).compactMap { XhsJSON.note($0) }
+        let notes = XhsJSON.array(data["notes"]).compactMap { XhsJSON.note($0, defaultSource: "pc_user") }
         return (notes, XhsJSON.string(data["cursor"]))
     }
 
@@ -367,9 +380,10 @@ final class XhsService {
         return data.base64EncodedString()
     }
 
-    private static func encode(_ value: String) -> String {
-        var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: "&=?+")
-        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    /// query 值编码。
+    ///
+    /// 实现在 `XhsQuery.encode`，那份能被纯逻辑测试直接断言。
+    static func encode(_ value: String) -> String {
+        XhsQuery.encode(value)
     }
 }

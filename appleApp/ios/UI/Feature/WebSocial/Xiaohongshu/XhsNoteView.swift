@@ -550,6 +550,9 @@ struct XhsNoteView: View {
         // 只试 pc_feed 的话，从关注流 / 搜索进来的笔记经常整条详情被拒，
         // 表现就是「只有封面一张图、正文和评论都出不来」。
         var candidates: [(token: String, source: String)] = [
+            // 先按笔记自己带的来源试：从用户主页 / 搜索点进来的 token 是
+            // `pc_user` / `pc_search` 发的，只试下面两个固定值永远对不上。
+            (note.xsecToken, note.xsecSource),
             (note.xsecToken, "pc_note"),
             (note.xsecToken, "pc_feed"),
         ]

@@ -222,4 +222,28 @@ final class XhsModelParsingTests: XCTestCase {
 
         XCTAssertEqual(note?.displayTitle, "正文")
     }
+
+    // MARK: - xsec 来源
+
+    func testNoteUsesCallerSuppliedXsecSource() {
+        let payload = notePayload(images: [image("https://img.example/a.jpg")])
+
+        // 用户主页发出的 token 必须记成 pc_user，否则拿 pc_feed 去请求评论
+        // 会被服务端当成「来源不明」。
+        XCTAssertEqual(XhsJSON.note(payload, defaultSource: "pc_user")?.xsecSource, "pc_user")
+    }
+
+    func testNotePrefersServerSuppliedXsecSource() {
+        var payload = notePayload(images: [image("https://img.example/a.jpg")])
+        payload["xsec_source"] = "pc_search"
+
+        XCTAssertEqual(XhsJSON.note(payload, defaultSource: "pc_user")?.xsecSource, "pc_search")
+    }
+
+    func testNoteKeepsXsecTokenFromCard() {
+        var payload = notePayload(images: [image("https://img.example/a.jpg")])
+        payload["xsec_token"] = "token-abc"
+
+        XCTAssertEqual(XhsJSON.note(payload)?.xsecToken, "token-abc")
+    }
 }
