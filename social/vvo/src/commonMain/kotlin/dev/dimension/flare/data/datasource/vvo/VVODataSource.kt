@@ -603,6 +603,25 @@ internal class VVODataSource(
                 ?: throw Exception("status not found")
         }
 
+    /**
+     * 截图面板用的一页热门评论。
+     *
+     * 上游把 `context()` 里的取评论逻辑改成了直接调 `getHotComments`，
+     * 但这里还留着一个同名旧方法 `screenshotComments` 的调用点（截图面板），
+     * 上游那边已经没有这个函数了，于是整个 vvo 模块编译不过。
+     * 复用 `context()` 里同一条取数路径补回来。
+     */
+    internal suspend fun screenshotComments(statusKey: MicroBlogKey): List<UiTimelineV2> =
+        service
+            .getHotComments(
+                id = statusKey.id,
+                mid = statusKey.id,
+                maxId = null,
+            ).data
+            ?.data
+            .orEmpty()
+            .map { it.render(accountKey) }
+
     fun statusExtendedText(statusKey: MicroBlogKey): Flow<UiState<String>> =
         MemCacheable(
             "status_extended_text_$statusKey",
