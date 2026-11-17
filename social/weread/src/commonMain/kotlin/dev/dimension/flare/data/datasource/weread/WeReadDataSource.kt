@@ -25,6 +25,7 @@ import dev.dimension.flare.ui.model.UiProfile
 import dev.dimension.flare.ui.model.UiStrings
 import dev.dimension.flare.ui.model.UiText
 import dev.dimension.flare.ui.model.UiTimelineV2
+import dev.dimension.flare.ui.model.asType
 import dev.dimension.flare.ui.render.toUiPlainText
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
@@ -135,7 +136,7 @@ private fun placeholderProfile(
         avatar = null,
         nameInternal = display.toUiPlainText(),
         platformId = WEREAD_PLATFORM_ID,
-        platformIcon = UiIcon.World,
+        platformIcon = UiIcon.World.asType(),
         clickEvent = ClickEvent.Noop,
         banner = null,
         description = null,

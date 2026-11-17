@@ -11,6 +11,7 @@ import dev.dimension.flare.ui.model.UiMedia
 import dev.dimension.flare.ui.model.UiProfile
 import dev.dimension.flare.ui.model.UiTimelineV2
 import dev.dimension.flare.ui.model.UiTranslatableText
+import dev.dimension.flare.ui.model.asType
 import dev.dimension.flare.ui.render.toUi
 import dev.dimension.flare.ui.render.toUiPlainText
 import dev.dimension.flare.ui.route.DeeplinkRoute
@@ -165,7 +166,7 @@ internal fun JsonObject.toUiProfile(accountKey: MicroBlogKey): UiProfile? {
             },
         nameInternal = (igString("full_name") ?: userName).toUiPlainText(),
         platformId = INSTAGRAM_PLATFORM_ID,
-        platformIcon = UiIcon.World,
+        platformIcon = UiIcon.World.asType(),
         clickEvent =
             ClickEvent.Deeplink(
                 DeeplinkRoute.Profile.User(
@@ -181,7 +182,7 @@ internal fun JsonObject.toUiProfile(accountKey: MicroBlogKey): UiProfile? {
                 followsCount = igLong("following_count"),
                 statusesCount = igLong("media_count"),
             ),
-        mark = persistentListOf(),
+        mark = persistentListOf<UiProfile.Mark>(),
         bottomContent = null,
     )
 }
@@ -208,7 +209,7 @@ internal fun instagramPlaceholderProfile(
         avatar = null,
         nameInternal = display.toUiPlainText(),
         platformId = INSTAGRAM_PLATFORM_ID,
-        platformIcon = UiIcon.World,
+        platformIcon = UiIcon.World.asType(),
         clickEvent =
             ClickEvent.Deeplink(
                 DeeplinkRoute.Profile.User(
@@ -224,7 +225,7 @@ internal fun instagramPlaceholderProfile(
                 followsCount = 0,
                 statusesCount = 0,
             ),
-        mark = persistentListOf(),
+        mark = persistentListOf<UiProfile.Mark>(),
         bottomContent = null,
     )
 }

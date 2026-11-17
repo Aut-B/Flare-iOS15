@@ -12,6 +12,7 @@ import dev.dimension.flare.model.PlatformDeepLink
 import dev.dimension.flare.model.PlatformMetadata
 import dev.dimension.flare.model.PlatformSpec
 import dev.dimension.flare.ui.model.UiIcon
+import dev.dimension.flare.ui.model.asType
 import dev.dimension.flare.ui.presenter.login.LoginPlatformProvider
 import dev.dimension.flare.ui.presenter.login.XhsLoginProvider
 import kotlinx.collections.immutable.ImmutableList
@@ -34,7 +35,7 @@ public data object XhsPlatformSpec :
     override val metadata: PlatformMetadata =
         PlatformMetadata(
             displayName = "小红书",
-            icon = UiIcon.World,
+            icon = UiIcon.World.asType(),
         )
 
     override val order: Int = 51

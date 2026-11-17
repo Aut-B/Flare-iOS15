@@ -11,6 +11,7 @@ import dev.dimension.flare.ui.model.UiMedia
 import dev.dimension.flare.ui.model.UiProfile
 import dev.dimension.flare.ui.model.UiTimelineV2
 import dev.dimension.flare.ui.model.UiTranslatableText
+import dev.dimension.flare.ui.model.asType
 import dev.dimension.flare.ui.render.toUi
 import dev.dimension.flare.ui.render.toUiPlainText
 import dev.dimension.flare.ui.route.DeeplinkRoute
@@ -116,7 +117,7 @@ internal fun placeholderProfile(
         avatar = null,
         nameInternal = display.toUiPlainText(),
         platformId = XHS_PLATFORM_ID,
-        platformIcon = UiIcon.World,
+        platformIcon = UiIcon.World.asType(),
         clickEvent =
             ClickEvent.Deeplink(
                 DeeplinkRoute.Profile.User(
@@ -158,7 +159,7 @@ internal fun JsonObject.toUiProfile(accountKey: MicroBlogKey): UiProfile? {
             },
         nameInternal = name.toUiPlainText(),
         platformId = XHS_PLATFORM_ID,
-        platformIcon = UiIcon.World,
+        platformIcon = UiIcon.World.asType(),
         clickEvent =
             ClickEvent.Deeplink(
                 DeeplinkRoute.Profile.User(

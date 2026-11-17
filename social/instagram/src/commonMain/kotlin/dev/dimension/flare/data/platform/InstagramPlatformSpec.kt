@@ -12,6 +12,7 @@ import dev.dimension.flare.model.PlatformDeepLink
 import dev.dimension.flare.model.PlatformMetadata
 import dev.dimension.flare.model.PlatformSpec
 import dev.dimension.flare.ui.model.UiIcon
+import dev.dimension.flare.ui.model.asType
 import dev.dimension.flare.ui.presenter.login.InstagramLoginProvider
 import dev.dimension.flare.ui.presenter.login.LoginPlatformProvider
 import kotlinx.collections.immutable.ImmutableList
@@ -36,7 +37,7 @@ public data object InstagramPlatformSpec :
     override val metadata: PlatformMetadata =
         PlatformMetadata(
             displayName = "Instagram",
-            icon = UiIcon.World,
+            icon = UiIcon.World.asType(),
         )
 
     override val order: Int = 50
