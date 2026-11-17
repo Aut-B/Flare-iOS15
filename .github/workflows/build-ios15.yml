@@ -261,6 +261,7 @@ jobs:
       - name: Run logic tests
         working-directory: appleApp
         run: |
+          set +e
           set -o pipefail
           xcodebuild test \
             -project Flare.xcodeproj \
@@ -273,6 +274,17 @@ jobs:
             -skipPackagePluginValidation \
             -skipMacroValidation \
             2>&1 | tee logic-tests.log
+          RC=${PIPESTATUS[0]}
+          echo "xcodebuild exit=$RC"
+          if [ "$RC" -ne 0 ]; then
+            # 先把真正的错误行打进 CI 日志（匿名看 CI 也能直接看到原因），
+            # 再以上一步「失败」的状态往下走，让 Issue 那步照常执行。
+            echo "=== error:/failed/Testing lines ==="
+            grep -E '(error:|failed \(|FATAL|Testing failed|BUILD FAILED|TEST FAILED|XCTAssert|Unresolved|Undefined symbol)' logic-tests.log | head -n 60 || true
+            echo "=== tail 40 ==="
+            tail -n 40 logic-tests.log || true
+            exit "$RC"
+          fi
 
       - name: Upload logic test log
         if: always()
@@ -292,7 +304,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          LOG=$(tail -n 80 appleApp/logic-tests.log 2>/dev/null || echo "(no log)")
+          # 以前这里读的是 appleApp/logic-tests.log，但本步骤不在 appleApp 目录，
+          # 路径对不上 -> Issue 正文永远是空的。两个位置都试一次。
+          LOG=$( (tail -n 80 appleApp/logic-tests.log 2>/dev/null \
+                  || tail -n 80 logic-tests.log 2>/dev/null) || echo "(no log)")
           {
             echo "- commit: \`${{ github.sha }}\`"
             echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
