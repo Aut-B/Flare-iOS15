@@ -224,10 +224,13 @@ enum XhsJSON {
         let isVideo = string(card["type"]) == "video" || object(card["video"]) != nil
         let interact = object(card["interact_info"])
 
+        let data = object(raw["data"]) ?? [:]
+        let source = object(raw["note_card"]) ?? object(data["note_card"]) ?? card
+
         return XhsNote(
             id: id,
-            title: string(card["title"]) ?? string(card["display_title"]) ?? "",
-            desc: string(card["desc"]) ?? "",
+            title: string(source["title"]) ?? string(source["display_title"]) ?? "",
+            desc: string(source["desc"]) ?? "",
             user: user,
             images: images.filter { !$0.isEmpty },
             likedCount: countText(interact?["liked_count"]),
@@ -236,12 +239,18 @@ enum XhsJSON {
             // 否则 1:5 的长图会被裁成 1:2 的「短图」。瀑布流另有 0.4 的裁剪，
             // 不受这里影响。
             aspect: min(max(aspect, 0.28), 2.0),
-            videoURL: isVideo ? videoURL(card["video"]) : nil,
+            videoURL: isVideo ? videoURL(source["video"]) : nil,
             liked: bool(interact?["liked"]),
             collected: bool(interact?["collected"]),
             commentCount: countText(interact?["comment_count"]),
             shareCount: countText(interact?["share_count"]),
-            xsecToken: string(raw["xsec_token"]) ?? string(card["xsec_token"]) ?? ""
+            // 详情接口（`/api/sns/web/v1/feed`）把 xsec_token 放在 `data` 这一层，
+            // 不在 `note_card` 里。以前只从卡片和顶层找，刷出来的新 token 永远是空，
+            // 评论区就一直拿到旧 token -> 反复「当前笔记暂时无法浏览」。
+            xsecToken: string(raw["xsec_token"])
+                ?? string(source["xsec_token"])
+                ?? string(data["xsec_token"])
+                ?? ""
         )
     }
 

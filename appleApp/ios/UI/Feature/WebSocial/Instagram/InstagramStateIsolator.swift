@@ -265,7 +265,11 @@ nonisolated enum InstagramStateIsolator: @unchecked Sendable {
 
     nonisolated private static func isInstagramDomain(_ domain: String) -> Bool {
         let normalized = domain.lowercased()
+        // `graph.facebook.com` 是 Instagram 登录链路的一部分：cookie 从它下发，
+        // WKWebsiteDataStore 里的记录也记在它名下。早先这里漏了它，
+        // 隔离之后那条 cookie 还活着，下次冷启动又被捡回来继续用 -> 照样崩。
         return normalized.contains("instagram.com")
             || normalized.contains("cdninstagram.com")
+            || normalized.contains("facebook.com")
     }
 }

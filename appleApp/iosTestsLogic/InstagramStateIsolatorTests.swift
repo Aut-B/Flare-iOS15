@@ -18,6 +18,8 @@ final class InstagramStateIsolatorTests: XCTestCase {
     }
 
     func testInstagramDomainMatchingPreservesOtherWebData() {
+        // graph.facebook.com 属于 Instagram 登录链路（cookie 从这里下发），
+        // 隔离时不清它，坏 cookie 会活下来，下次冷启动照样崩。
         for domain in ["www.instagram.com", ".cdninstagram.com", "graph.facebook.com"] {
             XCTAssertTrue(InstagramStateIsolator.isInstagramDomainForTesting(domain))
         }

@@ -185,6 +185,37 @@ final class XhsModelParsingTests: XCTestCase {
 
     // MARK: - 标题
 
+    // MARK: - xsec_token（评论区打不开的根因）
+
+    /// 详情接口 `/api/sns/web/v1/feed` 的形状是
+    /// `{data: {items: [{id, model_type, note_card: {...}}], xsec_token: "..."}}`，
+    /// token 在 `data` 这一层。以前只在 note_card / 顶层找，刷新出来的 token 永远是空，
+    /// 评论区拿着过期 token 反复「当前笔记暂时无法浏览」。
+    func testNoteReadsXsecTokenFromDataLayer() {
+        let payload: [String: Any] = [
+            "data": [
+                "items": [notePayload(images: [image("https://img.example/a.jpg")])],
+                "xsec_token": "fresh-token-from-detail",
+            ],
+        ]
+
+        XCTAssertEqual(XhsJSON.note(payload)?.xsecToken, "fresh-token-from-detail")
+    }
+
+    /// 首页流里 token 跟卡片同层，这条不能因为上面的改动丢。
+    func testNoteReadsXsecTokenFromCardLevel() {
+        var payload = notePayload(images: [image("https://img.example/a.jpg")])
+        payload["xsec_token"] = "card-token"
+
+        XCTAssertEqual(XhsJSON.note(payload)?.xsecToken, "card-token")
+    }
+
+    func testNoteWithoutXsecTokenParsesEmpty() {
+        let payload = notePayload(images: [image("https://img.example/a.jpg")])
+
+        XCTAssertEqual(XhsJSON.note(payload)?.xsecToken, "")
+    }
+
     func testDisplayTitleFallsBackToFirstLineOfDesc() {
         let payload = notePayload(images: [image("https://img.example/a.jpg")], title: "")
         let note = XhsJSON.note(payload)
