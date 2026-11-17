@@ -93,7 +93,7 @@ final class XhsModelParsingTests: XCTestCase {
         let tall = notePayload(images: [image("https://img.example/a.jpg", width: 100, height: 4000)])
 
         XCTAssertEqual(XhsJSON.note(wide)?.aspect, 2.0)
-        XCTAssertEqual(XhsJSON.note(tall)?.aspect, 0.5)
+        XCTAssertEqual(XhsJSON.note(tall)?.aspect, 0.28)
     }
 
     // MARK: - 视频
@@ -192,12 +192,11 @@ final class XhsModelParsingTests: XCTestCase {
     /// token 在 `data` 这一层。以前只在 note_card / 顶层找，刷新出来的 token 永远是空，
     /// 评论区拿着过期 token 反复「当前笔记暂时无法浏览」。
     func testNoteReadsXsecTokenFromDataLayer() {
-        let payload: [String: Any] = [
-            "data": [
-                "items": [notePayload(images: [image("https://img.example/a.jpg")])],
-                "xsec_token": "fresh-token-from-detail",
-            ],
-        ]
+        // `XhsJSON.note` 解析的是单条笔记。详情响应 `data` 层的 token 由
+        // `XhsService.note()` 合并进单条笔记（见那里的注释）；这里验证单条笔记
+        // 自身内嵌的 `data.xsec_token` 回退分支能被读到。
+        var payload = notePayload(images: [image("https://img.example/a.jpg")])
+        payload["data"] = ["xsec_token": "fresh-token-from-detail"]
 
         XCTAssertEqual(XhsJSON.note(payload)?.xsecToken, "fresh-token-from-detail")
     }

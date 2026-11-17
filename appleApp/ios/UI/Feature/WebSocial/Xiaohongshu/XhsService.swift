@@ -76,8 +76,17 @@ final class XhsService {
         }
         let json = try await post("/api/sns/web/v1/feed", payload: payload, timeout: timeout, attempts: attempts)
         let data = XhsJSON.object(json["data"]) ?? [:]
-        guard let note = XhsJSON.array(data["items"]).compactMap({ XhsJSON.note($0, defaultSource: xsecSource) }).first else {
+        guard var note = XhsJSON.array(data["items"]).compactMap({ XhsJSON.note($0, defaultSource: xsecSource) }).first else {
             throw XhsError(message: "笔记已删除或不可见", needLogin: false)
+        }
+        // 详情接口把**刷新后**的 xsec_token / xsec_source 放在响应 `data` 层
+        // （与 `items` 同级），而 `items[0]` 里通常没有。以前这里只取 items[0]，
+        // 新 token 直接被丢掉，评论区下一次仍然拿旧 token -> 反复「暂时无法浏览」。
+        if let freshToken = XhsJSON.string(data["xsec_token"]), !freshToken.isEmpty {
+            note.xsecToken = freshToken
+        }
+        if let freshSource = XhsJSON.string(data["xsec_source"]), !freshSource.isEmpty {
+            note.xsecSource = freshSource
         }
         return note
     }
