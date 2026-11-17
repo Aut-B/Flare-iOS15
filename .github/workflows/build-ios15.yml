@@ -277,10 +277,17 @@ jobs:
           RC=${PIPESTATUS[0]}
           echo "xcodebuild exit=$RC"
           if [ "$RC" -ne 0 ]; then
-            # 先把真正的错误行打进 CI 日志（匿名看 CI 也能直接看到原因），
-            # 再以上一步「失败」的状态往下走，让 Issue 那步照常执行。
-            echo "=== error:/failed/Testing lines ==="
-            grep -E '(error:|failed \(|FATAL|Testing failed|BUILD FAILED|TEST FAILED|XCTAssert|Unresolved|Undefined symbol)' logic-tests.log | head -n 60 || true
+            # job 日志匿名（未登录）看不到，只有 Annotations 区匿名可读。
+            # 把真正的错误行打成 `::error::` annotation，这样不登录也能定位。
+            # annotation 里 `%` 是转义符，先换成 `%25`（Swift 报错常含 `%`）。
+            echo "=== error lines as annotations ==="
+            grep -E '(error:|failed \(|FATAL|Testing failed|BUILD FAILED|TEST FAILED|XCTAssert|Unresolved|Undefined symbol|\.swift:[0-9]+:[0-9]+)' logic-tests.log \
+              | head -n 25 \
+              | while IFS= read -r line; do
+                  safe=${line//'%'/'%25'}
+                  safe=${safe//$'\r'/}
+                  echo "::error::$safe"
+                done
             echo "=== tail 40 ==="
             tail -n 40 logic-tests.log || true
             exit "$RC"
