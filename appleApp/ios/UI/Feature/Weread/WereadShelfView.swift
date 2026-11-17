@@ -4,12 +4,11 @@ import WebKit
 /// 微信读书书架（原生）。
 ///
 /// 书单来自 `shelf/sync`（`books` + `archive` + `bookProgress`），同时后台用
-/// 一个隐藏网页把线上书架抄一遍，补上接口漏掉的书，并记下每本书网页阅读器的
-/// 真实地址。点书直接全屏进阅读器 —— 不再「先进线上书架、再点一次」。
+/// 点书直接全屏进原生阅读器 —— 不再「先进线上书架、再点一次」。
 struct WereadShelfView: View {
     @ObservedObject private var store = WereadStore.shared
     @State private var showLogin = false
-    @State private var target: WereadReaderTarget?
+    @State private var nativeTarget: WereadNativeTarget?
 
     private let columns = [GridItem(.adaptive(minimum: 96, maximum: 140), spacing: 16)]
 
@@ -62,18 +61,17 @@ struct WereadShelfView: View {
                 Task { await store.refreshShelf() }
             }
         }
-        .fullScreenCover(item: $target) { item in
-            WereadReaderView(target: item)
+        .fullScreenCover(item: $nativeTarget) { item in
+            // `.id` 必须跟着书走：fullScreenCover 会复用上一次的视图实例，
+            // 不加 id 时换书打开会沿用上一本的 @State（标题、章节、正文），
+            // 看起来就像「点了 A 显示 B」。
+            WereadNativeReaderView(target: item)
+                .id(item.id)
         }
         .task {
             guard store.isLoggedIn else { return }
             if store.books.isEmpty {
                 await store.refreshShelf()
-            }
-            // 老版本升级上来的用户书架有、但「bookId → 阅读器地址」是空的，
-            // 先补一遍。一次启动只跑一次，别每切回标签页就重建隐藏网页。
-            if store.bookLinks.isEmpty {
-                store.syncWebShelfIfNeeded()
             }
         }
     }
@@ -152,26 +150,12 @@ struct WereadShelfView: View {
         .padding(.horizontal, 16)
     }
 
-    /// 点书立刻进阅读器。
+    /// 点书立刻进原生阅读器。
     ///
-    /// 有缓存地址（按 bookId 记的）就直接秒开；没有就打开网页书架，
-    /// 用 `data-book-id` 精确点中这本，点到之后把真地址记下来，下次秒开。
+    /// 目录和正文都直接走接口，不再先打开 `/web/shelf`，所以不会出现
+    /// 「正在打开」很久、网页书架盖在书上面、或者标题还是上一本书的问题。
     private func open(_ book: WereadBook) {
-        if let url = store.readerLink(for: book) {
-            target = WereadReaderTarget(
-                url: url,
-                title: book.title,
-                bookId: book.id,
-                needsJump: false
-            )
-            return
-        }
-        target = WereadReaderTarget(
-            url: "https://weread.qq.com/web/shelf",
-            title: book.title,
-            bookId: book.id,
-            needsJump: true
-        )
+        nativeTarget = WereadNativeTarget(book: book)
     }
 
     private func bookCell(_ book: WereadBook) -> some View {

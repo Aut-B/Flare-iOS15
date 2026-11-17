@@ -43,6 +43,7 @@ public struct VVOStatusScreen: View {
                         .padding(.vertical, 8)
                     }
                 }
+                .timelineMediaViewport()
                 .padding(.leading)
                 .frame(width: 400)
             }
@@ -61,6 +62,7 @@ public struct VVOStatusScreen: View {
                     }
                     .listRowSeparator(.hidden)
                     .listRowInsets(.init(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .flareTextBackground(.flareSystemGroupedBackground)
                     .listRowBackground(Color.clear)
                 }
                 Picker(selection: $selectedType) {
@@ -75,6 +77,7 @@ public struct VVOStatusScreen: View {
                 .listRowSeparator(.hidden)
                 .listRowInsets(.init(top: 0, leading: 0, bottom: 0, trailing: 0))
                 .padding(.horizontal)
+                .flareTextBackground(.flareSystemGroupedBackground)
                 .listRowBackground(Color.clear)
                 
                 switch selectedType {
@@ -84,6 +87,7 @@ public struct VVOStatusScreen: View {
             }
             .detectScrolling()
             .vvoListRowSpacing()
+            .flareTextBackground(.flareSystemBackground)
             .listStyle(.plain)
         }
         #if os(iOS)
@@ -145,11 +149,13 @@ public struct VVOCommentScreen: View {
             .listRowInsets(.init(top: 0, leading: 0, bottom: 0, trailing: 0))
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
+            .flareTextBackground(.flareSystemGroupedBackground)
             .listRowBackground(Color.clear)
             TimelinePagingListContent(data: presenter.state.list, usesDefaultHorizontalPadding: true)
         }
         .detectScrolling()
         .vvoListRowSpacing()
+        .flareTextBackground(.flareSystemBackground)
         .listStyle(.plain)
         .background(Color.flareSystemGroupedBackground)
     }

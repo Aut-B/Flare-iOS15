@@ -504,6 +504,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
 
     func prepareForFitting(width: CGFloat) {
         guard width.isFinite, width > 0 else { return }
+        updateSingleMediaHeightLimit()
         let widthKey = Self.fittingWidthKey(width)
         guard lastPreparedFittingWidthKey != widthKey else { return }
         lastPreparedFittingWidthKey = widthKey
@@ -517,7 +518,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         if let mediaViewStorage {
             let mediaWidth = mediaViewStorage.isShowingCarousel
                 ? width + carouselEdgePadding * 2
-                : contentWidth
+                : mediaViewStorage.fittingWidth(for: contentWidth)
             mediaViewStorage.bounds = CGRect(x: 0, y: 0, width: mediaWidth, height: mediaViewStorage.bounds.height)
         }
         if let normalCardViewStorage {
@@ -595,6 +596,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
     @discardableResult
     private func performLayout(width: CGFloat, assignFrames: Bool) -> CGFloat {
         guard width > 0 else { return 0 }
+        updateSingleMediaHeightLimit()
         var y: CGFloat = 0
 
         // Parents (vertical, spacing 0)
@@ -638,7 +640,8 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
             if isCarousel, wantsAvatar {
                 innerY = max(innerY, y + Self.avatarSize + 8)
             }
-            let childWidth = isCarousel ? width + carouselEdgePadding * 2 : contentWidth
+            let childWidth = isCarousel ? width + carouselEdgePadding * 2
+                : child === mediaViewStorage ? mediaViewStorage!.fittingWidth(for: contentWidth) : contentWidth
             let childX = isCarousel ? -carouselEdgePadding : contentX
             let h = childHeight(of: child, for: childWidth)
             if assignFrames { child.frame = CGRect(x: childX, y: innerY, width: childWidth, height: h) }
@@ -671,6 +674,18 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         isQuote ? 8 : carouselOuterHorizontalPadding
     }
 
+    private func updateSingleMediaHeightLimit() {
+        guard let mediaViewStorage else { return }
+        let maximumHeight: CGFloat? = appearance.expandMediaSize && appearance.limitSingleMediaHeight
+            ? appearance.singleMediaMaxHeight ?? CGFloat(TimelineSingleMediaLayout.shared.maximumHeight(
+            viewportHeight: Float(window.map { $0.bounds.inset(by: $0.safeAreaInsets).height } ?? 0)
+        )) : nil
+        if mediaViewStorage.singleMediaMaxHeight != maximumHeight {
+            mediaViewStorage.singleMediaMaxHeight = maximumHeight
+            lastPreparedFittingWidthKey = nil
+        }
+    }
+
     private func fittingContentColumnWidth(for width: CGFloat) -> CGFloat {
         let wantsAvatar = showAsFullWidth && data?.user != nil
         let avatarWidth = wantsAvatar ? Self.avatarSize + Self.mainRowSpacing : 0
@@ -690,8 +705,8 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         if newWantsAvatar, let user = data.user {
             let avatarView = resolvedAvatarView()
             avatarView.avatarShape = appearance.avatarShape
-            avatarView.set(url: user.avatar?.url, customHeaders: user.avatar?.customHeaders)
-            avatarView.accessibilityLabel = openProfileAccessibilityLabel(handle: user.handle.canonical)
+            avatarView.set(media: user.avatar)
+            avatarView.accessibilityLabel = openProfileAccessibilityLabel(handle: user.handle.display)
             if avatarView.superview !== self { addSubview(avatarView) }
         } else if avatarViewStorage?.superview === self {
             avatarViewStorage?.removeFromSuperview()
@@ -955,17 +970,17 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         if showAsFullWidth {
             let userHeaderFull = resolvedUserHeaderFull()
             userHeaderFull.avatar.avatarShape = appearance.avatarShape
-            userHeaderFull.configure(data: user, trailing: topEndView, onClicked: onClicked)
+            userHeaderFull.configure(data: user, subtitle: data.authorSubtitle, trailing: topEndView, onClicked: onClicked)
             return userHeaderFull
         } else if isQuote {
             let userHeaderQuote = resolvedUserHeaderQuote()
             userHeaderQuote.avatar.avatarShape = appearance.avatarShape
-            userHeaderQuote.configure(data: user, trailing: topEndView, onClicked: onClicked)
+            userHeaderQuote.configure(data: user, subtitle: data.authorSubtitle, trailing: topEndView, onClicked: onClicked)
             return userHeaderQuote
         } else {
             let userHeaderCompat = resolvedUserHeaderCompat()
             userHeaderCompat.avatar.avatarShape = appearance.avatarShape
-            userHeaderCompat.configure(data: user, trailing: topEndView, onClicked: onClicked)
+            userHeaderCompat.configure(data: user, subtitle: data.authorSubtitle, trailing: topEndView, onClicked: onClicked)
             return userHeaderCompat
         }
     }
@@ -993,6 +1008,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
             showOriginalWithTranslation: appearance.showOriginalWithTranslation
         )
         let hasCW = contentWarnings.contains { !$0.text.isEmpty }
+        let bodyTopSpacing: CGFloat = (showAsFullWidth || isQuote) && !hasCW && data.user != nil ? 2 : 0
 
         // reply-to
         if let replyToHandle = data.replyToHandle {
@@ -1061,7 +1077,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                     preferredContentSizeCategory: appearance.preferredContentSizeCategory,
                     collapseAboveLineCount: collapseAboveLineCount
                 )
-                append(bodyText, before: visibleBodyCount == 0 ? 0 : 4)
+                append(bodyText, before: visibleBodyCount == 0 ? bodyTopSpacing : 4)
                 visibleBodyCount += 1
             }
             if contents.contains(where: { !$0.text.isEmpty }),
@@ -1105,6 +1121,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         if !data.images.isEmpty, showMediaInput {
             let corner: CGFloat = isQuote ? 12 : 16
             let mediaView = resolvedMediaView()
+            updateSingleMediaHeightLimit()
             mediaView.configure(
                 data: data.images,
                 sensitive: data.sensitive,
@@ -1212,7 +1229,8 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                 postActionLayout: appearance.postActionLayout,
                 postActionFixedWidth: appearance.postActionFixedWidth,
                 showNumbers: appearance.showNumbers,
-                isDetail: isDetail
+                isDetail: isDetail,
+                postKey: String(describing: data.statusKey)
             )
             if actionsView.hasVisibleActions {
                 let actionsContainer = resolvedActionsContainer()

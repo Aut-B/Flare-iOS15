@@ -300,6 +300,10 @@ private extension UiTimelineV2.PostVisibility {
             "status_visibility_fans"
         case .specified:
             "status_visibility_specified"
+        case .friends:
+            "visibility_friends"
+        case .selfOnly:
+            "visibility_self"
         case .channel:
             "status_visibility_public"
         case .private:
@@ -330,6 +334,10 @@ private extension UiTimelineV2.PostVisibility {
             "status_visibility_fans_description"
         case .specified:
             "status_visibility_specified_description"
+        case .friends:
+            "visibility_friends_description"
+        case .selfOnly:
+            "visibility_self_description"
         case .channel:
             "status_visibility_public_description"
         case .private:

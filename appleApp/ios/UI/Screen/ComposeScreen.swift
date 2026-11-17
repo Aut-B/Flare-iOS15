@@ -62,14 +62,6 @@ struct ComposeScreen: View {
     @State private var showDraftSheet = false
     @State private var showDraftConfirmation = false
     @State private var showAccountPicker = false
-    // 转发/引用场景下，共享模块通常不托管可见度状态，这里在本地保存用户的选择，
-    // 保证地球按键可用且选择能随发帖数据一并提交。
-    @State private var overrideVisibility: UiTimelineV2.PostVisibility?
-    // 转发/引用默认提供的四项可见度，与微博一致：
-    // 公开 / 仅自己可见 / 互相关注 / 仅粉丝可见
-    private static let defaultQuoteVisibilities: [UiTimelineV2.PostVisibility] = [
-        .public, .private, .mutual, .followers
-    ]
 
     var body: some View {
         WithPerceptionTracking {
@@ -376,6 +368,7 @@ struct ComposeScreen: View {
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 4)
+                    .flareTextBackground(.flareSecondarySystemBackground)
                     .background(Color(.secondarySystemBackground))
                     .clipShape(Capsule())
                 }
@@ -467,15 +460,12 @@ struct ComposeScreen: View {
 
     private func accountAvatar(user: UiProfile, size: CGFloat) -> some View {
         ZStack(alignment: .bottomTrailing) {
-            AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+            AvatarView(data: user.avatar)
                 .scaledToFit()
                 .frame(width: size, height: size)
                 .clipShape(Circle())
                 .overlay(Circle().stroke(Color(.systemBackground), lineWidth: 2))
-            Image(fontAwesome: user.platformIcon.fontAwesomeIcon)
-                .resizable()
-                .scaledToFit()
-                .frame(width: size * 0.34, height: size * 0.34)
+            TabIcon(icon: user.platformIcon, size: size * 0.34)
                 .padding(3)
                 .background(Color(.systemBackground))
                 .clipShape(Circle())
@@ -487,10 +477,10 @@ struct ComposeScreen: View {
     private func accountPickerRow(user: UiProfile) -> some View {
         Label {
             VStack(alignment: .leading, spacing: 2) {
-                Text(user.handle.canonical)
+                Text(user.handle.display)
                 Text(user.key.host)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .flareSecondaryText()
             }
         } icon: {
             accountAvatar(user: user, size: 24)
@@ -522,7 +512,7 @@ struct ComposeScreen: View {
             fileName: prefill.fileName
         )
         presenter.state.setText(value: prefill.text)
-        presenter.state.setMediaSize(value: Int32(mediaViewModel.items.count))
+        presenter.state.setMediaMimeTypes(value: mediaViewModel.items.map { $0.mimeType ?? "" })
         pendingCursor = prefill.cursorPosition
         requestComposerFocus()
         applyCursorIfPossible()
@@ -614,10 +604,9 @@ struct ComposeScreen: View {
     }
 
     private func applyDraft(_ draft: UiDraft) {
-        let result = viewModel.applyDraft(draft)
-        mediaViewModel.sensitive = result.sensitive
+        viewModel.applyDraft(draft)
+        mediaViewModel.sensitive = draft.data.sensitive
         mediaViewModel.restore(draftMedias: draft.medias)
-        setVisibility(result.visibility)
         requestComposerFocus()
     }
     
@@ -634,30 +623,17 @@ struct ComposeScreen: View {
             return .init(file: file, altText: item.altText.isEmpty ? nil : item.altText)
         }
     }
-    private func getVisibility() -> UiTimelineV2.PostVisibility {
-        if case .success(let visibilityState) = onEnum(of: presenter.state.visibilityState) {
-            return visibilityState.data.visibility
-        }
-        // 转发/引用场景下共享模块未托管可见度时，以用户本地选择（或默认公开）为准
-        return overrideVisibility ?? .public
+    private func getVisibility() -> UiTimelineV2.PostVisibility? {
+        presenter.state.visibility
     }
 
     private func setVisibility(_ visibility: UiTimelineV2.PostVisibility) {
-        if case .success(let visibilityState) = onEnum(of: presenter.state.visibilityState) {
-            visibilityState.data.setVisibility(value: visibility)
-        } else {
-            // 共享模块未托管可见度（如转发/引用）时，本地保存用户的选择
-            overrideVisibility = visibility
-        }
+        presenter.state.setVisibility(value: visibility)
     }
 
     private var composeVisibility: UiTimelineV2.PostVisibility? {
         if case .success(let visibilityState) = onEnum(of: presenter.state.visibilityState) {
             return visibilityState.data.visibility
-        }
-        // 转发/引用场景下展示默认可见度，保证地球按键可见
-        if case .quote = onEnum(of: presenter.state.composeStatus) {
-            return overrideVisibility ?? .public
         }
         return nil
     }
@@ -666,10 +642,6 @@ struct ComposeScreen: View {
         if case .success(let visibilityState) = onEnum(of: presenter.state.visibilityState) {
             let list = Array(visibilityState.data.allVisibilities)
             if !list.isEmpty { return list }
-        }
-        // 转发/引用场景下共享模块未提供可见度集合时，补充默认四项
-        if case .quote = onEnum(of: presenter.state.composeStatus) {
-            return ComposeScreen.defaultQuoteVisibilities
         }
         return []
     }

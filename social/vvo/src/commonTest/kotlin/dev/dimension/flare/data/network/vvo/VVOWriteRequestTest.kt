@@ -25,8 +25,8 @@ class VVOWriteRequestTest {
     @Test
     fun publicVisibilityOmitsVisibleField() {
         assertNull(UiTimelineV2.Post.Visibility.Public.toVvoVisible())
-        assertEquals("1", UiTimelineV2.Post.Visibility.Private.toVvoVisible())
-        assertEquals("6", UiTimelineV2.Post.Visibility.Mutual.toVvoVisible())
+        assertEquals("1", UiTimelineV2.Post.Visibility.SelfOnly.toVvoVisible())
+        assertEquals("6", UiTimelineV2.Post.Visibility.Friends.toVvoVisible())
         assertEquals("10", UiTimelineV2.Post.Visibility.Followers.toVvoVisible())
     }
 
@@ -49,7 +49,7 @@ class VVOWriteRequestTest {
         }
 
     @Test
-    fun privateVisibilityKeepsExplicitVisibleField() =
+    fun selfOnlyVisibilityKeepsExplicitVisibleField() =
         runTest {
             var form: FormDataContent? = null
             val service = writeService { request -> form = request.body as FormDataContent }
@@ -57,7 +57,7 @@ class VVOWriteRequestTest {
             service.updateStatus(
                 content = "hello",
                 st = "st-value",
-                visible = UiTimelineV2.Post.Visibility.Private.toVvoVisible(),
+                visible = UiTimelineV2.Post.Visibility.SelfOnly.toVvoVisible(),
             )
 
             assertEquals("1", requireNotNull(form).formData["visible"])

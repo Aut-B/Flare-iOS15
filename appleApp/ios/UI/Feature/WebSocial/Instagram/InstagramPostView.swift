@@ -77,7 +77,7 @@ struct InstagramPostView: View {
         }
         .fullScreenCover(isPresented: $showGallery) {
             IGImageGalleryView(
-                images: current.images,
+                items: current.items,
                 startIndex: galleryIndex,
                 caption: current.caption
             )
@@ -114,25 +114,39 @@ struct InstagramPostView: View {
 
     @ViewBuilder
     private var mediaStack: some View {
-        if let video = current.videoURL, !current.isCarousel {
-            IGVideoPlayer(url: video)
+        if current.items.count > 1 {
+            VStack(spacing: 2) {
+                ForEach(Array(current.items.enumerated()), id: \.offset) { offset, item in
+                    mediaItem(item, at: offset, autoPlay: false)
+                }
+            }
+        } else if let item = current.items.first {
+            mediaItem(item, at: 0, autoPlay: item.isVideo)
+        } else {
+            IGImageView(url: current.cover)
+                .aspectRatio(current.aspect, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .clipped()
+        }
+    }
+
+    @ViewBuilder
+    private func mediaItem(_ item: IGMediaItem, at offset: Int, autoPlay: Bool) -> some View {
+        if let video = item.video {
+            IGVideoPlayer(url: video, autoPlay: autoPlay)
                 .aspectRatio(current.aspect, contentMode: .fit)
                 .frame(maxWidth: .infinity)
                 .clipped()
         } else {
-            VStack(spacing: 2) {
-                ForEach(Array(current.images.enumerated()), id: \.offset) { offset, url in
-                    IGImageView(url: url)
-                        .aspectRatio(current.aspect, contentMode: .fit)
-                        .frame(maxWidth: .infinity)
-                        .clipped()
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            galleryIndex = offset
-                            showGallery = true
-                        }
+            IGImageView(url: item.image)
+                .aspectRatio(current.aspect, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .clipped()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    galleryIndex = offset
+                    showGallery = true
                 }
-            }
         }
     }
 
@@ -175,12 +189,23 @@ struct InstagramPostView: View {
 
             ForEach(comments) { comment in
                 HStack(alignment: .top, spacing: 8) {
-                    IGImageView(url: comment.avatar)
-                        .frame(width: 26, height: 26)
-                        .clipShape(Circle())
+                    Button {
+                        openProfile(comment.userName)
+                    } label: {
+                        IGImageView(url: comment.avatar)
+                            .frame(width: 26, height: 26)
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("打开 \(comment.displayName) 的主页")
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(comment.displayName)
-                            .font(.system(size: 12, weight: .semibold))
+                        Button {
+                            openProfile(comment.userName)
+                        } label: {
+                            Text(comment.displayName)
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
                         Text(comment.text)
                             .font(.system(size: 13))
                             .fixedSize(horizontal: false, vertical: true)
@@ -210,6 +235,12 @@ struct InstagramPostView: View {
         }
         .padding(.horizontal, 14)
         .padding(.top, 12)
+    }
+
+    private func openProfile(_ userName: String) {
+        let trimmed = userName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        profileTarget = IGProfileTarget(name: trimmed)
     }
 
     /// 点赞 / 评论被风控拦下时的提示条：说清楚「登录没掉」，并给网页版入口。
@@ -295,8 +326,9 @@ struct InstagramProfileView: View {
     @State private var isLoading = true
     @State private var errorText: String?
     @State private var selected: IGMedia?
-    /// 主页接口被风控（`feedback_required`）时自动切网页版：
-    /// 同一个页面在浏览器里是能看的，没必要让用户对着一个错误页干瞪眼。
+    /// 只有用户自己点「用网页版打开」时才切网页版。
+    /// 以前是接口一报错就自动切，用户会觉得「点个人主页就被踢走了」，
+    /// 而且切过去以后原生主页就再也回不来了。
     @State private var useWeb = false
 
     private var webURL: String { "https://www.instagram.com/\(userName)/" }
@@ -337,6 +369,25 @@ struct InstagramProfileView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
+                        if let errorText = errorText {
+                            HStack(spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.orange)
+                                Text(errorText)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                                Spacer(minLength: 0)
+                                Button("重试") {
+                                    Task { await load() }
+                                }
+                                .font(.system(size: 11, weight: .semibold))
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.orange.opacity(0.08))
+                        }
                         header
                         LazyVGrid(columns: columns, spacing: 2) {
                             ForEach(media) { item in
@@ -432,11 +483,6 @@ struct InstagramProfileView: View {
             media = result.media
         } catch {
             errorText = error.localizedDescription
-            // 「没有找到这个账号」是输错了名字，网页也救不了；
-            // 其余（feedback_required / 风控页 / 403）网页版都能正常打开。
-            if !error.localizedDescription.contains("没有找到") {
-                useWeb = true
-            }
         }
     }
 
@@ -448,7 +494,7 @@ struct InstagramProfileView: View {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(.orange)
-                    Text("接口被风控，已切到网页版")
+                    Text("已打开网页版")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 0)

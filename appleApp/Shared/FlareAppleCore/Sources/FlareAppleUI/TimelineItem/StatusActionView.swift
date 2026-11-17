@@ -31,12 +31,16 @@ public struct StatusActionsView: View {
     private let applyPostActionLayout: Bool
     private let topPadding: CGFloat
 
+    /// 上游签名兼容：新版调用方会传入 isDetail / postKey。
+    /// iOS 15 版本不做逐项动画，仅接受参数以免调用点编译失败。
     public init(
         data: [ActionMenu],
         useText: Bool,
         allowSpacer: Bool = true,
         applyPostActionLayout: Bool = true,
-        topPadding: CGFloat = 0
+        topPadding: CGFloat = 0,
+        isDetail: Bool = false,
+        postKey: String? = nil
     ) {
         self.data = data
         self.useText = useText
@@ -138,6 +142,24 @@ public struct StatusActionView: View {
         self.showNumbers = showNumbers
         self.openURL = openURL
         self.isStretched = isStretched
+    }
+
+    public init(
+        data: ActionMenu,
+        useText: Bool,
+        isFixedWidth: Bool,
+        metrics: StatusActionLayoutMetrics,
+        showNumbers: Bool,
+        openURL: OpenURLAction
+    ) {
+        self.init(
+            data: data,
+            useText: useText,
+            isFixedWidth: isFixedWidth,
+            fontSize: metrics.fontSize,
+            showNumbers: showNumbers,
+            openURL: openURL
+        )
     }
 
     public var body: some View {
@@ -256,6 +278,24 @@ public struct StatusActionItemView: View {
         self.showNumbers = showNumbers
         self.openURL = openURL
         self.isStretched = isStretched
+    }
+
+    public init(
+        data: ActionMenu.Item,
+        useText: Bool,
+        isFixedWidth: Bool,
+        metrics: StatusActionLayoutMetrics,
+        showNumbers: Bool,
+        openURL: OpenURLAction
+    ) {
+        self.init(
+            data: data,
+            useText: useText,
+            isFixedWidth: isFixedWidth,
+            fontSize: metrics.fontSize,
+            showNumbers: showNumbers,
+            openURL: openURL
+        )
     }
 
     private var resolvedText: Text? {

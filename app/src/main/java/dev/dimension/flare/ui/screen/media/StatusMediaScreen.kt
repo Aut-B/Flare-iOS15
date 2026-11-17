@@ -9,6 +9,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -51,6 +52,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearWavyProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
@@ -74,6 +77,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -99,9 +103,7 @@ import androidx.media3.ui.compose.state.rememberPlayPauseButtonState
 import androidx.window.core.layout.WindowSizeClass
 import coil3.annotation.ExperimentalCoilApi
 import coil3.imageLoader
-import coil3.network.NetworkHeaders
-import coil3.network.httpHeaders
-import coil3.request.ImageRequest
+import coil3.memory.MemoryCache
 import coil3.size.Size
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
@@ -116,6 +118,8 @@ import compose.icons.fontawesomeicons.solid.Download
 import compose.icons.fontawesomeicons.solid.Expand
 import compose.icons.fontawesomeicons.solid.Forward
 import compose.icons.fontawesomeicons.solid.GaugeHigh
+import compose.icons.fontawesomeicons.solid.Images
+import compose.icons.fontawesomeicons.solid.Language
 import compose.icons.fontawesomeicons.solid.Pause
 import compose.icons.fontawesomeicons.solid.Play
 import compose.icons.fontawesomeicons.solid.ShareNodes
@@ -125,6 +129,7 @@ import dev.dimension.flare.common.AndroidDownloadManager
 import dev.dimension.flare.common.MediaFileNamePolicy
 import dev.dimension.flare.common.shareImageMedia
 import dev.dimension.flare.data.model.PostActionStyle
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.model.AccountType
 import dev.dimension.flare.model.MicroBlogKey
 import dev.dimension.flare.ui.component.FAIcon
@@ -137,7 +142,9 @@ import dev.dimension.flare.ui.component.UgoiraPlayer
 import dev.dimension.flare.ui.component.VideoPlayer
 import dev.dimension.flare.ui.component.accessibleDescription
 import dev.dimension.flare.ui.component.placeholder
+import dev.dimension.flare.ui.component.rememberMediaImageRequest
 import dev.dimension.flare.ui.component.status.CommonStatusComponent
+import dev.dimension.flare.ui.component.status.ListEmptyView
 import dev.dimension.flare.ui.humanizer.humanize
 import dev.dimension.flare.ui.model.UiMedia
 import dev.dimension.flare.ui.model.UiState
@@ -148,12 +155,14 @@ import dev.dimension.flare.ui.model.isSuccess
 import dev.dimension.flare.ui.model.onLoading
 import dev.dimension.flare.ui.model.onSuccess
 import dev.dimension.flare.ui.model.takeSuccess
+import dev.dimension.flare.ui.model.toUiImage
 import dev.dimension.flare.ui.presenter.invoke
+import dev.dimension.flare.ui.presenter.media.ImageTranslationPresenter
 import dev.dimension.flare.ui.presenter.status.StatusPresenter
+import dev.dimension.flare.ui.screen.settings.imageTranslationText
 import dev.dimension.flare.ui.theme.FlareTheme
 import dev.dimension.flare.ui.theme.screenHorizontalPadding
 import kotlinx.collections.immutable.ImmutableList
-import kotlinx.collections.immutable.ImmutableMap
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.CoroutineScope
@@ -204,6 +213,7 @@ internal fun StatusMediaScreen(
     MediaViewerScreen(
         medias = state.medias,
         initialIndex = index,
+        previewProxy = ProxyRef.forAccountType(accountType),
         preview = preview,
         onDismiss = onDismiss,
         toAltText = toAltText,
@@ -248,6 +258,7 @@ internal fun MediaViewerScreen(
     medias: UiState<ImmutableList<UiMedia>>,
     initialIndex: Int,
     preview: String?,
+    previewProxy: ProxyRef,
     onDismiss: () -> Unit,
     toAltText: (UiMedia) -> Unit,
     uriHandler: UriHandler,
@@ -275,23 +286,50 @@ internal fun MediaViewerScreen(
     val state by producePresenter(key = MEDIA_VIEWER_PRESENTER_KEY) {
         mediaViewerPresenter(initialIndex = initialIndex)
     }
+    val translation by producePresenter("image_translation_viewer") { remember { ImageTranslationPresenter(status?.accountType) }.invoke() }
+
+    fun translatedFileName(
+        media: UiMedia,
+        originalName: String,
+    ): String {
+        val displayed = translation.displayed(media)
+        return if (displayed.url ==
+            media.url
+        ) {
+            originalName
+        } else {
+            originalName.substringBeforeLast('.') + "_" +
+                dev.dimension.flare.common.MediaFileNamePolicy
+                    .rawMediaFileName(displayed)
+        }
+    }
     val saveMedia: (UiMedia) -> Unit = { media ->
         state.save(
-            data = media,
-            fileName = fileName(media),
+            data =
+                dev.dimension.flare.common
+                    .prepareImageTranslationExport(translation.displayed(media), context.cacheDir),
+            fileName = translatedFileName(media, fileName(media)),
             context = context.applicationContext,
         )
     }
     val saveAllMedia: (List<UiMedia>) -> Unit = { media ->
         state.saveAll(
-            media = fileNames(media),
+            media =
+                fileNames(media)
+                    .map { (name, original) ->
+                        translatedFileName(original, name) to
+                            dev.dimension.flare.common
+                                .prepareImageTranslationExport(translation.displayed(original), context.cacheDir)
+                    }.toMap(),
             context = context.applicationContext,
         )
     }
     val shareMedia: (UiMedia) -> Unit = { media ->
         state.shareMedia(
-            data = media,
-            fileName = fileName(media),
+            data =
+                dev.dimension.flare.common
+                    .prepareImageTranslationExport(translation.displayed(media), context.cacheDir),
+            fileName = translatedFileName(media, fileName(media)),
             context = context,
         )
     }
@@ -360,39 +398,35 @@ internal fun MediaViewerScreen(
                                         .onSuccess { medias ->
                                             val media = medias.getOrNull(index)
                                             if (media == null) {
-                                                Box(
-                                                    modifier =
-                                                        Modifier
-                                                            .aspectRatio(1f)
-                                                            .fillMaxSize()
-                                                            .placeholder(true),
-                                                )
+                                                CompositionLocalProvider(
+                                                    LocalContentColor provides MaterialTheme.colorScheme.onBackground,
+                                                ) {
+                                                    ListEmptyView(
+                                                        modifier = Modifier.fillMaxSize(),
+                                                        text = stringResource(R.string.empty_media),
+                                                        icon = FontAwesomeIcons.Solid.Images,
+                                                    )
+                                                }
                                                 return@onSuccess
                                             }
-                                            val imageUrl =
-                                                when (media) {
-                                                    is UiMedia.Audio -> media.previewUrl ?: media.url
-                                                    is UiMedia.Gif -> media.url
-                                                    is UiMedia.Image -> media.url
-                                                    is UiMedia.Video -> media.thumbnailUrl
-                                                    is UiMedia.Ugoira -> media.previewUrl
-                                                }
-                                            val previewUrl =
-                                                when (media) {
-                                                    is UiMedia.Audio -> media.previewUrl ?: media.url
-                                                    is UiMedia.Gif -> media.previewUrl
-                                                    is UiMedia.Image -> media.previewUrl
-                                                    is UiMedia.Video -> media.thumbnailUrl
-                                                    is UiMedia.Ugoira -> media.previewUrl
-                                                }
                                             if (pagerState.currentPage != index || media is UiMedia.Image || media is UiMedia.Gif) {
                                                 ImageItem(
+                                                    translating = translation.item(media).loading,
                                                     modifier =
                                                         Modifier
                                                             .fillMaxSize(),
-                                                    url = imageUrl,
-                                                    previewUrl = previewUrl,
-                                                    customHeaders = media.customHeaders,
+                                                    media =
+                                                        if (media is UiMedia.Image ||
+                                                            media is UiMedia.Gif
+                                                        ) {
+                                                            translation.displayed(media)
+                                                        } else {
+                                                            media.preview
+                                                        },
+                                                    onLoadError = {
+                                                        val result = translation.displayed(media)
+                                                        if (result.url != media.url) translation.imageFailed(media, result.url)
+                                                    },
                                                     description = media.accessibleDescription(),
                                                     onClick = {
                                                         state.setShowUi(!state.showUi)
@@ -421,9 +455,7 @@ internal fun MediaViewerScreen(
                                                     modifier = Modifier.fillMaxSize(),
                                                 ) {
                                                     VideoPlayer(
-                                                        uri = media.url,
-                                                        customHeaders = media.customHeaders,
-                                                        previewUri = media.thumbnailUrl,
+                                                        media = media,
                                                         contentDescription = media.accessibleDescription(),
                                                         modifier = Modifier.fillMaxSize(),
                                                         aspectRatio = media.aspectRatio,
@@ -434,7 +466,7 @@ internal fun MediaViewerScreen(
                                                         muted = false,
                                                         contentScale = ContentScale.Fit,
                                                     )
-                                                    surfaceBindingManager.playerFor(media.url)?.let { player ->
+                                                    surfaceBindingManager.playerFor(media)?.let { player ->
                                                         key(media.url) {
                                                             VideoGestureOverlay(
                                                                 player = player,
@@ -451,9 +483,7 @@ internal fun MediaViewerScreen(
                                                 }
                                             } else if (media is UiMedia.Audio) {
                                                 VideoPlayer(
-                                                    uri = media.url,
-                                                    customHeaders = media.customHeaders,
-                                                    previewUri = null,
+                                                    media = media,
                                                     contentDescription = media.accessibleDescription(),
                                                     autoPlay = false,
                                                     onClick = {
@@ -470,9 +500,7 @@ internal fun MediaViewerScreen(
                                         }.onLoading {
                                             if (preview != null) {
                                                 ImageItem(
-                                                    url = preview,
-                                                    previewUrl = preview,
-                                                    customHeaders = null,
+                                                    media = preview.toUiImage(proxy = previewProxy),
                                                     description = null,
                                                     onClick = { /*TODO*/ },
                                                     setLockPager = {
@@ -543,8 +571,32 @@ internal fun MediaViewerScreen(
                                             } else {
                                                 FontAwesomeIcons.Solid.Expand
                                             },
-                                            contentDescription = if (state.isLandscapeViewing) "Exit landscape view" else "Landscape view",
+                                            contentDescription =
+                                                if (state.isLandscapeViewing) "Exit landscape view" else "Landscape view",
                                         )
+                                    }
+                                    val translationItem = translation.item(current)
+                                    if (translation.canToggle(current)) {
+                                        FilledTonalIconButton(
+                                            onClick = {
+                                                translation.toggle(current)
+                                            },
+                                            enabled = !translationItem.loading,
+                                        ) {
+                                            FAIcon(
+                                                FontAwesomeIcons.Solid.Language,
+                                                contentDescription =
+                                                    imageTranslationText(
+                                                        if (translationItem.showingTranslated) {
+                                                            "Show original"
+                                                        } else if (translationItem.translated != null) {
+                                                            "Show translation"
+                                                        } else {
+                                                            "Translate image"
+                                                        },
+                                                    ),
+                                            )
+                                        }
                                     }
                                     if (!current.description.isNullOrEmpty()) {
                                         FilledTonalIconButton(
@@ -687,7 +739,7 @@ internal fun MediaViewerScreen(
                                                 medias.getOrNull(state.currentPage)
                                             }
                                         if (current is UiMedia.Video) {
-                                            surfaceBindingManager.playerFor(current.url)?.let { player ->
+                                            surfaceBindingManager.playerFor(current)?.let { player ->
                                                 key(current.url) {
                                                     PlayerControl(
                                                         player,
@@ -744,6 +796,10 @@ internal fun MediaViewerScreen(
                     }
                 }
             }
+        }
+        val translationCurrent = medias.takeSuccess()?.getOrNull(state.currentPage)
+        translationCurrent?.let { current ->
+            ImageTranslationErrorDialog(translation, current)
         }
         if (state.showSheet) {
             ModalBottomSheet(
@@ -823,6 +879,16 @@ internal fun MediaViewerScreen(
 
                     val current = medias.getOrNull(state.currentPage)
                     if (current is UiMedia.Image) {
+                        if (translation.canRegenerate(current)) {
+                            ListItem(
+                                modifier =
+                                    Modifier.clickable {
+                                        translation.regenerate(current)
+                                        state.setShowSheet(false)
+                                    },
+                                content = { Text(imageTranslationText("Translate again")) },
+                            )
+                        }
                         ListItem(
                             modifier =
                                 Modifier
@@ -1294,16 +1360,23 @@ private const val MEDIA_VIEWER_PRESENTER_KEY = "media_viewer"
 
 @OptIn(ExperimentalTelephotoApi::class)
 @Composable
-private fun ImageItem(
-    url: String,
-    previewUrl: String,
-    customHeaders: ImmutableMap<String, String>?,
+internal fun ImageItem(
+    media: UiMedia?,
     description: String?,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     setLockPager: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    onLoadError: () -> Unit = {},
+    translating: Boolean = false,
 ) {
+    val loadingEffect by animateFloatAsState(
+        targetValue = if (translating) 1f else 0f,
+        animationSpec = MaterialTheme.motionScheme.defaultEffectsSpec(),
+        label = "Image translation loading",
+    )
+    val loadingDescription = stringResource(R.string.image_translation_loading)
+    val currentOnLoadError by rememberUpdatedState(onLoadError)
     val currentOnClick by rememberUpdatedState(onClick)
     val currentOnLongClick by rememberUpdatedState(onLongClick)
     val currentSetLockPager by rememberUpdatedState(setLockPager)
@@ -1322,65 +1395,67 @@ private fun ImageItem(
             zoomableState.resetZoom()
         }
     }
-    var alignment by remember {
-        mutableStateOf(Alignment.Center)
-    }
-    var contentScale by remember {
-        mutableStateOf(ContentScale.Fit)
-    }
-    LaunchedEffect(zoomableState.coordinateSystem.contentBounds(false)) {
-        // only set once to prevent jitter
-        if (contentScale == ContentScale.Fit) {
-            val aspectRatio =
-                with(zoomableState.coordinateSystem) {
-                    contentBounds(false).rectIn(CoordinateSpace.Viewport)
-                }.let {
-                    it.height / it.width
-                }
-            val targetAspectRatio = 19.5f / 9f
-            if (aspectRatio > targetAspectRatio) {
-                alignment = Alignment.TopCenter
-                contentScale = ContentScale.FillWidth
-            }
+    var imageAspect by remember { mutableFloatStateOf(0f) }
+    var loadedMediaKey by remember { mutableStateOf<String?>(null) }
+    var previousCacheKey by remember { mutableStateOf<MemoryCache.Key?>(null) }
+    val currentMediaKey by rememberUpdatedState(media?.cacheKey)
+    val baseRequest = rememberMediaImageRequest(media, crossfade = false)
+    val request =
+        remember(baseRequest) {
+            val requestedKey = media?.cacheKey
+            baseRequest
+                .newBuilder()
+                .size(Size.ORIGINAL)
+                .apply { previousCacheKey?.let { placeholderMemoryCacheKey(it) } }
+                .listener(onError = { _, _ ->
+                    if (requestedKey == currentMediaKey) {
+                        loadedMediaKey = requestedKey
+                        currentOnLoadError()
+                    }
+                }, onSuccess = { _, result ->
+                    if (requestedKey == currentMediaKey) {
+                        previousCacheKey = result.memoryCacheKey
+                        loadedMediaKey = requestedKey
+                        if (result.image.width > 0) imageAspect = result.image.height.toFloat() / result.image.width
+                    }
+                })
+                .build()
+        }
+    val isLongImage = imageAspect > 19.5f / 9f
+    val alignment = if (isLongImage) Alignment.TopCenter else Alignment.Center
+    val contentScale = if (isLongImage) ContentScale.FillWidth else ContentScale.Fit
+
+    Box(modifier) {
+        ZoomableAsyncImage(
+            model = request,
+            contentDescription = description,
+            state = rememberZoomableImageState(zoomableState),
+            modifier =
+                Modifier
+                    .matchParentSize()
+                    .blur((8 * loadingEffect).dp)
+                    .alpha(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) 1f else 1f - 0.2f * loadingEffect),
+            contentScale = contentScale,
+            alignment = alignment,
+            onClick = {
+                currentOnClick()
+            },
+            onLongClick = {
+                currentOnLongClick()
+            },
+            onDoubleClick = DoubleClickToZoomListener.cycle(2f),
+        )
+        AnimatedVisibility(
+            visible = translating || (media != null && !media.isRemote && loadedMediaKey != media.cacheKey),
+            modifier = Modifier.align(Alignment.Center),
+            enter = fadeIn(MaterialTheme.motionScheme.defaultEffectsSpec()),
+            exit = fadeOut(MaterialTheme.motionScheme.defaultEffectsSpec()),
+        ) {
+            LoadingIndicator(
+                modifier = if (translating) Modifier.semantics { contentDescription = loadingDescription } else Modifier,
+            )
         }
     }
-
-    ZoomableAsyncImage(
-        model =
-            ImageRequest
-                .Builder(LocalContext.current)
-                .data(url)
-                .placeholderMemoryCacheKey(previewUrl)
-//                .crossfade(1_000)
-                .size(Size.ORIGINAL)
-                .let { builder ->
-                    if (customHeaders.isNullOrEmpty()) {
-                        builder
-                    } else {
-                        builder.httpHeaders(
-                            NetworkHeaders
-                                .Builder()
-                                .apply {
-                                    customHeaders.forEach { (key, value) ->
-                                        set(key, value)
-                                    }
-                                }.build(),
-                        )
-                    }
-                }.build(),
-        contentDescription = description,
-        state = rememberZoomableImageState(zoomableState),
-        modifier = modifier,
-        contentScale = contentScale,
-        alignment = alignment,
-        onClick = {
-            currentOnClick()
-        },
-        onLongClick = {
-            currentOnLongClick()
-        },
-        onDoubleClick = DoubleClickToZoomListener.cycle(2f),
-    )
 }
 
 @Composable
@@ -1482,10 +1557,10 @@ private fun mediaViewerPresenter(
             context: Context,
         ) {
             when (data) {
-                is UiMedia.Audio -> download(data.url, fileName, data.customHeaders, context)
-                is UiMedia.Gif -> download(data.url, fileName, data.customHeaders, context)
-                is UiMedia.Image -> save(data.url, fileName, context)
-                is UiMedia.Video -> download(data.urlForDownload, fileName, data.customHeaders, context)
+                is UiMedia.Audio -> download(data, fileName, context)
+                is UiMedia.Gif -> download(data, fileName, context)
+                is UiMedia.Image -> saveImage(data, fileName, context)
+                is UiMedia.Video -> download(data, fileName, context)
                 is UiMedia.Ugoira -> scope.launch { mediaDownloadManager.saveUgoira(data, fileName) }
             }
         }
@@ -1549,16 +1624,14 @@ private fun mediaViewerPresenter(
         }
 
         fun download(
-            uri: String,
+            media: UiMedia,
             fileName: String,
-            customHeaders: Map<String, String>?,
             context: Context,
         ) {
             scope.launch {
                 mediaDownloadManager.downloadMedia(
-                    uri = uri,
+                    media = media,
                     fileName = fileName,
-                    customHeaders = customHeaders,
                     callback =
                         object : AndroidDownloadManager.DownloadCallback {
                             override fun onDownloadStarted(downloadId: Long) {
@@ -1604,13 +1677,13 @@ private fun mediaViewerPresenter(
             }
         }
 
-        fun save(
-            uri: String,
+        fun saveImage(
+            media: UiMedia.Image,
             fileName: String,
             context: Context,
         ) {
             scope.launch {
-                context.imageLoader.diskCache?.openSnapshot(uri)?.use {
+                context.imageLoader.diskCache?.openSnapshot(media.cacheKey)?.use {
                     val byteArray = it.data.toFile().readBytes()
                     val success =
                         mediaDownloadManager.saveByteArray(
@@ -1631,14 +1704,7 @@ private fun mediaViewerPresenter(
                                 Toast.LENGTH_SHORT,
                             ).show()
                     }
-                } ?: withContext(Dispatchers.Main) {
-                    Toast
-                        .makeText(
-                            context,
-                            context.getString(R.string.media_is_downloading),
-                            Toast.LENGTH_SHORT,
-                        ).show()
-                }
+                } ?: run { download(media, fileName, context) }
             }
         }
     }

@@ -358,7 +358,10 @@ final class XhsStore: ObservableObject {
             // DOM / `__INITIAL_STATE__` 兜底经常还有数据。有内容就别拿
             // 「请求失败 code -1」去盖住正常列表。
             if notes.isEmpty {
-                errorMessage = "小红书返回 code \(code)，稍后点「重试」"
+                let detail = XhsJSON.string(json["msg"]) ?? ""
+                errorMessage = detail.isEmpty
+                    ? "小红书返回 code \(code)，稍后点「重试」"
+                    : "小红书返回 code \(code)：\(detail)"
                 isLoading = false
             }
             return
@@ -463,43 +466,74 @@ final class XhsStore: ObservableObject {
     // MARK: - 评论
 
     func comments(note: XhsNote, cursor: String?) async throws -> (items: [XhsComment], next: String?) {
-        do {
-            return try await XhsService.shared.comments(
-                noteId: note.id,
-                xsecToken: note.xsecToken,
-                cursor: cursor
-            )
-        } catch {
-            // 卡片上的 xsec_token 会过期。过期后服务端一律回「当前笔记暂时无法浏览」，
-            // 这时用详情接口换一个新 token 再试一次；换不到就退回原 token，
-            // 再换一个 xsec_source 试一次 —— 网页从笔记页进来时用的是 pc_note。
-            let fresh = try? await XhsService.shared.note(
-                id: note.id,
-                xsecToken: note.xsecToken,
-                timeout: 8,
-                attempts: 1
-            )
-            let token: String
-            if let value = fresh?.xsecToken, !value.isEmpty {
-                token = value
-            } else {
-                token = note.xsecToken
+        var token = note.xsecToken
+        var lastError: Error?
+
+        // 从笔记页进评论区时网页用的是 `pc_note`；首页卡片进详情则可能是
+        // `pc_feed`。两个都试，别因为一个来源对不上就整页「无法浏览」。
+        func attempt(_ token: String, _ source: String) async throws -> (items: [XhsComment], next: String?)? {
+            // 公开笔记的 token 可能本来就是空的：`XhsService` 只在非空时拼
+            // `xsec_token`，所以空 token 也是合法请求，别在这里直接放弃。
+            do {
+                return try await XhsService.shared.comments(
+                    noteId: note.id,
+                    xsecToken: token,
+                    cursor: cursor,
+                    xsecSource: source
+                )
+            } catch {
+                if let xhs = error as? XhsError, xhs.needLogin { throw error }
+                lastError = error
+                return nil
             }
-            if let page = try? await XhsService.shared.comments(
-                noteId: note.id,
-                xsecToken: token,
-                cursor: cursor,
-                xsecSource: "pc_feed"
-            ) {
+        }
+
+        if let page = try await attempt(token, "pc_note") { return page }
+        if let page = try await attempt(token, "pc_feed") { return page }
+
+        // 换到新 token 后写回列表：否则下次进评论区又拿旧 token 连试两次，
+        // 用户看到的就是「每次都要等半天才出评论」。
+        func remember(_ value: String) {
+            guard !value.isEmpty, value != note.xsecToken else { return }
+            DispatchQueue.main.async {
+                if let index = self.notes.firstIndex(where: { $0.id == note.id }) {
+                    self.notes[index].xsecToken = value
+                }
+            }
+        }
+
+        // 卡片上的 xsec_token 会过期。过期后服务端一律回「当前笔记暂时无法浏览」，
+        // 这时用详情接口换一个新 token。详情接口本身也要选对来源。
+        for source in ["pc_note", "pc_feed"] {
+            guard
+                let fresh = try? await XhsService.shared.note(
+                    id: note.id,
+                    xsecToken: token,
+                    xsecSource: source,
+                    timeout: 10,
+                    attempts: 1
+                ),
+                !fresh.xsecToken.isEmpty
+            else {
+                continue
+            }
+            token = fresh.xsecToken
+            if let page = try await attempt(token, source) {
+                remember(token)
                 return page
             }
-            return try await XhsService.shared.comments(
-                noteId: note.id,
-                xsecToken: token,
-                cursor: cursor,
-                xsecSource: "pc_note"
-            )
+            if let page = try await attempt(token, source == "pc_note" ? "pc_feed" : "pc_note") {
+                remember(token)
+                return page
+            }
+            break
         }
+
+        if let error = lastError { throw error }
+        throw XhsError(
+            message: "没拿到这条笔记的评论凭证，回首页刷新后再点进来一次",
+            needLogin: false
+        )
     }
 
     func postComment(note: XhsNote, content: String) async throws -> XhsComment? {

@@ -19,6 +19,7 @@ import dev.dimension.flare.model.ReferenceType
 import dev.dimension.flare.ui.model.UiProfile
 import dev.dimension.flare.ui.model.UiTimelineV2
 import dev.dimension.flare.ui.model.asTimelinePostItem
+import dev.dimension.flare.ui.model.bindMediaProxy
 import dev.dimension.flare.ui.model.withItemKey
 import kotlinx.collections.immutable.toImmutableList
 
@@ -117,7 +118,7 @@ internal object TimelinePagingMapper {
         )
     }
 
-    private fun semanticReferenceSignature(references: List<DbStatusReference>): String =
+    fun semanticReferenceSignature(references: List<DbStatusReference>): String =
         buildString {
             references
                 .sortedWith(compareBy(DbStatusReference::statusId, DbStatusReference::referenceType, DbStatusReference::referenceStatusId))
@@ -819,6 +820,6 @@ internal object TimelinePagingMapper {
                 options = translationDisplayOptions,
                 translations = data.translations,
             )
-        return root.withItemKey(rootItemKey)
+        return root.withItemKey(rootItemKey).bindMediaProxy()
     }
 }

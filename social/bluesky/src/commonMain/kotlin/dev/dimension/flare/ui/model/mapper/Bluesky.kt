@@ -36,6 +36,7 @@ import dev.dimension.flare.common.SerializableImmutableList
 import dev.dimension.flare.data.datasource.microblog.ActionMenu
 import dev.dimension.flare.data.datasource.microblog.PostActionFamily
 import dev.dimension.flare.data.datasource.microblog.userActionsMenu
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.network.bluesky.normalizeHttpUrl
 import dev.dimension.flare.data.platform.BLUESKY_PLATFORM_ID
 import dev.dimension.flare.model.AccountType
@@ -56,7 +57,10 @@ import dev.dimension.flare.ui.model.UiProfile
 import dev.dimension.flare.ui.model.UiTimelineV2
 import dev.dimension.flare.ui.model.UiTranslatableText
 import dev.dimension.flare.ui.model.asTimelinePostItem
+import dev.dimension.flare.ui.model.asType
+import dev.dimension.flare.ui.model.bindMediaProxy
 import dev.dimension.flare.ui.model.toUiImage
+import dev.dimension.flare.ui.model.withProxy
 import dev.dimension.flare.ui.render.RenderContent
 import dev.dimension.flare.ui.render.RenderRun
 import dev.dimension.flare.ui.render.RenderTextStyle
@@ -609,7 +613,7 @@ internal fun List<ListNotificationsNotification>.render(
                                 clickEvent = ClickEvent.Noop,
                                 createdAt = items.first().indexedAt.toUi(),
                                 accountType = accountKey.toAccountType(),
-                            ),
+                            ).bindMediaProxy(),
                         users =
                             items
                                 .map {
@@ -623,7 +627,7 @@ internal fun List<ListNotificationsNotification>.render(
                                 host = accountKey.host,
                             ),
                         accountType = accountKey.toAccountType(),
-                    ),
+                    ).bindMediaProxy(),
                 )
             }
 
@@ -643,7 +647,7 @@ internal fun List<ListNotificationsNotification>.render(
                                 clickEvent = ClickEvent.Noop,
                                 createdAt = items.first().indexedAt.toUi(),
                                 accountType = accountKey.toAccountType(),
-                            ),
+                            ).bindMediaProxy(),
                         users =
                             items
                                 .map {
@@ -657,7 +661,7 @@ internal fun List<ListNotificationsNotification>.render(
                                 host = accountKey.host,
                             ),
                         accountType = accountKey.toAccountType(),
-                    ),
+                    ).bindMediaProxy(),
                 )
             }
 
@@ -687,7 +691,7 @@ internal fun List<ListNotificationsNotification>.render(
                                     clickEvent = ClickEvent.Noop,
                                     createdAt = it.indexedAt.toUi(),
                                     accountType = accountKey.toAccountType(),
-                                ),
+                                ).bindMediaProxy(),
                         )
                 }
             }
@@ -708,7 +712,7 @@ internal fun List<ListNotificationsNotification>.render(
                                 clickEvent = ClickEvent.Noop,
                                 createdAt = it.indexedAt.toUi(),
                                 accountType = accountKey.toAccountType(),
-                            ),
+                            ).bindMediaProxy(),
                         value = it.author.render(accountKey),
                         statusKey =
                             MicroBlogKey(
@@ -717,7 +721,7 @@ internal fun List<ListNotificationsNotification>.render(
                             ),
                         createdAt = it.indexedAt.toUi(),
                         accountType = accountKey.toAccountType(),
-                    )
+                    ).bindMediaProxy()
                 }
             }
         }
@@ -751,7 +755,7 @@ private fun FeedViewPost.render(
                                 accountType = accountKey.toAccountType(),
                             ),
                         ),
-                )
+                ).bindMediaProxy()
             }
 
             is FeedViewPostReasonUnion.ReasonRepost -> {
@@ -774,7 +778,7 @@ private fun FeedViewPost.render(
                                 userKey = user.key,
                             ),
                         ),
-                )
+                ).bindMediaProxy()
             }
 
             else -> {
@@ -842,7 +846,7 @@ private fun FeedViewPost.render(
         UiTimelineV2.TimelinePostItem(
             post = rootPost,
             presentation = presentation,
-        )
+        ).bindMediaProxy()
     } else {
         rootPost
     }
@@ -864,7 +868,7 @@ private fun PostView.renderTimelineItem(
                     notificationKey = message?.statusKey,
                     quotes = quotes,
                 ),
-        )
+        ).bindMediaProxy()
     } else {
         post
     }
@@ -1051,7 +1055,7 @@ internal fun PostView.render(
                                     userActionsMenu(
                                         accountKey = accountKey,
                                         userKey = user.key,
-                                        handle = user.handle.canonical,
+                                        handle = user.handle.display,
                                     ),
                                 )
                                 add(ActionMenu.Divider)
@@ -1089,7 +1093,7 @@ internal fun PostView.render(
                         accountType = AccountType.Specific(accountKey),
                     ),
             ),
-    )
+    ).bindMediaProxy()
 }
 
 private fun blueskyProfileName(
@@ -1114,6 +1118,7 @@ internal fun chat.bsky.actor.ProfileViewBasic.render(accountKey: MicroBlogKey): 
             UiHandle(
                 raw = handle.handle,
                 host = accountKey.host,
+                displayOverride = "@${handle.handle}",
             ),
         key = userKey,
         banner = null,
@@ -1127,7 +1132,7 @@ internal fun chat.bsky.actor.ProfileViewBasic.render(accountKey: MicroBlogKey): 
         mark = persistentListOf(),
         bottomContent = null,
         platformId = BLUESKY_PLATFORM_ID,
-        platformIcon = dev.dimension.flare.ui.model.UiIcon.Bluesky,
+        platformIcon = UiIcon.Bluesky.asType(),
         clickEvent =
             ClickEvent.Deeplink(
                 DeeplinkRoute.Profile
@@ -1136,7 +1141,7 @@ internal fun chat.bsky.actor.ProfileViewBasic.render(accountKey: MicroBlogKey): 
                         userKey = userKey,
                     ),
             ),
-    )
+    ).withProxy(ProxyRef.forAccount(accountKey))
 }
 
 internal fun ProfileViewBasic.render(accountKey: MicroBlogKey): UiProfile {
@@ -1152,6 +1157,7 @@ internal fun ProfileViewBasic.render(accountKey: MicroBlogKey): UiProfile {
             UiHandle(
                 raw = handle.handle,
                 host = accountKey.host,
+                displayOverride = "@${handle.handle}",
             ),
         key = userKey,
         banner = null,
@@ -1165,7 +1171,7 @@ internal fun ProfileViewBasic.render(accountKey: MicroBlogKey): UiProfile {
         mark = persistentListOf(),
         bottomContent = null,
         platformId = BLUESKY_PLATFORM_ID,
-        platformIcon = dev.dimension.flare.ui.model.UiIcon.Bluesky,
+        platformIcon = UiIcon.Bluesky.asType(),
         clickEvent =
             ClickEvent.Deeplink(
                 DeeplinkRoute.Profile
@@ -1174,7 +1180,7 @@ internal fun ProfileViewBasic.render(accountKey: MicroBlogKey): UiProfile {
                         userKey = userKey,
                     ),
             ),
-    )
+    ).withProxy(ProxyRef.forAccount(accountKey))
 }
 
 internal fun ProfileView.render(accountKey: MicroBlogKey): UiProfile {
@@ -1190,6 +1196,7 @@ internal fun ProfileView.render(accountKey: MicroBlogKey): UiProfile {
             UiHandle(
                 raw = handle.handle,
                 host = accountKey.host,
+                displayOverride = "@${handle.handle}",
             ),
         key = userKey,
         banner = null,
@@ -1203,7 +1210,7 @@ internal fun ProfileView.render(accountKey: MicroBlogKey): UiProfile {
         mark = persistentListOf(),
         bottomContent = null,
         platformId = BLUESKY_PLATFORM_ID,
-        platformIcon = dev.dimension.flare.ui.model.UiIcon.Bluesky,
+        platformIcon = UiIcon.Bluesky.asType(),
         clickEvent =
             ClickEvent.Deeplink(
                 DeeplinkRoute.Profile
@@ -1212,7 +1219,7 @@ internal fun ProfileView.render(accountKey: MicroBlogKey): UiProfile {
                         userKey = userKey,
                     ),
             ),
-    )
+    ).withProxy(ProxyRef.forAccount(accountKey))
 }
 
 internal fun ProfileViewDetailed.render(accountKey: MicroBlogKey): UiProfile {
@@ -1228,6 +1235,7 @@ internal fun ProfileViewDetailed.render(accountKey: MicroBlogKey): UiProfile {
             UiHandle(
                 raw = handle.handle,
                 host = accountKey.host,
+                displayOverride = "@${handle.handle}",
             ),
         key = userKey,
         banner = banner?.uri.toUiImage(),
@@ -1241,7 +1249,7 @@ internal fun ProfileViewDetailed.render(accountKey: MicroBlogKey): UiProfile {
         mark = persistentListOf(),
         bottomContent = null,
         platformId = BLUESKY_PLATFORM_ID,
-        platformIcon = dev.dimension.flare.ui.model.UiIcon.Bluesky,
+        platformIcon = UiIcon.Bluesky.asType(),
         clickEvent =
             ClickEvent.Deeplink(
                 DeeplinkRoute.Profile
@@ -1250,7 +1258,7 @@ internal fun ProfileViewDetailed.render(accountKey: MicroBlogKey): UiProfile {
                         userKey = userKey,
                     ),
             ),
-    )
+    ).withProxy(ProxyRef.forAccount(accountKey))
 }
 
 private fun findCard(postView: PostView): UiCard? =
@@ -1736,7 +1744,7 @@ private fun render(
                                 accountType = AccountType.Specific(accountKey),
                             ),
                     ),
-            )
+            ).bindMediaProxy()
         }
 
         else -> {
@@ -1746,6 +1754,7 @@ private fun render(
 
 internal fun GeneratorView.render(accountKey: MicroBlogKey) =
     UiList.Feed(
+        proxy = ProxyRef.forAccount(accountKey),
         id = uri.atUri,
         title = displayName,
         description = description,
@@ -1757,6 +1766,7 @@ internal fun GeneratorView.render(accountKey: MicroBlogKey) =
 
 internal fun ListView.render(accountKey: MicroBlogKey) =
     UiList.List(
+        proxy = ProxyRef.forAccount(accountKey),
         id = uri.atUri,
         title = name,
         description = description,

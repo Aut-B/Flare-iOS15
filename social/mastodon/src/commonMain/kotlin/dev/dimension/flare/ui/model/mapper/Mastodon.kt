@@ -6,6 +6,7 @@ import dev.dimension.flare.data.datasource.microblog.ActionMenu
 import dev.dimension.flare.data.datasource.microblog.PostActionFamily
 import dev.dimension.flare.data.datasource.microblog.PostEvent
 import dev.dimension.flare.data.datasource.microblog.userActionsMenu
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.network.mastodon.api.model.Account
 import dev.dimension.flare.data.network.mastodon.api.model.Attachment
 import dev.dimension.flare.data.network.mastodon.api.model.InstanceData
@@ -38,7 +39,10 @@ import dev.dimension.flare.ui.model.UiRelation
 import dev.dimension.flare.ui.model.UiTimelineV2
 import dev.dimension.flare.ui.model.UiTranslatableText
 import dev.dimension.flare.ui.model.asTimelinePostItem
+import dev.dimension.flare.ui.model.asType
+import dev.dimension.flare.ui.model.bindMediaProxy
 import dev.dimension.flare.ui.model.toUiImage
+import dev.dimension.flare.ui.model.withProxy
 import dev.dimension.flare.ui.render.UiRichText
 import dev.dimension.flare.ui.render.parseHtml
 import dev.dimension.flare.ui.render.toUi
@@ -139,7 +143,7 @@ internal fun Notification.render(accountKey: MicroBlogKey): UiTimelineV2 {
                         ),
                 ),
             accountType = accountKey.toAccountType(),
-        )
+        ).bindMediaProxy()
     if (type in listOf(NotificationTypes.FollowRequest)) {
         return UiTimelineV2.User(
             value = user,
@@ -183,7 +187,7 @@ internal fun Notification.render(accountKey: MicroBlogKey): UiTimelineV2 {
             createdAt = createdAt?.toUi() ?: Instant.DISTANT_PAST.toUi(),
             statusKey = MicroBlogKey(id ?: "", accountKey.host),
             accountType = accountKey.toAccountType(),
-        )
+        ).bindMediaProxy()
     } else if (status != null) {
         val renderedStatus =
             status
@@ -197,7 +201,7 @@ internal fun Notification.render(accountKey: MicroBlogKey): UiTimelineV2 {
                             host = accountKey.host,
                             accountKey = accountKey,
                         ),
-                )
+                ).bindMediaProxy()
         return renderedStatus.copy(
             presentation =
                 renderedStatus.presentation.copy(
@@ -212,7 +216,7 @@ internal fun Notification.render(accountKey: MicroBlogKey): UiTimelineV2 {
             createdAt = createdAt?.toUi() ?: Instant.DISTANT_PAST.toUi(),
             statusKey = MicroBlogKey(id ?: "", accountKey.host),
             accountType = accountKey.toAccountType(),
-        )
+        ).bindMediaProxy()
     }
 }
 
@@ -298,7 +302,7 @@ internal fun Status.render(
                 createdAt = currentStatus.createdAt,
                 clickEvent = ClickEvent.Noop,
                 accountType = accountKey.toAccountType(),
-            )
+            ).bindMediaProxy()
         } else if (reblog != null) {
             val userKey = currentStatus.user?.key
             UiTimelineV2.Message(
@@ -323,7 +327,7 @@ internal fun Status.render(
                         ClickEvent.Noop
                     },
                 accountType = accountKey.toAccountType(),
-            )
+            ).bindMediaProxy()
         } else {
             null
         }
@@ -345,7 +349,7 @@ internal fun Status.render(
         UiTimelineV2.TimelinePostItem(
             post = currentStatus,
             presentation = presentation,
-        )
+        ).bindMediaProxy()
     } else {
         currentStatus
     }
@@ -800,7 +804,7 @@ private fun Status.renderStatus(
         platformId = MASTODON_PLATFORM_ID,
         emojiReactions = reactions,
         accountType = accountKey.toAccountType(guestHost = host),
-    )
+    ).bindMediaProxy()
 }
 
 private fun List<UiTimelineV2>.resolveParents(): List<UiTimelineV2> {
@@ -992,7 +996,7 @@ internal fun Account.render(
                     )
                 },
         platformId = MASTODON_PLATFORM_ID,
-        platformIcon = dev.dimension.flare.ui.model.UiIcon.Mastodon,
+        platformIcon = UiIcon.Mastodon.asType(),
         clickEvent =
             ClickEvent.Deeplink(
                 DeeplinkRoute.Profile
@@ -1006,7 +1010,7 @@ internal fun Account.render(
                         userKey = userKey,
                     ),
             ),
-    )
+    ).withProxy(ProxyRef.forAccount(accountKey))
 }
 
 private fun parseNote(

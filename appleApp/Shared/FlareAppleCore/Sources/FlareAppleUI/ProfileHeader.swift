@@ -35,6 +35,7 @@ public struct CommonProfileHeader: View {
     private let relation: UiState<UiRelation>
     private let followButtonState: UiState<FollowButtonState>
     private let isMe: UiState<KotlinBoolean>
+    private let bannerTopInset: CGFloat
     private let onFollowClick: (FollowButtonState) -> Void
     private let onFollowingClick: () -> Void
     private let onFansClick: () -> Void
@@ -44,6 +45,7 @@ public struct CommonProfileHeader: View {
         relation: UiState<UiRelation>,
         followButtonState: UiState<FollowButtonState>,
         isMe: UiState<KotlinBoolean>,
+        bannerTopInset: CGFloat = 0,
         onFollowClick: @escaping (FollowButtonState) -> Void,
         onFollowingClick: @escaping () -> Void,
         onFansClick: @escaping () -> Void
@@ -52,24 +54,30 @@ public struct CommonProfileHeader: View {
         self.relation = relation
         self.followButtonState = followButtonState
         self.isMe = isMe
+        self.bannerTopInset = bannerTopInset
         self.onFollowClick = onFollowClick
         self.onFollowingClick = onFollowingClick
         self.onFansClick = onFansClick
+    }
+
+    private var headerHeight: CGFloat {
+        CommonProfileHeaderConstants.headerHeight + bannerTopInset
     }
 
     public var body: some View {
         ZStack(alignment: .top) {
             if let banner = user.banner {
                 Color.clear.overlay {
-                    NetworkImage(data: banner.url, customHeader: banner.customHeaders)
-                        .frame(height: CommonProfileHeaderConstants.headerHeight)
+                    NetworkImage(data: banner)
+                        .frame(height: headerHeight)
                         .onTapGesture {
                             if let url = URL(
                                 string: DeeplinkRoute.Media.MediaImage(
                                     uri: banner.url,
                                     previewUrl: nil,
-                                    customHeaders: banner.customHeaders
-                                ).toUri()
+                                    customHeaders: banner.customHeaders,
+                                    proxy: banner.proxy
+                                    ).toUri()
                             ) {
                                 openURL.callAsFunction(url)
                             }
@@ -86,12 +94,12 @@ public struct CommonProfileHeader: View {
                             )
                         )
                 }
-                .frame(height: CommonProfileHeaderConstants.headerHeight)
+                .frame(height: headerHeight)
                 .clipped()
             } else {
                 Rectangle()
                     .foregroundColor(.gray)
-                    .frame(height: CommonProfileHeaderConstants.headerHeight)
+                    .frame(height: headerHeight)
                     .clipped()
             }
             VStack(alignment: .leading, spacing: 8) {
@@ -99,10 +107,10 @@ public struct CommonProfileHeader: View {
                     VStack {
                         Spacer()
                             .frame(
-                                height: CommonProfileHeaderConstants.headerHeight -
+                                height: headerHeight -
                                     CommonProfileHeaderConstants.avatarSize / 2
                             )
-                        AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                        AvatarView(data: user.avatar)
                             .frame(width: CommonProfileHeaderConstants.avatarSize, height: CommonProfileHeaderConstants.avatarSize)
                             .onTapGesture {
                                 if let avatar = user.avatar,
@@ -110,8 +118,9 @@ public struct CommonProfileHeader: View {
                                        string: DeeplinkRoute.Media.MediaImage(
                                            uri: avatar.url,
                                            previewUrl: nil,
-                                           customHeaders: avatar.customHeaders
-                                       ).toUri()
+                                           customHeaders: avatar.customHeaders,
+                                           proxy: avatar.proxy
+                                           ).toUri()
                                    ) {
                                     openURL.callAsFunction(url)
                                 }
@@ -131,7 +140,7 @@ public struct CommonProfileHeader: View {
                     Spacer()
                     VStack {
                         Spacer()
-                            .frame(height: CommonProfileHeaderConstants.headerHeight)
+                            .frame(height: headerHeight)
                         if case .success(let data) = onEnum(of: isMe), !data.data.boolValue {
                             switch onEnum(of: followButtonState) {
                             case .success(let buttonState):
@@ -145,7 +154,7 @@ public struct CommonProfileHeader: View {
                                     if case .success(let relationState) = onEnum(of: relation), relationState.data.isFans {
                                         Text("relation_is_fans", bundle: FlareAppleUILocalization.bundle)
                                             .font(.caption)
-                                            .foregroundStyle(.secondary)
+                                            .flareSecondaryText()
                                             .multilineTextAlignment(.center)
                                     }
                                 }
@@ -216,7 +225,7 @@ public struct CommonProfileHeader: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
             HStack {
-                Text(user.handle.canonical)
+                Text(user.handle.display)
                     .font(.subheadline)
                     .foregroundColor(.gray)
                     .textSelection(.enabled)
@@ -240,7 +249,7 @@ public struct CommonProfileHeader: View {
                 if user.translationDisplayState != .hidden {
                     TranslateStatusComponent(data: user.translationDisplayState)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .flareSecondaryText()
                 }
             }
             if let desc = user.description_ {
@@ -272,6 +281,7 @@ public struct ProfileHeader: View {
     private let relation: UiState<UiRelation>
     private let followButtonState: UiState<FollowButtonState>
     private let isMe: UiState<KotlinBoolean>
+    private let bannerTopInset: CGFloat
     private let onFollowClick: (UiProfile, FollowButtonState) -> Void
     private let onFollowingClick: (MicroBlogKey) -> Void
     private let onFansClick: (MicroBlogKey) -> Void
@@ -281,6 +291,7 @@ public struct ProfileHeader: View {
         relation: UiState<UiRelation>,
         followButtonState: UiState<FollowButtonState>,
         isMe: UiState<KotlinBoolean>,
+        bannerTopInset: CGFloat = 0,
         onFollowClick: @escaping (UiProfile, FollowButtonState) -> Void,
         onFollowingClick: @escaping (MicroBlogKey) -> Void,
         onFansClick: @escaping (MicroBlogKey) -> Void
@@ -289,6 +300,7 @@ public struct ProfileHeader: View {
         self.relation = relation
         self.followButtonState = followButtonState
         self.isMe = isMe
+        self.bannerTopInset = bannerTopInset
         self.onFollowClick = onFollowClick
         self.onFollowingClick = onFollowingClick
         self.onFansClick = onFansClick
@@ -304,6 +316,7 @@ public struct ProfileHeader: View {
                 relation: relation,
                 followButtonState: followButtonState,
                 isMe: isMe,
+                bannerTopInset: bannerTopInset,
                 onFollowClick: { _ in },
                 onFollowingClick: {},
                 onFansClick: {}
@@ -315,6 +328,7 @@ public struct ProfileHeader: View {
                 relation: relation,
                 followButtonState: followButtonState,
                 isMe: isMe,
+                bannerTopInset: bannerTopInset,
                 onFollowClick: { followButtonState in onFollowClick(data.data, followButtonState) },
                 onFollowingClick: onFollowingClick,
                 onFansClick: onFansClick
@@ -328,6 +342,7 @@ public struct ProfileHeaderSuccess: View {
     private let relation: UiState<UiRelation>
     private let followButtonState: UiState<FollowButtonState>
     private let isMe: UiState<KotlinBoolean>
+    private let bannerTopInset: CGFloat
     private let onFollowClick: (FollowButtonState) -> Void
     private let onFollowingClick: (MicroBlogKey) -> Void
     private let onFansClick: (MicroBlogKey) -> Void
@@ -337,6 +352,7 @@ public struct ProfileHeaderSuccess: View {
         relation: UiState<UiRelation>,
         followButtonState: UiState<FollowButtonState>,
         isMe: UiState<KotlinBoolean>,
+        bannerTopInset: CGFloat = 0,
         onFollowClick: @escaping (FollowButtonState) -> Void,
         onFollowingClick: @escaping (MicroBlogKey) -> Void,
         onFansClick: @escaping (MicroBlogKey) -> Void
@@ -345,6 +361,7 @@ public struct ProfileHeaderSuccess: View {
         self.relation = relation
         self.followButtonState = followButtonState
         self.isMe = isMe
+        self.bannerTopInset = bannerTopInset
         self.onFollowClick = onFollowClick
         self.onFollowingClick = onFollowingClick
         self.onFansClick = onFansClick
@@ -356,6 +373,7 @@ public struct ProfileHeaderSuccess: View {
             relation: relation,
             followButtonState: followButtonState,
             isMe: isMe,
+            bannerTopInset: bannerTopInset,
             onFollowClick: onFollowClick,
             onFollowingClick: {
                 onFollowingClick(user.key)
@@ -403,7 +421,7 @@ public struct MatrixView: View {
             }
         }
         .font(.caption)
-        .foregroundStyle(.secondary)
+        .flareSecondaryText()
     }
 }
 
@@ -460,9 +478,10 @@ public struct FieldsView: View {
                 ForEach(0..<keys.count, id: \.self) { index in
                     let key = keys[index]
                     Text(key)
+                        .flarePrimaryText()
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .flareSecondaryText()
                     if let richText = fields[key] {
                         RichText(text: richText)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -475,6 +494,7 @@ public struct FieldsView: View {
                 .padding(.horizontal)
             }
             .padding(.vertical)
+            .flareTextBackground(.flareSecondarySystemBackground)
             .background(Color.flareSecondarySystemBackground)
             .clipShape(RoundedRectangle(cornerRadius: 8))
         } else {

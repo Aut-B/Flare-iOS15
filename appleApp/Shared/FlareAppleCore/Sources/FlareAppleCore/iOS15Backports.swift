@@ -137,4 +137,22 @@ extension View {
             self
         }
     }
+
+    @ViewBuilder
+    public func backportScrollTargetLayout() -> some View {
+        if #available(iOS 17.0, macOS 14.0, *) {
+            self.scrollTargetLayout()
+        } else {
+            self
+        }
+    }
+
+    @ViewBuilder
+    public func backportDefaultScrollAnchor(_ anchor: UnitPoint?) -> some View {
+        if #available(iOS 17.0, macOS 14.0, *) {
+            self.defaultScrollAnchor(anchor)
+        } else {
+            self
+        }
+    }
 }

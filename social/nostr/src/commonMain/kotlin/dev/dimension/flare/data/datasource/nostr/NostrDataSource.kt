@@ -28,6 +28,7 @@ import dev.dimension.flare.data.datasource.microblog.paging.PagingResult
 import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
 import dev.dimension.flare.data.datasource.microblog.paging.notSupported
 import dev.dimension.flare.data.model.IconType
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.model.tab.ShortcutSpec
 import dev.dimension.flare.data.model.tab.TimelineSpec
 import dev.dimension.flare.data.network.nostr.AmberSignerBridge
@@ -61,6 +62,7 @@ internal typealias NostrServiceManager = SwitchingServiceManager<NostrCredential
 internal class NostrDataSource(
     override val accountKey: MicroBlogKey,
     private val credentialFlow: Flow<NostrCredential>,
+    private val suppliedServiceManager: NostrServiceManager? = null,
 ) : AuthenticatedMicroblogDataSource,
     NotificationTimelineDataSource,
     ComposeDataSource,
@@ -105,7 +107,7 @@ internal class NostrDataSource(
     }
 
     private val serviceManager by lazy {
-        SwitchingServiceManager(
+        suppliedServiceManager ?: SwitchingServiceManager(
             credentialFlow.distinctUntilChangedBy { it.signerStableId(accountKey) },
             ioScope,
             {
@@ -150,6 +152,7 @@ internal class NostrDataSource(
 
     override val userHandler by lazy {
         UserHandler(
+            proxy = ProxyRef.forAccount(accountKey),
             host = NostrService.NOSTR_HOST,
             loader = loader,
         )

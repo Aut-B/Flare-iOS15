@@ -14,6 +14,8 @@ struct StatusMediaView: View {
     let carouselLeadingPadding: CGFloat
     let carouselTrailingPadding: CGFloat
     @Environment(\.timelineAppearance.expandMediaSize) private var expandMediaSize
+    @Environment(\.timelineAppearance.limitSingleMediaHeight) private var limitSingleMediaHeight
+    @Environment(\.timelineMediaViewportHeight) private var timelineMediaViewportHeight
     @Environment(\.timelineAppearance.mediaLayout) private var mediaLayout
     @Environment(\.timelineAppearance.limitMediaGridToNine) private var limitMediaGridToNine
     @Environment(\.timelineMediaActionHandler) private var timelineMediaActionHandler
@@ -78,7 +80,8 @@ struct StatusMediaView: View {
                     .accessibilityLabel(
                         Text("show_sensitive_media", bundle: FlareAppleUILocalization.bundle)
                     )
-                    .padding()
+                    .fixedSize()
+                    .mediaBadgePadding(16)
                 } else {
                     Button {
                         withAnimation {
@@ -91,14 +94,15 @@ struct StatusMediaView: View {
                     .accessibilityLabel(
                         Text("hide_sensitive_media", bundle: FlareAppleUILocalization.bundle)
                     )
-                    .padding()
+                    .fixedSize()
+                    .mediaBadgePadding(16)
                 }
             } else {
                 EmptyView()
             }
         }
         .if(!usesCarousel) { view in
-            view.clipShape(.rect(cornerRadius: cornerRadius))
+            view.clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         }
         .backportOnChange(of: usesCarousel) { _, _ in
             activeCarouselIndex = nil
@@ -109,7 +113,7 @@ struct StatusMediaView: View {
                 self.activeCarouselIndex = nil
             }
         }
-        // bounds(of: .scrollView(axis:)) 是 iOS 17 的坐标空间 API，iOS 15 用全局坐标判定位移。
+        // bounds(of: .scrollView(axis:)) ? iOS 17 ????? API?iOS 15 ??????????
         .flareOnGeometry({ proxy in proxy.frame(in: .global).minY }, action: { offset in
             if #unavailable(iOS 18.0, macOS 15.0) {
                 if let verticalOffset, verticalOffset != offset {
@@ -168,7 +172,7 @@ struct StatusMediaView: View {
                                     isSelected: index == (activeCarouselIndex ?? 0)
                                 ))
                                 .frame(width: itemSize.width, height: itemSize.height)
-                                .clipShape(.rect(cornerRadius: cornerRadius))
+                                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
                                 .id(index)
                             }
                         }
@@ -225,7 +229,12 @@ struct StatusMediaView: View {
         let overflowCount = data.count - visibleData.count
         return AdaptiveGridCompat(
             singleFollowsImageAspect: expandMediaSize,
-            singleViewAspectRatio: data.first?.aspectRatio,
+            singleViewAspectRatio: singleExpandedMedia.map {
+                CGFloat(TimelineSingleMediaLayout.shared.aspectRatio(
+                    sourceAspectRatio: Float($0.carouselLayoutAspectRatio ?? 0), cropTallMedia: !($0 is UiMediaVideo)))
+            } ?? data.first?.aspectRatio,
+            singleMediaMaxHeight: singleExpandedMedia == nil ? nil : CGFloat(
+                TimelineSingleMediaLayout.shared.maximumHeight(viewportHeight: Float(timelineMediaViewportHeight ?? 0))),
             spacing: 4,
             maxColumns: 3,
         ) {
@@ -240,13 +249,20 @@ struct StatusMediaView: View {
         }
     }
 
+    private var singleExpandedMedia: (any UiMedia)? {
+        guard expandMediaSize, limitSingleMediaHeight, post.images.count == 1, data.count == 1,
+              !(data[0] is UiMediaAudio) else { return nil }
+        return data[0]
+    }
+
     private func mediaItem(
         _ item: any UiMedia,
         index: Int,
         overflowCount: Int,
         allowsAutoplay: Bool
     ) -> some View {
-        MediaView(data: item, allowsAutoplay: allowsAutoplay)
+        MediaView(data: item, allowsAutoplay: allowsAutoplay,
+                  contentMode: singleExpandedMedia is UiMediaVideo ? .fit : .fill)
             .environment(\.timelineCarouselItem, TimelineCarouselItem(
                 groupID: carouselID, isSelected: !usesCarousel || index == (activeCarouselIndex ?? 0), isCarousel: usesCarousel
             ))
@@ -399,8 +415,10 @@ struct AltTextOverlay: View {
         } label: {
             Text("ALT", bundle: FlareAppleUILocalization.bundle)
         }
-        .padding()
-        .buttonStyle(.bordered)
+        .backport
+        .glassButtonStyle(fallbackStyle: .bordered)
+        .fixedSize()
+        .mediaBadgePadding(16)
         .accessibilityLabel(
             Text("media_view_alt_text", bundle: FlareAppleUILocalization.bundle)
         )

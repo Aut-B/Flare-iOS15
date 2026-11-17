@@ -43,6 +43,11 @@ struct RssScreen: View {
                 }
             }
         }
+        .overlay {
+            if !presenter.state.loading && presenter.state.sources.isEmpty {
+                ListEmptyView("empty_rss_sources", icon: .squareRss)
+            }
+        }
         .navigationTitle("rss_title")
         .toolbar {
             ToolbarItem {

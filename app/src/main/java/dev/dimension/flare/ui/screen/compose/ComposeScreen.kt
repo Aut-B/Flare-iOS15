@@ -113,6 +113,7 @@ import dev.dimension.flare.ui.component.FlareDropdownMenu
 import dev.dimension.flare.ui.component.FlareTopAppBar
 import dev.dimension.flare.ui.component.LocalTimelineAppearance
 import dev.dimension.flare.ui.component.NetworkImage
+import dev.dimension.flare.ui.component.TabIcon
 import dev.dimension.flare.ui.component.status.CommonStatusComponent
 import dev.dimension.flare.ui.component.status.StatusVisibilityComponent
 import dev.dimension.flare.ui.component.toImageVector
@@ -126,6 +127,7 @@ import dev.dimension.flare.ui.model.mapNotNull
 import dev.dimension.flare.ui.model.onError
 import dev.dimension.flare.ui.model.onSuccess
 import dev.dimension.flare.ui.model.takeSuccess
+import dev.dimension.flare.ui.model.toUiImage
 import dev.dimension.flare.ui.presenter.compose.ComposePresenter
 import dev.dimension.flare.ui.presenter.compose.ComposeStatus
 import dev.dimension.flare.ui.presenter.invoke
@@ -351,7 +353,7 @@ internal fun ComposeScreen(
                                 } else {
                                     stringResource(
                                         R.string.compose_select_accounts_current,
-                                        selectedProfiles.joinToString { it.handle.canonical },
+                                        selectedProfiles.joinToString { it.handle.display },
                                     )
                                 }
                             Box {
@@ -383,7 +385,7 @@ internal fun ComposeScreen(
                                         DropdownMenuItem(
                                             text = {
                                                 Column {
-                                                    Text(text = user.handle.canonical)
+                                                    Text(text = user.handle.display)
                                                     Text(
                                                         text = user.key.host,
                                                         style = MaterialTheme.typography.bodySmall,
@@ -513,7 +515,7 @@ internal fun ComposeScreen(
                                         )
                                 Box {
                                     NetworkImage(
-                                        model = media.url,
+                                        model = media.url.toUiImage(),
                                         contentDescription = mediaDescription,
                                         modifier =
                                             Modifier
@@ -565,7 +567,7 @@ internal fun ComposeScreen(
                                                         },
                                                         icon = {
                                                             NetworkImage(
-                                                                model = media.url,
+                                                                model = media.url.toUiImage(),
                                                                 contentDescription = mediaDescription,
                                                                 modifier =
                                                                     Modifier
@@ -1107,10 +1109,10 @@ private fun ComposeAccountAvatar(
                     .padding(2.dp),
             contentAlignment = Alignment.Center,
         ) {
-            FAIcon(
-                imageVector = user.platformIcon.toImageVector(),
+            TabIcon(
+                icon = user.platformIcon,
                 contentDescription = null,
-                modifier = Modifier.size(size * 0.24f),
+                size = size * 0.24f,
             )
         }
     }
@@ -1235,7 +1237,8 @@ private fun composePresenter(
                 media
             }
 
-    LaunchedEffect(media.medias.size) { state.setMediaSize(media.medias.size) }
+    val mimeTypes = media.medias.map { item -> FileItem(context, item.uri).mimeType.orEmpty() }
+    LaunchedEffect(mimeTypes) { state.setMediaMimeTypes(mimeTypes) }
 
     val contentWarningState =
         state.composeConfig
@@ -1292,7 +1295,6 @@ private fun composePresenter(
             media.setMediaSensitive(draft.data.sensitive)
             pollState.takeSuccess()?.setPoll(draft.data.poll)
             contentWarningState.takeSuccess()?.setText(draft.data.spoilerText)
-            state.visibilityState.takeSuccess()?.setVisibility(draft.data.visibility)
             languageState.takeSuccess()?.setSelectedLanguages(draft.data.language)
             state.consumeLoadedDraft()
         }
@@ -1328,9 +1330,7 @@ private fun composePresenter(
                 },
             sensitive = media.isMediaSensitive,
             spoilerText = spoilerText,
-            visibility =
-                state.visibilityState.takeSuccess()?.visibility
-                    ?: UiTimelineV2.Post.Visibility.Public,
+            visibility = state.visibility,
             referenceStatus =
                 state.composeStatus?.let {
                     ComposeData.ReferenceStatus(
@@ -1618,6 +1618,14 @@ internal val UiTimelineV2.Post.Visibility.localName: Int
                 R.string.misskey_visibility_specified
             }
 
+            UiTimelineV2.Post.Visibility.Friends -> {
+                R.string.visibility_friends
+            }
+
+            UiTimelineV2.Post.Visibility.SelfOnly -> {
+                R.string.visibility_self
+            }
+
             UiTimelineV2.Post.Visibility.Channel -> {
                 R.string.misskey_visibility_public
             }
@@ -1648,6 +1656,14 @@ internal val UiTimelineV2.Post.Visibility.localDescription: Int
 
             UiTimelineV2.Post.Visibility.Specified -> {
                 R.string.misskey_visibility_specified_description
+            }
+
+            UiTimelineV2.Post.Visibility.Friends -> {
+                R.string.visibility_friends_description
+            }
+
+            UiTimelineV2.Post.Visibility.SelfOnly -> {
+                R.string.visibility_self_description
             }
 
             UiTimelineV2.Post.Visibility.Channel -> {

@@ -4,6 +4,7 @@ import com.fleeksoft.ksoup.nodes.Element
 import com.fleeksoft.ksoup.nodes.Node
 import dev.dimension.flare.data.datasource.microblog.ActionMenu
 import dev.dimension.flare.data.datasource.microblog.PostActionFamily
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.network.vvo.model.Attitude
 import dev.dimension.flare.data.network.vvo.model.Comment
 import dev.dimension.flare.data.network.vvo.model.Status
@@ -22,9 +23,16 @@ import dev.dimension.flare.ui.model.UiMedia
 import dev.dimension.flare.ui.model.UiNumber
 import dev.dimension.flare.ui.model.UiProfile
 import dev.dimension.flare.ui.model.UiTimelineV2
+import dev.dimension.flare.ui.model.UiTimelineV2.Message
+import dev.dimension.flare.ui.model.UiTimelineV2.Post
+import dev.dimension.flare.ui.model.UiTimelineV2.TimelinePostItem
+import dev.dimension.flare.ui.model.UiTimelineV2.UserList
 import dev.dimension.flare.ui.model.UiTranslatableText
+import dev.dimension.flare.ui.model.asType
+import dev.dimension.flare.ui.model.bindMediaProxy
 import dev.dimension.flare.ui.model.contentPostOrNull
 import dev.dimension.flare.ui.model.toUiImage
+import dev.dimension.flare.ui.model.withProxy
 import dev.dimension.flare.ui.render.UiRichText
 import dev.dimension.flare.ui.render.parseHtml
 import dev.dimension.flare.ui.render.toUi
@@ -44,9 +52,9 @@ internal fun Comment.render(accountKey: MicroBlogKey): UiTimelineV2 = renderStat
 internal fun Attitude.render(accountKey: MicroBlogKey): UiTimelineV2 {
     val content = status?.renderStatusV2(accountKey)?.contentPostOrNull()
     val user = user?.render(accountKey)
-    return UiTimelineV2.UserList(
+    return UserList(
         message =
-            UiTimelineV2.Message(
+            Message(
                 user = user,
                 statusKey = MicroBlogKey(id.toString(), accountKey.host),
                 icon = UiIcon.Like,
@@ -65,13 +73,13 @@ internal fun Attitude.render(accountKey: MicroBlogKey): UiTimelineV2 {
                         ClickEvent.Noop
                     },
                 accountType = AccountType.Specific(accountKey),
-            ),
+            ).bindMediaProxy(),
         users = listOfNotNull(user).toImmutableList(),
         post = content,
         createdAt = createdAt?.toUi() ?: Clock.System.now().toUi(),
         statusKey = MicroBlogKey(id.toString(), accountKey.host),
         accountType = AccountType.Specific(accountKey),
-    )
+    ).bindMediaProxy()
 }
 
 private fun Status.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
@@ -170,7 +178,7 @@ private fun Status.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
         }
     val message =
         title?.text?.let {
-            UiTimelineV2.Message(
+            Message(
                 user = displayUser,
                 statusKey = statusKey,
                 icon = UiIcon.Info,
@@ -184,17 +192,18 @@ private fun Status.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
                         ),
                     ),
                 accountType = AccountType.Specific(accountKey),
-            )
+            ).bindMediaProxy()
         }
 
     val quote = retweetedStatus?.renderStatusV2(accountKey)?.contentPostOrNull()
     val post =
-        UiTimelineV2.Post(
+        Post(
             platformId = VVO_PLATFORM_ID,
             images = actualMedia.toImmutableList(),
             sensitive = false,
             contentWarning = null,
             user = displayUser,
+            authorSubtitleInternal = regionName ?: source,
             references =
                 listOfNotNull(
                     quote?.let {
@@ -240,21 +249,6 @@ private fun Status.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
                                 ),
                             ),
                         actionFamily = PostActionFamily.Comment,
-                    ),
-                    // 截图：直接把「贴文 + 配图 + 引用微博」合成一张长图的面板。
-                    // 点击复用分享面板的路由，iOS/Android 都能落到各自的截图界面。
-                    ActionMenu.Item(
-                        icon = UiIcon.Screenshot,
-                        text = ActionMenu.Item.Text.Raw("截图"),
-                        clickEvent =
-                            ClickEvent.Deeplink(
-                                DeeplinkRoute.Status.ShareSheet(
-                                    statusKey = statusKey,
-                                    accountType = AccountType.Specific(accountKey),
-                                    shareUrl = url,
-                                ),
-                            ),
-                        actionFamily = PostActionFamily.Screenshot,
                     ),
                     ActionMenu.vvoLike(
                         statusKey = statusKey,
@@ -326,26 +320,16 @@ private fun Status.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
                     ),
                 ),
             accountType = AccountType.Specific(accountKey),
-            // 只对非公开的微博标记可见度，公开（visible=0 或字段缺失）保持 null，
-            // 避免时间线里每条微博都多出一个地球图标。
-            visibility =
-                when (visible?.type) {
-                    1L -> UiTimelineV2.Post.Visibility.Private
-                    6L -> UiTimelineV2.Post.Visibility.Mutual
-                    10L -> UiTimelineV2.Post.Visibility.Followers
-                    else -> null
-                },
-            ipLocation = regionName?.let(::formatVvoIpLocation),
-        )
+        ).bindMediaProxy()
     return if (message != null || quote != null) {
-        UiTimelineV2.TimelinePostItem(
+        TimelinePostItem(
             post = post,
             presentation =
                 UiTimelineV2.PostPresentation(
                     message = message,
                     quotes = listOfNotNull(quote).toImmutableList(),
                 ),
-        )
+        ).bindMediaProxy()
     } else {
         post
     }
@@ -363,7 +347,6 @@ private fun Comment.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
             ?.get("mid")
     val user = this.user?.render(accountKey)
     val isFromMe = user?.key == accountKey
-    // val displayUser = user?.copy(handle = source ?: user.handle)
     val url =
         buildString {
             append("https://$vvoHostLong/")
@@ -407,38 +390,14 @@ private fun Comment.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
             ?.toImmutableList()
             ?: listOfNotNull(status?.renderStatusV2(accountKey)?.contentPostOrNull()).toImmutableList()
 
-    // 评论正文只渲染一次：内容展示和「转发评论」的预填文案共用。
-    val commentRichText =
-        renderVVOText(
-            text.orEmpty(),
-            accountKey,
-            sourceLanguages = persistentListOf("zh-CN"),
-        )
-    // 转发评论：微博的「转发」是把原微博转出来，同时把这条评论以
-    // 「//@作者：评论内容」的形式带进文案。原微博 id 优先取 status.id，
-    // 拿不到时退回 analysis_extra 里的 mid。
-    val parentStatusId = status?.id ?: statusMid
-    val quoteCommentText =
-        parentStatusId?.let { parentId ->
-            buildString {
-                append("//@")
-                append(user?.name?.innerText.orEmpty())
-                append("：")
-                append(commentRichText.innerText)
-            }.takeIf { it.length > 3 }
-        }
-    val quoteCommentStatusKey =
-        parentStatusId?.let {
-            MicroBlogKey(id = it, host = accountKey.host)
-        }
-
     val post =
-        UiTimelineV2.Post(
+        Post(
             platformId = VVO_PLATFORM_ID,
             images = media.toImmutableList(),
             sensitive = false,
             contentWarning = null,
             user = user,
+            authorSubtitleInternal = regionName ?: source,
             references =
                 quote
                     .map {
@@ -449,28 +408,11 @@ private fun Comment.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
                     }.toImmutableList(),
             content =
                 UiTranslatableText(
-                    original = commentRichText,
+                    original = renderVVOText(text.orEmpty(), accountKey, sourceLanguages = persistentListOf("zh-CN")),
                 ),
             sourceLanguages = persistentListOf("zh-CN"),
             actions =
                 listOfNotNull(
-                    if (quoteCommentStatusKey != null) {
-                        ActionMenu.Item(
-                            icon = UiIcon.Quote,
-                            text = ActionMenu.Item.Text.Localized(ActionMenu.Item.Text.Localized.Type.Quote),
-                            clickEvent =
-                                ClickEvent.Deeplink(
-                                    DeeplinkRoute.Compose.Quote(
-                                        accountKey = accountKey,
-                                        statusKey = quoteCommentStatusKey,
-                                        text = quoteCommentText,
-                                    ),
-                                ),
-                            actionFamily = PostActionFamily.Quote,
-                        )
-                    } else {
-                        null
-                    },
                     statusMid?.let {
                         ActionMenu.Item(
                             icon = UiIcon.Comment,
@@ -553,17 +495,15 @@ private fun Comment.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
                     },
                 ),
             accountType = AccountType.Specific(accountKey),
-            // 评论的 IP 属地在 source 字段（形如「来自 北京」），只保留地名。
-            ipLocation = source?.let(::formatVvoCommentIpLocation),
-        )
+        ).bindMediaProxy()
     return if (quote.isNotEmpty()) {
-        UiTimelineV2.TimelinePostItem(
+        TimelinePostItem(
             post = post,
             presentation =
                 UiTimelineV2.PostPresentation(
                     quotes = quote,
                 ),
-        )
+        ).bindMediaProxy()
     } else {
         post
     }
@@ -616,7 +556,7 @@ internal fun User.render(accountKey: MicroBlogKey): UiProfile {
                     )
                 },
         platformId = VVO_PLATFORM_ID,
-        platformIcon = dev.dimension.flare.ui.model.UiIcon.Weibo,
+        platformIcon = UiIcon.Weibo.asType(),
         clickEvent =
             ClickEvent.Deeplink(
                 DeeplinkRoute.Profile.User(
@@ -624,35 +564,7 @@ internal fun User.render(accountKey: MicroBlogKey): UiProfile {
                     userKey = userKey,
                 ),
             ),
-    )
-}
-
-/**
- * 微博的 IP 属地：帖子在 region_name（形如「发布于 北京」），评论在 source（形如「来自 北京」）。
- * 界面上只展示地名本身（如「北京」），前缀一律去掉。
- */
-private fun formatVvoIpLocation(raw: String): String? = raw.toBareIpRegion()
-
-/**
- * 评论的 source 正常是「来自 北京」，但少数历史数据是客户端名（如「来自 iPhone客户端」），
- * 这类不是属地，直接丢弃。
- */
-private fun formatVvoCommentIpLocation(raw: String): String? {
-    val region = raw.toBareIpRegion() ?: return null
-    if (region.contains("客户端") || region.contains("微博") || region.contains("网页")) return null
-    return region
-}
-
-private fun String.toBareIpRegion(): String? {
-    var value = trim()
-    if (value.isEmpty()) return null
-    for (prefix in listOf("发布于", "来自", "IP属地：", "IP属地:", "IP 属地：", "IP 属地:")) {
-        if (value.startsWith(prefix)) {
-            value = value.removePrefix(prefix).trim()
-            break
-        }
-    }
-    return value.ifEmpty { null }
+    ).withProxy(ProxyRef.forAccount(accountKey))
 }
 
 internal fun renderVVOText(
@@ -661,11 +573,12 @@ internal fun renderVVOText(
     sourceLanguages: List<String> = emptyList(),
 ): UiRichText {
     val element = parseHtml(text, baseUri = "https://$vvoHost/")
+    val imageLinks = mutableMapOf<String, UiMedia.Image>()
     extractImagesFromLinks(element)
     element.childNodes().forEach {
-        replaceMentionAndHashtag(element, it, accountKey)
+        replaceMentionAndHashtag(element, it, accountKey, imageLinks)
     }
-    return element.toUi(sourceLanguages)
+    return element.toUi(sourceLanguages, imageLinks)
 }
 
 private fun extractImagesFromLinks(element: Element) {
@@ -686,6 +599,7 @@ private fun replaceMentionAndHashtag(
     element: Element,
     node: Node,
     accountKey: MicroBlogKey,
+    imageLinks: MutableMap<String, UiMedia.Image>,
 ) {
     if (node is Element) {
         val href = node.attribute("href")?.value
@@ -722,16 +636,9 @@ private fun replaceMentionAndHashtag(
                 val url =
                     href.removePrefix("https://$vvoHostShort/sinaurl?u=").decodeURLPart()
                 if (url.contains("sinaimg.cn/")) {
-                    node.attributes().put(
-                        "href",
-                        DeeplinkRoute.Media.Image(uri = url, previewUrl = null).toUri(),
-                    )
-                } else {
-                    node.attributes().put(
-                        "href",
-                        url,
-                    )
+                    imageLinks[url] = requireNotNull(url.toUiImage(proxy = ProxyRef.forAccount(accountKey)))
                 }
+                node.attributes().put("href", url)
             } else if (href.startsWith("/status/")) {
                 // open the post
                 node.attributes().put(
@@ -745,7 +652,7 @@ private fun replaceMentionAndHashtag(
             }
         }
         node.childNodes().forEach {
-            replaceMentionAndHashtag(element, it, accountKey)
+            replaceMentionAndHashtag(element, it, accountKey, imageLinks)
         }
     }
 }

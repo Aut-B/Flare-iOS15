@@ -6,6 +6,29 @@ import Drops
 import FlareAppleCore
 import FlareAppleUI
 
+/// Instagram 的 CDN 视频同样会校验 Referer / UA / 登录 cookie。
+/// 直接 `AVPlayer(url:)` 在 6s 上就是一直转圈，所以统一从这里造播放器。
+enum IGVideoFactory {
+    static func player(for urlString: String) -> AVPlayer? {
+        guard let url = URL(string: urlString) else { return nil }
+        var headers: [String: String] = [
+            "Referer": "https://www.instagram.com/",
+            "User-Agent": WebPlatformUserAgent.desktop,
+        ]
+        let cookie = InstagramStore.shared.cookie
+        if !cookie.isEmpty {
+            headers["Cookie"] = cookie
+        }
+        // 用字符串 key：`AVURLAssetHTTPHeaderFieldsKey` 在部分 SDK 里不是
+        // Swift 可见符号，直接引用会编译失败。
+        let asset = AVURLAsset(
+            url: url,
+            options: ["AVURLAssetHTTPHeaderFieldsKey": headers]
+        )
+        return AVPlayer(playerItem: AVPlayerItem(asset: asset))
+    }
+}
+
 /// 轻量提示。Instagram 的点赞 / 评论失败时用，免得整页弹一个 alert。
 enum IGToast {
     static func error(_ text: String) {
@@ -21,6 +44,8 @@ enum IGToast {
 struct IGVideoPlayer: View {
     let url: String
     var autoPlay: Bool = true
+    /// 全屏画廊里本身就是全屏，再放一个全屏键会和关闭键叠在一起。
+    var showsFullscreenButton: Bool = true
 
     @State private var player: AVPlayer?
     @State private var fullscreen = false
@@ -36,21 +61,23 @@ struct IGVideoPlayer: View {
             }
         }
         .overlay(alignment: .topLeading) {
-            Button {
-                // 全屏那个播放器会自己播，这里先停掉，免得两路声音叠在一起。
-                player?.pause()
-                fullscreen = true
-            } label: {
-                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(8)
-                    .background(Color.black.opacity(0.45))
-                    .clipShape(Circle())
+            if showsFullscreenButton {
+                Button {
+                    // 全屏那个播放器会自己播，这里先停掉，免得两路声音叠在一起。
+                    player?.pause()
+                    fullscreen = true
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(8)
+                        .background(Color.black.opacity(0.45))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(8)
+                .accessibilityLabel("全屏播放")
             }
-            .buttonStyle(.plain)
-            .padding(8)
-            .accessibilityLabel("全屏播放")
         }
         .fullScreenCover(isPresented: $fullscreen, onDismiss: {
             if autoPlay {
@@ -60,8 +87,7 @@ struct IGVideoPlayer: View {
             IGFullscreenVideo(url: url)
         }
         .onAppear {
-            guard player == nil, let target = URL(string: url) else { return }
-            let created = AVPlayer(url: target)
+            guard player == nil, let created = IGVideoFactory.player(for: url) else { return }
             player = created
             if autoPlay {
                 created.play()
@@ -108,8 +134,7 @@ private struct IGPlayerControllerView: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
-        if let target = URL(string: url) {
-            let player = AVPlayer(url: target)
+        if let player = IGVideoFactory.player(for: url) {
             controller.player = player
             player.play()
         }
@@ -121,19 +146,123 @@ private struct IGPlayerControllerView: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {}
 }
 
+/// Instagram 图片缓存。
+///
+/// `AsyncImage` 不认 Instagram 图床的 UA / Referer，也不做跨页面缓存：
+/// 6s 上表现就是「一直灰着 / 滚回来又重下」。这里和 `XhsImageCache` 一样
+/// 用 NSCache + URLCache，并带上桌面 UA、Referer 和登录 cookie。
+final class IGImageCache {
+    static let shared = IGImageCache()
+
+    private let cache = NSCache<NSString, UIImage>()
+    private var waiters: [String: [(UIImage?) -> Void]] = [:]
+    private let session: URLSession
+
+    private init() {
+        let configuration = URLSessionConfiguration.default
+        configuration.requestCachePolicy = .returnCacheDataElseLoad
+        configuration.timeoutIntervalForRequest = 20
+        configuration.urlCache = URLCache(
+            memoryCapacity: 24 * 1024 * 1024,
+            diskCapacity: 160 * 1024 * 1024,
+            diskPath: "ig-images"
+        )
+        session = URLSession(configuration: configuration)
+    }
+
+    func cached(_ url: String) -> UIImage? {
+        cache.object(forKey: url as NSString)
+    }
+
+    func image(for url: String, completion: @escaping (UIImage?) -> Void) {
+        if let cached = cache.object(forKey: url as NSString) {
+            completion(cached)
+            return
+        }
+        if waiters[url] != nil {
+            waiters[url]?.append(completion)
+            return
+        }
+        waiters[url] = [completion]
+        load(url, original: url, withCookie: true)
+    }
+
+    /// 先带 cookie 请求；失败后去掉 cookie 再试一次（图床是签名直链，
+    /// 有时带着网页 cookie 反而被拒）。
+    private func load(_ raw: String, original: String, withCookie: Bool) {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix("//") { value = "https:" + value }
+        if value.hasPrefix("http://") { value = "https://" + value.dropFirst(7) }
+        guard let target = URL(string: value) else {
+            finish(original, image: nil)
+            return
+        }
+        var request = URLRequest(url: target)
+        request.setValue(WebPlatformUserAgent.desktop, forHTTPHeaderField: "User-Agent")
+        request.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
+        request.setValue("image/webp,image/apng,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
+        if withCookie {
+            let cookie =
+                InstagramStore.shared.cookie
+                    .replacingOccurrences(of: "\r", with: " ")
+                    .replacingOccurrences(of: "\n", with: " ")
+            if !cookie.isEmpty {
+                request.setValue(cookie, forHTTPHeaderField: "Cookie")
+            }
+        }
+        session.dataTask(with: request) { [weak self] data, _, _ in
+            let image = data.flatMap { UIImage(data: $0) }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if image == nil, withCookie {
+                    self.load(raw, original: original, withCookie: false)
+                    return
+                }
+                self.finish(original, image: image)
+            }
+        }.resume()
+    }
+
+    private func finish(_ url: String, image: UIImage?) {
+        if let image = image {
+            cache.setObject(image, forKey: url as NSString)
+        }
+        let list = waiters[url] ?? []
+        waiters[url] = nil
+        for item in list {
+            item(image)
+        }
+    }
+}
+
 /// 全屏看图：左右翻页 + 双指放大 + 直接存原图。
 struct IGImageGalleryView: View {
-    let images: [String]
+    let items: [IGMediaItem]
     let caption: String
 
     @Environment(\.dismiss) private var dismiss
     @State private var index: Int
 
-    init(images: [String], startIndex: Int, caption: String = "") {
-        self.images = images
+    init(items: [IGMediaItem], startIndex: Int, caption: String = "") {
+        self.items = items
         self.caption = caption
-        let bounded = min(max(startIndex, 0), max(images.count - 1, 0))
+        let bounded = min(max(startIndex, 0), max(items.count - 1, 0))
         _index = State(initialValue: bounded)
+    }
+
+    init(images: [String], startIndex: Int, caption: String = "") {
+        self.init(
+            items: images.map {
+                IGMediaItem(id: $0, image: $0, video: nil, aspect: 1)
+            },
+            startIndex: startIndex,
+            caption: caption
+        )
+    }
+
+    private var currentItem: IGMediaItem? {
+        items.indices.contains(index) ? items[index] : nil
     }
 
     var body: some View {
@@ -141,9 +270,19 @@ struct IGImageGalleryView: View {
             Color.black.ignoresSafeArea()
 
             TabView(selection: $index) {
-                ForEach(Array(images.enumerated()), id: \.offset) { offset, url in
-                    IGZoomableImage(url: url)
-                        .tag(offset)
+                ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
+                    Group {
+                        if let video = item.video {
+                            IGVideoPlayer(
+                                url: video,
+                                autoPlay: false,
+                                showsFullscreenButton: false
+                            )
+                        } else {
+                            IGZoomableImage(url: item.image ?? "")
+                        }
+                    }
+                    .tag(offset)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
@@ -165,25 +304,27 @@ struct IGImageGalleryView: View {
 
                     Spacer(minLength: 0)
 
-                    Button {
-                        save()
-                    } label: {
-                        Image(systemName: "square.and.arrow.down")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(10)
-                            .background(Color.black.opacity(0.45))
-                            .clipShape(Circle())
+                    if currentItem?.image != nil {
+                        Button {
+                            save()
+                        } label: {
+                            Image(systemName: "square.and.arrow.down")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(10)
+                                .background(Color.black.opacity(0.45))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
 
                 Spacer(minLength: 0)
 
-                if images.count > 1 {
-                    Text("\(index + 1) / \(images.count)")
+                if items.count > 1 {
+                    Text("\(index + 1) / \(items.count)")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 10)
@@ -198,8 +339,8 @@ struct IGImageGalleryView: View {
     }
 
     private func save() {
-        guard images.indices.contains(index) else { return }
-        MediaSaver.shared.saveImages([MediaImageSaveItem(url: images[index])])
+        guard let image = currentItem?.image, !image.isEmpty else { return }
+        MediaSaver.shared.saveImages([MediaImageSaveItem(url: image)])
     }
 }
 
@@ -207,6 +348,8 @@ struct IGImageGalleryView: View {
 struct IGZoomableImage: View {
     let url: String
 
+    @State private var image: UIImage?
+    @State private var failed = false
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
@@ -214,61 +357,74 @@ struct IGZoomableImage: View {
 
     var body: some View {
         GeometryReader { geometry in
-            AsyncImage(url: URL(string: url)) { phase in
-                if let image = phase.image {
-                    image
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                        .scaleEffect(scale)
-                        .offset(offset)
-                        .gesture(
-                            MagnificationGesture()
-                                .onChanged { value in
-                                    scale = min(max(lastScale * value, 1), 4)
-                                }
-                                .onEnded { _ in
-                                    lastScale = scale
-                                    if scale <= 1 {
-                                        offset = .zero
-                                        lastOffset = .zero
-                                    }
-                                }
-                        )
-                        .simultaneousGesture(
-                            DragGesture()
-                                .onChanged { value in
-                                    guard scale > 1 else { return }
-                                    offset = CGSize(
-                                        width: lastOffset.width + value.translation.width,
-                                        height: lastOffset.height + value.translation.height
-                                    )
-                                }
-                                .onEnded { _ in
-                                    guard scale > 1 else { return }
-                                    lastOffset = offset
-                                }
-                        )
-                        .onTapGesture(count: 2) {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                scale = scale > 1 ? 1 : 2.5
+            if let image = image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .scaleEffect(scale)
+                    .offset(offset)
+                    .gesture(
+                        MagnificationGesture()
+                            .onChanged { value in
+                                scale = min(max(lastScale * value, 1), 4)
+                            }
+                            .onEnded { _ in
                                 lastScale = scale
-                                if scale == 1 {
+                                if scale <= 1 {
                                     offset = .zero
                                     lastOffset = .zero
                                 }
                             }
+                    )
+                    .simultaneousGesture(
+                        DragGesture()
+                            .onChanged { value in
+                                guard scale > 1 else { return }
+                                offset = CGSize(
+                                    width: lastOffset.width + value.translation.width,
+                                    height: lastOffset.height + value.translation.height
+                                )
+                            }
+                            .onEnded { _ in
+                                guard scale > 1 else { return }
+                                lastOffset = offset
+                            }
+                    )
+                    .onTapGesture(count: 2) {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            scale = scale > 1 ? 1 : 2.5
+                            lastScale = scale
+                            if scale == 1 {
+                                offset = .zero
+                                lastOffset = .zero
+                            }
                         }
-                } else if phase.error != nil {
-                    Image(systemName: "photo")
-                        .font(.system(size: 28))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                } else {
-                    ProgressView()
-                        .tint(.white)
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                }
+                    }
+            } else if failed {
+                Image(systemName: "photo")
+                    .font(.system(size: 28))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+            } else {
+                ProgressView()
+                    .tint(.white)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+            }
+        }
+        .onAppear(perform: load)
+    }
+
+    private func load() {
+        if let cached = IGImageCache.shared.cached(url) {
+            image = cached
+            return
+        }
+        IGImageCache.shared.image(for: url) { loaded in
+            if let loaded = loaded {
+                image = loaded
+            } else {
+                failed = true
             }
         }
     }

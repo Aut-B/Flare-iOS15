@@ -17,24 +17,29 @@ struct MediaViewerScreen: View {
     @Environment(\.timelineAppearance.postActionStyle) private var postActionStyle
     @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let medias: [any UiMedia]
     let initialIndex: Int
     let preview: String?
+    let previewProxy: ProxyRef
     let previewAspectRatio: CGFloat?
     let previewIsImage: Bool
     let shareContext: MediaViewerShareContext?
     let post: UiTimelineV2.Post?
     let quotes: [UiTimelineV2.Post]
 
+    @StateObject private var imageTranslation: KotlinPresenter<ImageTranslationPresenterState>
     @State private var selectedIndex: Int
     @State private var isPlaying: Bool = true
     @State private var videoState: VideoState = .idle
     @State private var playbackTimes: [String: CMTime] = [:]
     @State private var opacity: CGFloat = 1
-    @State private var dismissOffset: CGFloat = 0
+    @State private var dismissTransform = MediaViewerDismissTransform()
     @State private var isDismissing = false
     @State private var showData = true
+    @State private var chromeVisible = true
+    @State private var lastChromeTapAt = Date.distantPast
     @State private var protectInitialPagerSelection: Bool
     @State private var didApplyInitialSelection = false
     @State private var isPreparingShare = false
@@ -50,6 +55,7 @@ struct MediaViewerScreen: View {
         medias: [any UiMedia],
         initialIndex: Int,
         preview: String?,
+        previewProxy: ProxyRef = ProxyRef.Global.shared,
         previewAspectRatio: CGFloat? = nil,
         previewIsImage: Bool = true,
         shareContext: MediaViewerShareContext? = nil,
@@ -59,13 +65,16 @@ struct MediaViewerScreen: View {
         self.medias = medias
         self.initialIndex = initialIndex
         self.preview = preview
+        self.previewProxy = previewProxy
         self.previewAspectRatio = previewAspectRatio
         self.previewIsImage = previewIsImage
         self.shareContext = shareContext
         self.post = post
+        self._imageTranslation = State(initialValue: KotlinPresenter(presenter: ImageTranslationPresenter(accountType: post?.accountType)))
         self.quotes = quotes
         self.selectedIndex = max(0, initialIndex)
         self.protectInitialPagerSelection = initialIndex > 0
+        MediaViewerZoomContentInset.install()
     }
 
     var body: some View {
@@ -79,16 +88,16 @@ struct MediaViewerScreen: View {
                                     switch MediaViewerImageLayoutPolicy.previewLayout(isImage: previewIsImage) {
                                     case .adaptiveImage:
                                         AdaptiveKFImage(
-                                            data: preview,
+                                            data: UiMediaImage(url: preview, proxy: previewProxy),
                                             placeholder: nil,
                                             mediaAspectRatio: previewAspectRatio
                                         )
                                     case .aspectFit:
-                                        NetworkImage(data: preview)
+                                        NetworkImage(data: UiMediaImage(url: preview, proxy: previewProxy))
                                             .scaledToFit()
                                     }
                                 }
-                                .modifier(MediaViewerDismissOffset(offset: $dismissOffset))
+                                .modifier(MediaViewerDismissEffect(transform: $dismissTransform))
                             }
                             .zoomable(min: 1, max: 5, doubleTapGesture: .scale(2))
                         } else {
@@ -99,7 +108,17 @@ struct MediaViewerScreen: View {
                     // LazyPager 1.2.1 only supports downward dismissal.
                     ZStack(alignment: .bottom) {
                         LazyPager(data: medias, page: pagerSelectedIndex) { media in
+                            let translating = imageTranslation.state.item(media: media).loading
                             mediaContent(media)
+                                .blur(radius: translating ? 8 : 0)
+                                .overlay {
+                                    if translating {
+                                        ProgressView()
+                                            .accessibilityLabel(Text("Translating image", bundle: .main))
+                                            .transition(.opacity)
+                                    }
+                                }
+                                .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: translating)
                                 .accessibilityLabel(Text(verbatim: media.accessibleDescription))
                                 .contextMenu {
                                     // Video long presses are reserved for temporary double-speed playback.
@@ -121,17 +140,16 @@ struct MediaViewerScreen: View {
                                                 UIPasteboard.general.string = media.url
                                             }
                                         )
+                                        if imageTranslation.state.canRegenerate(media: media) {
+                                            Button { imageTranslation.state.regenerate(media: media) } label: {
+                                                Text("Translate again", bundle: .main)
+                                            }
+                                        }
                                     }
                                 }
                                 // Move the content, keeping the pager's safe-area insets stable.
-                                .modifier(MediaViewerDismissOffset(offset: $dismissOffset))
+                                .modifier(MediaViewerDismissEffect(transform: $dismissTransform))
                         }
-                        .onTap {
-                            withAnimation {
-                                showData.toggle()
-                            }
-                        }
-                        .onDoubleTap {}
                         .onDrag {
                             protectInitialPagerSelection = false
                         }
@@ -156,7 +174,7 @@ struct MediaViewerScreen: View {
                                 .offset(
                                     y: MediaViewerDismissGesturePolicy.verticalOffset(
                                         for: .bottomOverlay,
-                                        translationY: dismissOffset
+                                        translationY: dismissTransform.offset.height
                                     )
                                 )
                                 .opacity(opacity)
@@ -168,9 +186,11 @@ struct MediaViewerScreen: View {
 
             MediaViewerDismissGestureHost(
                 enabled: !postExpanded,
+                chromeTapEnabled: !medias.isEmpty,
                 onChanged: updateDismissGesture,
                 onEnded: endDismissGesture,
-                onCancelled: cancelDismissGesture
+                onCancelled: cancelDismissGesture,
+                onChromeTap: toggleChrome
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea()
@@ -182,13 +202,17 @@ struct MediaViewerScreen: View {
             // 触摸遂透传给下方 LazyPager；窗口级关闭手势不受影响。
             .allowsHitTesting(false)
 
-            if showData {
-                topOverlay
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .opacity(opacity)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .allowsHitTesting(!isDismissing)
-                    .zIndex(3)
+            // The clear view only gives the bar a top edge. The bar itself slides by its height.
+            ZStack(alignment: .top) {
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
+                if chromeVisible {
+                    topOverlay
+                        .opacity(opacity)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .allowsHitTesting(!isDismissing)
+                }
             }
             if showPostCard, let post {
                 compactPostCard(post)
@@ -196,7 +220,7 @@ struct MediaViewerScreen: View {
                     .offset(
                         y: MediaViewerDismissGesturePolicy.verticalOffset(
                             for: .bottomOverlay,
-                            translationY: dismissOffset
+                            translationY: dismissTransform.offset.height
                         )
                     )
                     .opacity(opacity)
@@ -223,6 +247,7 @@ struct MediaViewerScreen: View {
             MediaOrientationController.setLandscape(newValue)
         }
         .onDisappear {
+            imageTranslation.presenter.close()
             if isLandscapeViewing {
                 MediaOrientationController.setLandscape(false)
             }
@@ -230,6 +255,7 @@ struct MediaViewerScreen: View {
         .sheet(isPresented: $postExpanded) {
             postDetailSheet
         }
+        .imageTranslationErrorAlert(state: imageTranslation.state, media: selectedMedia, enabled: !postExpanded)
         .background(.black.opacity(opacity))
         .background(ClearFullScreenBackground())
         .flareNavigationBarHidden()
@@ -237,15 +263,17 @@ struct MediaViewerScreen: View {
 
     @ViewBuilder
     private func mediaContent(_ media: any UiMedia) -> some View {
-        switch onEnum(of: media) {
+        switch onEnum(of: imageTranslation.state.displayed(media: media)) {
         case .ugoira(let animation):
             UgoiraPlayer(media: animation, active: selectedMedia?.url == animation.url)
         case .image(let image):
             AdaptiveKFImage(
-                data: image.url,
-                placeholder: image.previewUrl,
-                customHeader: image.customHeaders,
-                mediaAspectRatio: CGFloat(image.aspectRatio)
+                data: image,
+                placeholder: image.preview,
+                mediaAspectRatio: CGFloat(image.aspectRatio),
+                onImageFailure: {
+                    if image.url != media.url { imageTranslation.state.imageFailed(media: media, url: image.url) }
+                }
             )
         case .video(let video):
             if medias.indices.contains(selectedIndex), medias[selectedIndex].url == video.url {
@@ -257,11 +285,12 @@ struct MediaViewerScreen: View {
                     playbackRate: $playbackRate
                 )
             } else {
-                NetworkImage(data: video.thumbnailUrl, customHeader: video.customHeaders)
+                NetworkImage(data: video.preview)
                     .scaledToFit()
             }
         case .gif(let gif):
-            NetworkImage(data: gif.url, placeholder: gif.previewUrl, customHeader: gif.customHeaders)
+            NetworkImage(data: gif, placeholder: gif.preview)
+                .originalImage()
                 .scaledToFit()
         case .audio:
             EmptyView()
@@ -291,6 +320,17 @@ struct MediaViewerScreen: View {
                     .accessibilityLabel(Text(verbatim: isLandscapeViewing ? "Exit landscape view" : "Landscape view"))
 
                     if let selectedMedia, case .image = onEnum(of: selectedMedia) {
+                        if imageTranslation.state.canToggle(media: selectedMedia) {
+                            let translationItem = imageTranslation.state.item(media: selectedMedia)
+                            topOverlayButton {
+                                imageTranslation.state.toggle(media: selectedMedia)
+                            } label: {
+                                Image(systemName: "translate")
+                            }
+                            .disabled(translationItem.loading)
+                            .accessibilityLabel(Text(translationItem.showingTranslated ? "Show original" : translationItem.translated != nil ? "Show translation" : "Translate image", bundle: .main))
+                            .accessibilityValue(Text(translationItem.loading ? "Translating image" : "", bundle: .main))
+                        }
                         topOverlayButton {
                             saveMedia(selectedMedia)
                         } label: {
@@ -353,7 +393,7 @@ struct MediaViewerScreen: View {
 
     private var bottomOverlayContent: some View {
         VStack(spacing: 8) {
-            if showData, !isLandscapeViewing, medias.count > 1 {
+            if (chromeVisible || showData), !isLandscapeViewing, medias.count > 1 {
                 if post == nil, medias.count > 10 {
                     MediaPageSlider(count: medias.count, page: $selectedIndex)
                 } else {
@@ -435,6 +475,22 @@ struct MediaViewerScreen: View {
         .background(Color.black.opacity(0.72))
         .onTapGesture {
             postExpanded = true
+        }
+    }
+
+    private func toggleChrome() {
+        let now = Date()
+        // The second tap of a double tap scales the image. Dropping it keeps the
+        // chrome from hiding and showing again now that the toggle is immediate.
+        guard now.timeIntervalSince(lastChromeTapAt) >= 0.25 else { return }
+        lastChromeTapAt = now
+
+        let next = !chromeVisible
+        // The card carries the bottom controls, so it has to commit in the same
+        // transaction; deferring it used to start the card 320 ms after the bar.
+        withAnimation(.easeInOut(duration: 0.2)) {
+            chromeVisible = next
+            showData = next
         }
     }
 
@@ -520,9 +576,9 @@ struct MediaViewerScreen: View {
 
     private var shouldShowBottomOverlay: Bool {
         if selectedMediaIsVideo {
-            return showData
+            return chromeVisible
         }
-        return showData && !isLandscapeViewing && (medias.count > 1)
+        return chromeVisible && !isLandscapeViewing && (medias.count > 1)
     }
 
     private var mediaSignature: String {
@@ -548,25 +604,25 @@ struct MediaViewerScreen: View {
         return min(max(index, 0), count - 1)
     }
 
-    private func updateDismissGesture(translationY: CGFloat, containerHeight: CGFloat) {
+    private func updateDismissGesture(_ pan: MediaViewerDismissPan) {
         guard !isDismissing else { return }
-        dismissOffset = translationY
+        dismissTransform = MediaViewerDismissGesturePolicy.transform(
+            translation: pan.translation,
+            startLocation: pan.startLocation,
+            containerSize: pan.containerSize
+        )
         opacity = 1 - MediaViewerDismissGesturePolicy.progress(
-            translationY: translationY,
-            containerHeight: containerHeight
+            translationY: pan.translation.y,
+            containerHeight: pan.containerSize.height
         )
     }
 
-    private func endDismissGesture(
-        translationY: CGFloat,
-        velocityY: CGFloat,
-        containerHeight: CGFloat
-    ) -> Bool {
+    private func endDismissGesture(_ pan: MediaViewerDismissPan) -> Bool {
         guard !isDismissing else { return true }
         guard MediaViewerDismissGesturePolicy.shouldDismiss(
-            translationY: translationY,
-            velocityY: velocityY,
-            containerHeight: containerHeight
+            translationY: pan.translation.y,
+            velocityY: pan.velocity.y,
+            containerHeight: pan.containerSize.height
         ) else {
             cancelDismissGesture()
             return false
@@ -574,11 +630,11 @@ struct MediaViewerScreen: View {
 
         isDismissing = true
         let direction = MediaViewerDismissGesturePolicy.dismissDirection(
-            translationY: translationY,
-            velocityY: velocityY
+            translationY: pan.translation.y,
+            velocityY: pan.velocity.y
         )
         withAnimation(.linear(duration: 0.2)) {
-            dismissOffset = direction * containerHeight
+            dismissTransform.offset.height = direction * pan.containerSize.height
             opacity = 0
         }
         // iOS 15 回退：withAnimation(_:completionCriteria:_:completion:) 是 iOS 17 API，
@@ -595,8 +651,10 @@ struct MediaViewerScreen: View {
 
     private func cancelDismissGesture() {
         guard !isDismissing else { return }
-        withAnimation(.interactiveSpring(response: 0.25, dampingFraction: 0.9)) {
-            dismissOffset = 0
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+            // Keep the anchor so the media springs back along the path it was dragged.
+            dismissTransform.offset = .zero
+            dismissTransform.scale = 1
             opacity = 1
         }
     }
@@ -607,38 +665,35 @@ struct MediaViewerScreen: View {
         showsSaveResult: Bool = true,
         completion: (@Sendable (Bool) -> Void)? = nil
     ) {
+        let media = imageTranslation.state.displayed(media: media)
         switch onEnum(of: media) {
         case .ugoira(let animation):
             MediaSaver.shared.saveUgoira(animation, fileName: fileName(for: media), showsSaveResult: showsSaveResult, completion: completion)
         case .image(let image):
             MediaSaver.shared.saveImage(
-                url: image.url,
-                customHeaders: image.customHeaders,
+                media: image,
                 showsDownloadStarted: showsDownloadStarted,
                 showsSaveResult: showsSaveResult,
                 completion: completion
             )
         case .gif(let gif):
             MediaSaver.shared.saveImage(
-                url: gif.url,
-                customHeaders: gif.customHeaders,
+                media: gif,
                 showsDownloadStarted: showsDownloadStarted,
                 showsSaveResult: showsSaveResult,
                 completion: completion
             )
         case .video(let video):
             MediaSaver.shared.saveVideo(
-                url: video.urlForDownload,
-                customHeaders: video.customHeaders,
+                media: video,
                 showsDownloadStarted: showsDownloadStarted,
                 showsSaveResult: showsSaveResult,
                 completion: completion
             )
         case .audio(let audio):
             MediaSaver.shared.saveFile(
-                url: audio.url,
+                media: audio,
                 fileName: fileName(for: media),
-                customHeaders: audio.customHeaders,
                 showsDownloadStarted: showsDownloadStarted,
                 showsSaveResult: showsSaveResult,
                 completion: completion
@@ -696,13 +751,21 @@ struct MediaViewerScreen: View {
     }
 
     private func shareSelectedImage(_ media: any UiMedia) {
+        let displayed = imageTranslation.state.displayed(media: media)
+        if let url = URL(string: displayed.url), url.isFileURL {
+            guard let file = try? ImageTranslationExportFile.prepare(url), let presenter = topViewController() else { return }
+            let controller = UIActivityViewController(activityItems: [file], applicationActivities: nil)
+            controller.popoverPresentationController?.sourceView = presenter.view
+            controller.popoverPresentationController?.sourceRect = presenter.view.bounds
+            presenter.present(controller, animated: true)
+            return
+        }
         guard !isPreparingShare,
               case .image(let image) = onEnum(of: media) else {
             return
         }
 
         let sourceURL = image.url
-        let customHeaders = image.customHeaders
         isPreparingShare = true
         Task {
             defer {
@@ -710,8 +773,7 @@ struct MediaViewerScreen: View {
             }
             do {
                 let fileURL = try await OriginalImageShareFile.make(
-                    url: sourceURL,
-                    customHeaders: customHeaders,
+                    media: image,
                     statusKey: shareContext?.statusKey,
                     userHandle: shareContext?.userHandle,
                     onPreparingNeeded: {
@@ -757,21 +819,20 @@ struct MediaViewerScreen: View {
     }
 }
 
-private struct MediaViewerDismissOffset: ViewModifier {
-    // LazyPager hosts pages in separate SwiftUI trees. Reading the binding here
-    // preserves the animation transaction when the dismiss gesture settles.
-    @Binding var offset: CGFloat
-
-    func body(content: Content) -> some View {
-        content.offset(y: MediaViewerDismissGesturePolicy.verticalOffset(for: .media, translationY: offset))
-    }
+private struct MediaViewerDismissPan {
+    let translation: CGPoint
+    let velocity: CGPoint
+    let startLocation: CGPoint
+    let containerSize: CGSize
 }
 
 private struct MediaViewerDismissGestureHost: UIViewRepresentable {
     let enabled: Bool
-    let onChanged: (CGFloat, CGFloat) -> Void
-    let onEnded: (CGFloat, CGFloat, CGFloat) -> Bool
+    let chromeTapEnabled: Bool
+    let onChanged: (MediaViewerDismissPan) -> Void
+    let onEnded: (MediaViewerDismissPan) -> Bool
     let onCancelled: () -> Void
+    let onChromeTap: () -> Void
 
     func makeUIView(context: Context) -> MediaViewerDismissGestureHostView {
         let view = MediaViewerDismissGestureHostView()
@@ -784,9 +845,11 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
 
     func updateUIView(_ uiView: MediaViewerDismissGestureHostView, context: Context) {
         context.coordinator.enabled = enabled
+        context.coordinator.chromeTapEnabled = chromeTapEnabled
         context.coordinator.onChanged = onChanged
         context.coordinator.onEnded = onEnded
         context.coordinator.onCancelled = onCancelled
+        context.coordinator.onChromeTap = onChromeTap
         DispatchQueue.main.async {
             context.coordinator.installGesture(from: uiView)
         }
@@ -803,15 +866,18 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
         Coordinator(
             onChanged: onChanged,
             onEnded: onEnded,
-            onCancelled: onCancelled
+            onCancelled: onCancelled,
+            onChromeTap: onChromeTap
         )
     }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var enabled = true
-        var onChanged: (CGFloat, CGFloat) -> Void
-        var onEnded: (CGFloat, CGFloat, CGFloat) -> Bool
+        var chromeTapEnabled = true
+        var onChanged: (MediaViewerDismissPan) -> Void
+        var onEnded: (MediaViewerDismissPan) -> Bool
         var onCancelled: () -> Void
+        var onChromeTap: () -> Void
 
         private weak var sourceView: UIView?
         private weak var installedWindow: UIWindow?
@@ -819,15 +885,20 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
         private weak var touchedVerticalScrollView: UIScrollView?
         private var touchedZoomScrollViewInitialOffset: CGPoint?
         private var panRecognizer: UIPanGestureRecognizer?
+        private var chromeTapRecognizer: UITapGestureRecognizer?
+        private var panStartLocation: CGPoint = .zero
+        private var panDidBegin = false
 
         init(
-            onChanged: @escaping (CGFloat, CGFloat) -> Void,
-            onEnded: @escaping (CGFloat, CGFloat, CGFloat) -> Bool,
-            onCancelled: @escaping () -> Void
+            onChanged: @escaping (MediaViewerDismissPan) -> Void,
+            onEnded: @escaping (MediaViewerDismissPan) -> Bool,
+            onCancelled: @escaping () -> Void,
+            onChromeTap: @escaping () -> Void
         ) {
             self.onChanged = onChanged
             self.onEnded = onEnded
             self.onCancelled = onCancelled
+            self.onChromeTap = onChromeTap
         }
 
         func installGesture(from view: UIView?) {
@@ -836,7 +907,7 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
             uninstallGesture()
             sourceView = view
 
-            let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+            let recognizer = MediaViewerDismissPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
             recognizer.maximumNumberOfTouches = 1
             recognizer.cancelsTouchesInView = false
             // iOS 15 回退：默认 delaysTouchesEnded=true 会让窗口级手势在判定期间
@@ -847,39 +918,72 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
             recognizer.delegate = self
             window.addGestureRecognizer(recognizer)
 
+            let tap = UITapGestureRecognizer(target: self, action: #selector(handleChromeTap(_:)))
+            tap.cancelsTouchesInView = false
+            tap.delaysTouchesEnded = false
+            tap.delegate = self
+            window.addGestureRecognizer(tap)
+
             installedWindow = window
             panRecognizer = recognizer
+            chromeTapRecognizer = tap
         }
 
         func uninstallGesture() {
             if let panRecognizer {
                 installedWindow?.removeGestureRecognizer(panRecognizer)
             }
+            if let chromeTapRecognizer {
+                installedWindow?.removeGestureRecognizer(chromeTapRecognizer)
+            }
             installedWindow = nil
             touchedZoomScrollView = nil
             touchedVerticalScrollView = nil
             touchedZoomScrollViewInitialOffset = nil
             panRecognizer = nil
+            chromeTapRecognizer = nil
+        }
+
+        @objc private func handleChromeTap(_ recognizer: UITapGestureRecognizer) {
+            guard chromeTapEnabled, recognizer.state == .ended else { return }
+            onChromeTap()
         }
 
         @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
             guard let sourceView else { return }
-            let translationY = recognizer.translation(in: sourceView).y
-            let containerHeight = sourceView.bounds.height
+            let translation = recognizer.translation(in: sourceView)
+            if recognizer.state == .began {
+                // Recognition starts after some movement; anchor where the finger first landed.
+                let location = recognizer.location(in: sourceView)
+                panStartLocation = CGPoint(x: location.x - translation.x, y: location.y - translation.y)
+            }
+            let pan = MediaViewerDismissPan(
+                translation: translation,
+                velocity: recognizer.velocity(in: sourceView),
+                startLocation: panStartLocation,
+                containerSize: sourceView.bounds.size
+            )
 
             switch recognizer.state {
             case .began, .changed:
-                onChanged(translationY, containerHeight)
+                panDidBegin = true
+                holdTouchedZoomScrollPosition()
+                onChanged(pan)
             case .ended:
-                let didDismiss = onEnded(
-                    translationY,
-                    recognizer.velocity(in: sourceView).y,
-                    containerHeight
-                )
+                let didDismiss = onEnded(pan)
                 finishTrackingTouchedScrollView(didDismiss: didDismiss)
+                panDidBegin = false
             case .cancelled, .failed:
-                onCancelled()
-                finishTrackingTouchedScrollView(didDismiss: false)
+                // Yielding before the pan begins must not spring the image or pin the scroll view.
+                if panDidBegin {
+                    onCancelled()
+                    finishTrackingTouchedScrollView(didDismiss: false)
+                } else {
+                    touchedZoomScrollView = nil
+                    touchedVerticalScrollView = nil
+                    touchedZoomScrollViewInitialOffset = nil
+                }
+                panDidBegin = false
             default:
                 break
             }
@@ -895,27 +999,31 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
         }
 
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            guard enabled, gestureRecognizer === panRecognizer,
+            guard gestureRecognizer === panRecognizer else { return true }
+            guard enabled,
                   let panRecognizer,
                   let sourceView else { return false }
             let velocity = panRecognizer.velocity(in: sourceView)
+            let translation = panRecognizer.translation(in: sourceView)
             guard MediaViewerDismissGesturePolicy.shouldBegin(
                 velocityX: velocity.x,
                 velocityY: velocity.y,
                 zoomScale: touchedZoomScrollView?.zoomScale,
-                minimumZoomScale: touchedZoomScrollView?.minimumZoomScale
+                minimumZoomScale: touchedZoomScrollView?.minimumZoomScale,
+                translationX: translation.x,
+                translationY: translation.y
             ) else {
                 return false
             }
             return MediaViewerDismissGesturePolicy.shouldBeginDismissPan(
                 in: touchedVerticalScrollView,
-                velocityY: velocity.y
+                velocityY: velocity.y,
+                translationY: translation.y
             )
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-            guard enabled, let sourceView,
-                  let window = installedWindow else { return false }
+            guard let sourceView, let window = installedWindow else { return false }
             // The recognizer is installed on UIWindow, so screen bounds alone also include sheets.
             guard let viewer = owningViewController(of: sourceView)?.view,
                   let touchedView = touch.view,
@@ -926,6 +1034,10 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
             guard sourceView.convert(sourceView.bounds, to: window).contains(point) else {
                 return false
             }
+            if gestureRecognizer === chromeTapRecognizer {
+                return chromeTapEnabled && MediaViewerDismissGesturePolicy.touchesPager(touchedView)
+            }
+            guard enabled else { return false }
             let touchedScrollViews = ancestorScrollViews(from: touch.view)
             touchedZoomScrollView = touchedScrollViews.first {
                 $0.maximumZoomScale > $0.minimumZoomScale
@@ -937,16 +1049,39 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
             return true
         }
 
-    func gestureRecognizer(
-        _ gestureRecognizer: UIGestureRecognizer,
-        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
-    ) -> Bool {
-        // 与查看器内部手势（PagerView 翻页、捏合、点按、ZoomableView 纵向 pan）同时识别。
-        // 窗口级关闭手势仅通过 shouldBegin（严格竖向）约束自身，不抢占内容手势。
-        // 覆盖视图已通过 SwiftUI .allowsHitTesting(false) 彻底透传触摸，
-        // 因此内容手势可正常接收触摸并工作。
-        true
-    }
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            guard gestureRecognizer === panRecognizer else { return false }
+            let velocityY = panRecognizer?.velocity(in: sourceView).y ?? 0
+            let translationY = panRecognizer?.translation(in: sourceView).y ?? 0
+            if MediaViewerDismissGesturePolicy.shouldTakePriority(
+                over: otherGestureRecognizer,
+                velocityY: velocityY,
+                translationY: translationY
+            ) {
+                return true
+            }
+            guard let sourceView,
+                  let viewer = owningViewController(of: sourceView)?.view else {
+                return false
+            }
+            return MediaViewerDismissGesturePolicy.delaysPanOutsideViewer(
+                otherGestureRecognizer,
+                viewer: viewer
+            )
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            MediaViewerDismissGesturePolicy.allowsSimultaneousRecognition(
+                chromeTap: gestureRecognizer === chromeTapRecognizer,
+                otherIsTap: otherGestureRecognizer is UITapGestureRecognizer
+            )
+        }
 
         private func ancestorScrollViews(from view: UIView?) -> [UIScrollView] {
             var scrollViews: [UIScrollView] = []
@@ -960,22 +1095,33 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
             return scrollViews
         }
 
+        private func holdTouchedZoomScrollPosition() {
+            guard let touchedZoomScrollView, let touchedZoomScrollViewInitialOffset else { return }
+            guard touchedZoomScrollView.contentOffset != touchedZoomScrollViewInitialOffset else { return }
+            touchedZoomScrollView.setContentOffset(touchedZoomScrollViewInitialOffset, animated: false)
+        }
+
         private func finishTrackingTouchedScrollView(didDismiss: Bool) {
-            if MediaViewerDismissGesturePolicy.shouldRestoreTouchedScrollPosition(
-                didDismiss: didDismiss
-            ),
-               let touchedZoomScrollView,
-               let touchedZoomScrollViewInitialOffset {
-                DispatchQueue.main.async { [weak touchedZoomScrollView] in
-                    touchedZoomScrollView?.setContentOffset(
-                        touchedZoomScrollViewInitialOffset,
-                        animated: false
-                    )
-                }
+            if MediaViewerDismissGesturePolicy.shouldHoldTouchedScrollPosition(didDismiss: didDismiss) {
+                holdTouchedZoomScrollPosition()
             }
             touchedZoomScrollView = nil
             touchedVerticalScrollView = nil
             touchedZoomScrollViewInitialOffset = nil
+        }
+    }
+}
+
+private final class MediaViewerDismissPanGestureRecognizer: UIPanGestureRecognizer {
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        super.touchesMoved(touches, with: event)
+        guard state == .possible, let view else { return }
+        let translation = translation(in: view)
+        if MediaViewerDismissGesturePolicy.shouldYieldToHorizontalPan(
+            translationX: translation.x,
+            translationY: translation.y
+        ) {
+            state = .failed
         }
     }
 }

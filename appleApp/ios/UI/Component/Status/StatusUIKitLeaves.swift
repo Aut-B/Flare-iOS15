@@ -1,13 +1,14 @@
 import UIKit
 import Kingfisher
+import FlareAppleUI
 import KotlinSharedUI
 import FlareAppleCore
 
 // MARK: - AvatarUIView
 // Mirrors AvatarView.swift (NetworkImage + clipShape by avatarShape).
 final class AvatarUIView: UIView {
-    private let imageView: UIImageView = {
-        let v = UIImageView()
+    private let imageView: NetworkImageView = {
+        let v = NetworkImageView()
         v.contentMode = .scaleAspectFill
         v.clipsToBounds = true
         v.backgroundColor = .secondarySystemBackground
@@ -24,26 +25,8 @@ final class AvatarUIView: UIView {
     }
     required init(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
-    func set(url: String?, customHeaders: [String: String]? = nil) {
-        imageView.kf.cancelDownloadTask()
-        imageView.image = nil
-        if let url = url.flatMap(URL.init(string:)) {
-            imageView.kf.setImage(
-                with: url,
-                options: [
-                    .transition(.fade(0.25)),
-                    .cacheOriginalImage,
-                    .backgroundDecode,
-                    .requestModifier(AnyModifier { request in
-                        var request = request
-                        customHeaders?.forEach { key, value in
-                            request.setValue(value, forHTTPHeaderField: key)
-                        }
-                        return request
-                    }),
-                ]
-            )
-        }
+    func set(media: UiMedia?) {
+        imageView.setImage(media: media)
     }
 
     override func layoutSubviews() {
@@ -143,12 +126,12 @@ final class StatusVisibilityImageView: UIImageView {
         case .channel:
             icon = .tv
             accessibilityLabel = String(localized: "channel_title")
-        case .private:
+        case .friends:
+            icon = .heart
+            accessibilityLabel = String(localized: "visibility_friends")
+        case .selfOnly:
             icon = .lock
-            accessibilityLabel = String(localized: "status_visibility_private")
-        case .mutual:
-            icon = .users
-            accessibilityLabel = String(localized: "status_visibility_mutual")
+            accessibilityLabel = String(localized: "visibility_self")
         default:
             icon = .globe
             accessibilityLabel = String(localized: "status_visibility_public")
@@ -332,10 +315,10 @@ final class UserOnelineUIView: UIView, ManualLayoutMeasurable, TimelineHeightPro
                       height: preferredSingleLineHeight(width: width))
     }
 
-    func configure(data: UiProfile, trailing: UIView?, onClicked: (() -> Void)?) {
-        avatar.set(url: data.avatar?.url, customHeaders: data.avatar?.customHeaders)
+    func configure(data: UiProfile, subtitle: String? = nil, trailing: UIView?, onClicked: (() -> Void)?) {
+        avatar.set(media: data.avatar)
         name.text = data.name
-        handleLabel.text = data.handle.canonical
+        handleLabel.text = subtitle ?? data.handle.display
         if trailingView !== trailing {
             trailingView?.removeFromSuperview()
             trailingView = trailing
@@ -349,7 +332,7 @@ final class UserOnelineUIView: UIView, ManualLayoutMeasurable, TimelineHeightPro
         }
         onTapped = onClicked
         avatar.isAccessibilityElement = showsAvatar && onClicked != nil
-        avatar.accessibilityLabel = openProfileAccessibilityLabel(handle: data.handle.canonical)
+        avatar.accessibilityLabel = openProfileAccessibilityLabel(handle: data.handle.display)
         invalidateIntrinsicContentSize()
         setNeedsLayout()
     }
@@ -486,10 +469,10 @@ final class UserCompatUIView: UIStackView {
     }
     required init(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
-    func configure(data: UiProfile, trailing: UIView?, onClicked: (() -> Void)?) {
-        avatar.set(url: data.avatar?.url, customHeaders: data.avatar?.customHeaders)
+    func configure(data: UiProfile, subtitle: String? = nil, trailing: UIView?, onClicked: (() -> Void)?) {
+        avatar.set(media: data.avatar)
         name.text = data.name
-        handleLabel.text = data.handle.canonical
+        handleLabel.text = subtitle ?? data.handle.display
         if let trailing = trailing {
             trailing.setContentHuggingPriority(.required, for: .horizontal)
             trailing.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -499,87 +482,10 @@ final class UserCompatUIView: UIStackView {
         }
         onTapped = onClicked
         avatar.isAccessibilityElement = onClicked != nil
-        avatar.accessibilityLabel = openProfileAccessibilityLabel(handle: data.handle.canonical)
+        avatar.accessibilityLabel = openProfileAccessibilityLabel(handle: data.handle.display)
     }
 
     @objc private func onTapFired() { onTapped?() }
-}
-
-// MARK: - PlatformIpColumnView
-// 右上角平台图标 + 其下方的 IP 属地（微博的 region_name / 评论的 source），
-// 只显示地名本身（如「北京」），不显示「发布于」这类前缀。
-private final class PlatformIpColumnView: UIView {
-    let logo = UIImageView()
-    let ip = UILabel()
-
-    private static let logoSize: CGFloat = 14
-    private static let spacing: CGFloat = 0
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        logo.contentMode = .scaleAspectFit
-        logo.tintColor = .secondaryLabel
-        logo.setContentHuggingPriority(.required, for: .horizontal)
-        logo.setContentCompressionResistancePriority(.required, for: .horizontal)
-        ip.font = .preferredFont(forTextStyle: .caption2)
-        ip.textColor = .secondaryLabel
-        ip.adjustsFontForContentSizeCategory = true
-        ip.textAlignment = .right
-        ip.numberOfLines = 1
-        ip.isHidden = true
-        addSubview(logo)
-        addSubview(ip)
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
-
-    var showsIp: Bool {
-        !ip.isHidden && !(ip.text?.isEmpty ?? true)
-    }
-
-    func measuredSize() -> CGSize {
-        var width: CGFloat = logo.isHidden ? 0 : Self.logoSize
-        var height: CGFloat = logo.isHidden ? 0 : Self.logoSize
-        if showsIp {
-            let ipSize = ip.sizeThatFits(
-                CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-            )
-            width = max(width, ceil(ipSize.width))
-            if height > 0 {
-                height += Self.spacing
-            }
-            height += ceil(ipSize.height)
-        }
-        return CGSize(width: ceil(width), height: ceil(height))
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let width = bounds.width
-        var y: CGFloat = 0
-        if logo.isHidden {
-            logo.frame = .zero
-        } else {
-            logo.frame = CGRect(
-                x: (width - Self.logoSize) / 2,
-                y: 0,
-                width: Self.logoSize,
-                height: Self.logoSize
-            ).integral
-            y = Self.logoSize + Self.spacing
-        }
-        if showsIp {
-            let ipHeight = max(bounds.height - y, 0)
-            ip.frame = CGRect(
-                x: 0,
-                y: y,
-                width: width,
-                height: ipHeight
-            ).integral
-        } else {
-            ip.frame = .zero
-        }
-    }
 }
 
 // MARK: - StatusTopEndView
@@ -588,9 +494,8 @@ private final class PlatformIpColumnView: UIView {
 final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProviding {
     private let visibility = StatusVisibilityImageView()
     private let translation = TranslateStatusStateView()
-    private let platformColumn = PlatformIpColumnView()
-    private var platformLogo: UIImageView { platformColumn.logo }
-    private var ipLabel: UILabel { platformColumn.ip }
+    private let platformLogo = UIImageView()
+    private var platformIcon: IconType?
     private let time = DateTimeUILabel()
     private let insightButton = UIButton(type: .system)
     private let editButton = UIButton(type: .system)
@@ -598,6 +503,31 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
     private var onInsightTapped: (() -> Void)?
     private var onEditTapped: (() -> Void)?
     private var onManageTapped: (() -> Void)?
+
+    private func setPlatformIcon(_ icon: IconType?) {
+        guard platformIcon != icon else { return }
+        if platformIcon is IconType.Url { platformLogo.cancelMediaLoad() }
+        platformIcon = icon
+        guard let icon else {
+            platformLogo.image = nil
+            return
+        }
+        switch onEnum(of: icon) {
+        case .material(let material):
+            platformLogo.image = UIImage(fontAwesome: material.icon.fontAwesomeIcon)
+        case .url(let url):
+            let scale = traitCollection.displayScale
+            platformLogo.setMedia(
+                UiMediaImage(url: url.url, proxy: ProxyRef.Global.shared),
+                options: [
+                    .processor(ImageDownsamplingProcessor(pixelSize: CGSize(width: 14 * scale, height: 14 * scale), fillsBounds: false)),
+                    .scaleFactor(scale), .backgroundDecode, .asyncCacheTypeCheck,
+                ]
+            )
+        default:
+            platformLogo.image = nil
+        }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -652,7 +582,7 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         manageButton.isHidden = true
         addSubview(visibility)
         addSubview(translation)
-        addSubview(platformColumn)
+        addSubview(platformLogo)
         addSubview(time)
         addSubview(insightButton)
         addSubview(editButton)
@@ -688,8 +618,8 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         if !translation.isHidden {
             height = max(height, 16)
         }
-        if !platformColumn.isHidden {
-            height = max(height, platformColumn.measuredSize().height)
+        if !platformLogo.isHidden {
+            height = max(height, 14)
         }
         if !time.isHidden {
             height = max(height, time.font?.lineHeight ?? 0)
@@ -748,22 +678,18 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         }
 
         if showPlatformLogo {
-            platformColumn.isHidden = false
             platformLogo.isHidden = false
-            platformLogo.image = UIImage(fontAwesome: post.platformIcon.fontAwesomeIcon)
+            setPlatformIcon(post.platformIcon)
             platformLogo.isAccessibilityElement = true
             platformLogo.accessibilityLabel = String(
                 format: String(localized: "status_platform", defaultValue: "Platform: %@"),
                 post.platformId
             )
-            applyIpLocation(post.ipLocation)
         } else {
+            setPlatformIcon(nil)
             platformLogo.isHidden = true
             platformLogo.isAccessibilityElement = false
             platformLogo.accessibilityLabel = nil
-            // 关掉平台图标时，IP 属地仍然单独显示，不跟着一起消失。
-            applyIpLocation(post.ipLocation)
-            platformColumn.isHidden = !platformColumn.showsIp
         }
 
         if isDetail {
@@ -781,21 +707,6 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         setNeedsLayout()
     }
 
-    /// IP 属地只显示地名（如「北京」），前缀已在 Kotlin 侧去掉。
-    private func applyIpLocation(_ value: String?) {
-        let ip = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if ip.isEmpty {
-            ipLabel.isHidden = true
-            ipLabel.text = nil
-            ipLabel.isAccessibilityElement = false
-            ipLabel.accessibilityLabel = nil
-        } else {
-            ipLabel.isHidden = false
-            ipLabel.text = ip
-            ipLabel.isAccessibilityElement = true
-            ipLabel.accessibilityLabel = String(localized: "status_ip_location") + ": " + ip
-        }
-    }
 
     @discardableResult
     private func layout(width: CGFloat, assignFrames: Bool) -> CGFloat {
@@ -831,8 +742,8 @@ final class StatusTopEndView: UIView, ManualLayoutMeasurable, TimelineHeightProv
         if !translation.isHidden {
             items.append((translation, translation.sizeThatFits(.zero)))
         }
-        if !platformColumn.isHidden {
-            items.append((platformColumn, platformColumn.measuredSize()))
+        if !platformLogo.isHidden {
+            items.append((platformLogo, CGSize(width: 14, height: 14)))
         }
         if !time.isHidden {
             let size = time.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude))

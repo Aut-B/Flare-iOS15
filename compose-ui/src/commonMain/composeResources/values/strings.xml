@@ -87,12 +87,6 @@
     <string name="mastodon_visibility_unlisted_description">Anyone can see this post, but it won\'t appear on the public timeline</string>
     <string name="mastodon_visibility_private_description">Only followers can see this post</string>
     <string name="mastodon_visibility_direct_description">Only mentioned users can see this post</string>
-    <string name="status_visibility_private">Only me</string>
-    <string name="status_visibility_mutual">Mutual followers</string>
-    <string name="status_visibility_fans">Followers only</string>
-    <string name="status_visibility_private_description">Only you can see this post</string>
-    <string name="status_visibility_mutual_description">Only users you follow and who follow you back can see this post</string>
-    <string name="status_visibility_fans_description">Only your followers can see this post</string>
 
     <string name="settings_notifications_title">Notifications</string>
     <string name="settings_notifications_subtitle">Customize how Flare notifies you</string>
@@ -587,6 +581,14 @@
     <string name="timeline_load_missing_posts">Load missing posts</string>
     <string name="timeline_loading_missing_posts">Loading missing posts…</string>
     <string name="timeline_retry_missing_posts">Could not load posts. Tap to retry.</string>
+    <string name="share_replies_empty">No replies available</string>
+    <string name="share_replies_failed">Unable to load replies. Your selection is saved.</string>
+    <string name="share_replies_more">Load more replies</string>
+    <string name="share_replies_retry">Retry</string>
+    <string name="share_replies_children">Load replies to this comment</string>
+
     <string name="weibo_friends_circle_title">Friends Circle</string>
     <string name="weibo_private_following_title">Private Following</string>
+    <string name="visibility_friends">Friends circle</string>
+    <string name="visibility_self">Only me</string>
 </resources>

@@ -8,14 +8,23 @@ import dev.dimension.flare.data.datasource.microblog.PostActionLayoutConfig
 import dev.dimension.flare.data.datasource.microblog.PostActionLayoutHelpers
 import dev.dimension.flare.data.datasource.microblog.PostActionPlacement
 import dev.dimension.flare.data.datasource.microblog.applyPostActionLayout
+import dev.dimension.flare.data.model.ProxyRef
+import dev.dimension.flare.data.network.vvo.model.Comment
 import dev.dimension.flare.data.network.vvo.model.Large
 import dev.dimension.flare.data.network.vvo.model.Status
 import dev.dimension.flare.data.network.vvo.model.StatusPic
 import dev.dimension.flare.data.network.vvo.model.User
 import dev.dimension.flare.model.MicroBlogKey
+import dev.dimension.flare.model.vvoHostShort
 import dev.dimension.flare.ui.humanizer.PlatformFormatter
 import dev.dimension.flare.ui.model.UiMedia
 import dev.dimension.flare.ui.model.UiTimelineV2
+import dev.dimension.flare.ui.model.contentPostOrNull
+import dev.dimension.flare.ui.model.withProxy
+import dev.dimension.flare.ui.render.RenderContent
+import dev.dimension.flare.ui.render.RenderRun
+import dev.dimension.flare.ui.render.UiRichText
+import dev.dimension.flare.ui.route.DeeplinkRoute
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -29,6 +38,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Instant
 
@@ -45,6 +55,76 @@ class VVORenderTest {
     @AfterTest
     fun tearDown() {
         stopKoin()
+    }
+
+    @Test
+    fun statusSubtitlePrefersRegionThenSourceWithoutChangingTheAuthor() {
+        val user = createUser(1L, "author")
+        val status = createStatus("status-region", user, "content")
+        val expectedUser = user.render(accountKey)
+        val cases =
+            listOf(
+                Triple("发布于 北京", "微博网页版", "发布于 北京"),
+                Triple(null, "微博网页版", "微博网页版"),
+                Triple(null, null, expectedUser.handle.canonical),
+                Triple("", "微博网页版", ""),
+            )
+
+        cases.forEach { (region, source, expected) ->
+            val post = assertIs<UiTimelineV2.Post>(status.copy(regionName = region, source = source).render(accountKey))
+            assertEquals(expected, post.authorSubtitle)
+            assertEquals(expectedUser, post.user)
+        }
+    }
+
+    @Test
+    fun commentSubtitleDecodesRegionAndFallsBackToSource() {
+        val user = createUser(1L, "commenter")
+        val expectedUser = user.render(accountKey)
+        val cases =
+            listOf(
+                """{"id":"comment","region_name":"发布于 北京","source":"来自广东"}""" to "发布于 北京",
+                """{"id":"comment","region_name":null,"source":"来自广东"}""" to "来自广东",
+                """{"id":"comment","source":"来自广东"}""" to "来自广东",
+                """{"id":"comment"}""" to expectedUser.handle.canonical,
+                """{"id":"comment","region_name":"","source":"来自广东"}""" to "",
+            )
+
+        cases.forEach { (json, expected) ->
+            val comment = JSON.decodeFromString<Comment>(json).copy(user = user)
+            val post = assertIs<UiTimelineV2.Post>(comment.render(accountKey))
+            assertEquals(expected, post.authorSubtitle)
+            assertEquals(expectedUser, post.user)
+        }
+    }
+
+    @Test
+    fun quotesAndChildCommentsKeepTheirOwnSubtitle() {
+        val user = createUser(1L, "author")
+        val quoted = createStatus("quoted", user, "quoted").copy(regionName = "发布于 上海")
+        val status = createStatus("root", user, "root", retweetedStatus = quoted).copy(regionName = "发布于 北京")
+        val rendered = assertIs<UiTimelineV2.TimelinePostItem>(status.render(accountKey))
+
+        assertEquals("发布于 北京", rendered.post.authorSubtitle)
+        assertEquals(
+            "发布于 上海",
+            rendered.presentation.quotes
+                .single()
+                .authorSubtitle,
+        )
+
+        val comment =
+            JSON.decodeFromString<Comment>(
+                """{"id":"root","region_name":"发布于 北京","comments":[{"id":"child","region_name":"发布于 上海","source":"来自广东"}]}""",
+            )
+        val renderedComment = assertIs<UiTimelineV2.TimelinePostItem>(comment.render(accountKey))
+        assertEquals("发布于 北京", renderedComment.contentPostOrNull()?.authorSubtitle)
+        assertEquals(
+            "发布于 上海",
+            renderedComment.presentation.quotes
+                .single()
+                .authorSubtitle,
+        )
     }
 
     @Test
@@ -104,55 +184,78 @@ class VVORenderTest {
     }
 
     @Test
-    fun livePhotoWithPlaybackUrlIsRenderedAsVideo() {
+    fun livePhotosKeepPlaybackUrlsInMixedMediaAndReposts() {
+        val playbackUrl =
+            "https://video.example.test/media/play?livephoto=https%3A%2F%2Fmedia.example.test%2Fmotion.mov"
+        val signedUrl = "https://media.example.test/clip.mov?Expires=123&ssig=test%2Bsignature&KID=video"
         val status =
-            createStatus(
-                id = "status-live-photo",
-                user = createUser(1L, "live-photo-user"),
-                text = "live photo",
-                pics =
-                    JSON.encodeToJsonElement(
-                        ListSerializer(StatusPic.serializer()),
-                        listOf(
-                            StatusPic(
-                                pid = "pic-live-photo",
-                                type = "livephoto",
-                                videoSrc = "https://video.example.test/live.mov",
-                                url = "https://media.example.test/preview.jpg",
-                            ),
-                        ),
-                    ),
+            JSON.decodeFromString<Status>(
+                """
+                {
+                    "id": "status-live-photos",
+                    "pics": [
+                        {"url": "https://media.example.test/first.jpg"},
+                        {
+                            "type": "livephoto",
+                            "url": "https://media.example.test/live-preview.jpg",
+                            "large": {
+                                "url": "https://media.example.test/live-original.jpg",
+                                "geo": {"width": 600, "height": 800}
+                            },
+                            "videoSrc": "$playbackUrl"
+                        },
+                        {"url": "https://media.example.test/last.jpg"},
+                        {
+                            "type": "livephoto",
+                            "url": "https://media.example.test/direct-preview.jpg",
+                            "videoSrc": "$signedUrl"
+                        }
+                    ],
+                    "live_photo": ["$playbackUrl", "$signedUrl"]
+                }
+                """.trimIndent(),
             )
 
-        val rendered = assertIs<UiTimelineV2.Post>(status.render(accountKey))
-        val media = assertIs<UiMedia.Video>(rendered.images.single())
-        assertEquals("https://video.example.test/live.mov", media.url)
-        assertEquals("https://media.example.test/preview.jpg", media.thumbnailUrl)
+        val post = assertIs<UiTimelineV2.Post>(status.render(accountKey))
+        assertEquals(4, post.images.size)
+        assertEquals("https://media.example.test/first.jpg", assertIs<UiMedia.Image>(post.images[0]).url)
+        val livePhoto = assertIs<UiMedia.Video>(post.images[1])
+        assertEquals(playbackUrl, livePhoto.url)
+        assertEquals("https://media.example.test/live-preview.jpg", livePhoto.thumbnailUrl)
+        assertEquals(600f, livePhoto.width)
+        assertEquals(800f, livePhoto.height)
+        assertEquals(ProxyRef.Account(accountKey), livePhoto.proxy)
+        assertEquals("https://media.example.test/last.jpg", assertIs<UiMedia.Image>(post.images[2]).url)
+        assertEquals(signedUrl, assertIs<UiMedia.Video>(post.images[3]).url)
+
+        val repost =
+            createStatus("repost", createUser(1L, "reposter"), "repost", retweetedStatus = status)
+                .render(accountKey)
+        val quote = assertIs<UiTimelineV2.TimelinePostItem>(repost).presentation.quotes.single()
+        assertEquals(post.images, quote.images)
     }
 
     @Test
-    fun livePhotoWithoutPlaybackUrlRemainsImage() {
+    fun livePhotosWithoutVideoUrlsRemainImages() {
+        val pics =
+            listOf(null, "", "  ").mapIndexed { index, videoUrl ->
+                StatusPic(
+                    url = "https://media.example.test/still-$index.jpg",
+                    type = "livephoto",
+                    videoSrc = videoUrl,
+                )
+            }
         val status =
-            createStatus(
-                id = "status-live-photo-still",
-                user = createUser(1L, "live-photo-user"),
-                text = "live photo",
-                pics =
-                    JSON.encodeToJsonElement(
-                        ListSerializer(StatusPic.serializer()),
-                        listOf(
-                            StatusPic(
-                                pid = "pic-live-photo-still",
-                                type = "livephoto",
-                                videoSrc = "  ",
-                                url = "https://media.example.test/still.jpg",
-                            ),
-                        ),
-                    ),
+            Status(
+                id = "status-without-live-videos",
+                pics = JSON.encodeToJsonElement(ListSerializer(StatusPic.serializer()), pics),
             )
 
-        val rendered = assertIs<UiTimelineV2.Post>(status.render(accountKey))
-        assertIs<UiMedia.Image>(rendered.images.single())
+        val post = assertIs<UiTimelineV2.Post>(status.render(accountKey))
+        assertEquals(3, post.images.size)
+        post.images.forEachIndexed { index, media ->
+            assertEquals("https://media.example.test/still-$index.jpg", assertIs<UiMedia.Image>(media).url)
+        }
     }
 
     @Test
@@ -182,6 +285,22 @@ class VVORenderTest {
     }
 
     @Test
+    fun imageLinksDoNotPersistProcessSignatures() {
+        val text =
+            renderVVOText(
+                """<a href="https://$vvoHostShort/sinaurl?u=https://wx1.sinaimg.cn/large/photo.jpg">查看图片</a>""",
+                accountKey,
+            )
+        val restored = JSON.decodeFromString<UiRichText>(JSON.encodeToString(text)).withProxy(ProxyRef.Account(accountKey))
+        val block = assertIs<RenderContent.Text>(restored.renderRuns.single())
+        val run = assertIs<RenderRun.Text>(block.runs.single())
+        assertNull(run.style.link, "Process-signed links must not be persisted in rich text")
+        val route = assertIs<DeeplinkRoute.Media.Image>(DeeplinkRoute.parse(requireNotNull(run.style.resolvedLink)))
+        assertEquals("https://wx1.sinaimg.cn/large/photo.jpg", route.uri)
+        assertEquals(ProxyRef.Account(accountKey), route.proxy)
+    }
+
+    @Test
     fun quoteFollowsRepostLayoutAfterClearingMoreMenu() {
         val status =
             createStatus(
@@ -195,7 +314,6 @@ class VVORenderTest {
         for (family in config.overflow.toList()) {
             config = PostActionLayoutHelpers.moveTo(config, family, PostActionPlacement.Hidden)
         }
-        config = PostActionLayoutHelpers.moveTo(config, PostActionFamily.Screenshot, PostActionPlacement.Hidden)
         assertTrue(config.overflow.isEmpty())
 
         val actions = post.actions.applyPostActionLayout(config)

@@ -92,6 +92,7 @@ private val Message.successTitle
         when (this) {
             Message.Compose -> R.string.compose_notification_success
             Message.LoginExpired -> R.string.notification_login_expired
+            Message.Plugin -> R.string.plugin_operation_failed
         }
 
 private val Message.errorTitle
@@ -99,4 +100,5 @@ private val Message.errorTitle
         when (this) {
             Message.Compose -> R.string.compose_notification_error
             Message.LoginExpired -> R.string.notification_login_expired
+            Message.Plugin -> R.string.plugin_operation_failed
         }

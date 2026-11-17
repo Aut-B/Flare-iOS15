@@ -31,7 +31,8 @@ struct XhsNote: Identifiable, Hashable {
     let title: String
     let desc: String
     let user: XhsUser
-    let images: [String]
+    /// 详情接口偶尔只回一张图，这里允许把首页卡片上更完整的图片列表补回来。
+    var images: [String]
     var likedCount: String
     let isVideo: Bool
     /// 首图宽高比（宽 / 高），用来定版式高度。
@@ -231,7 +232,10 @@ enum XhsJSON {
             images: images.filter { !$0.isEmpty },
             likedCount: countText(interact?["liked_count"]),
             isVideo: isVideo,
-            aspect: min(max(aspect, 0.5), 2.0),
+            // 详情页要按原比例展示长图（截图、竖版海报），下限不能卡在 0.5，
+            // 否则 1:5 的长图会被裁成 1:2 的「短图」。瀑布流另有 0.4 的裁剪，
+            // 不受这里影响。
+            aspect: min(max(aspect, 0.28), 2.0),
             videoURL: isVideo ? videoURL(card["video"]) : nil,
             liked: bool(interact?["liked"]),
             collected: bool(interact?["collected"]),

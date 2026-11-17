@@ -20,7 +20,10 @@ struct XhsNoteView: View {
     @State private var page = 0
     @State private var viewer: XhsViewerTarget?
     @State private var player: AVPlayer?
+    @State private var videoError: String?
     @State private var showShare = false
+    @State private var profileTarget: XhsUserTarget?
+    @State private var detailFailed = false
 
     @State private var comments: [XhsComment] = []
     @State private var commentCursor: String?
@@ -80,6 +83,18 @@ struct XhsNoteView: View {
                         .padding(.top, 10)
                 }
 
+                if detailFailed {
+                    Button {
+                        openWebNote()
+                    } label: {
+                        Label("网页版打开这条笔记", systemImage: "safari")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 10)
+                }
+
                 Divider().padding(.top, 14)
                 commentSection
             }
@@ -105,6 +120,12 @@ struct XhsNoteView: View {
         }
         .fullScreenCover(item: $viewer) { target in
             XhsImageViewer(images: current.images, index: target.index)
+        }
+        .sheet(item: $profileTarget) { target in
+            NavigationView {
+                XhsUserView(userId: target.id, name: target.name, showsClose: true)
+            }
+            .navigationViewStyle(.stack)
         }
         .onDisappear {
             player?.pause()
@@ -133,14 +154,57 @@ struct XhsNoteView: View {
 
     @ViewBuilder
     private var media: some View {
-        if let urlString = videoURL, let url = URL(string: urlString) {
-            VideoPlayer(player: player)
-                .aspectRatio(9.0 / 16.0, contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .background(Color.black)
-                .onAppear {
-                    if player == nil { player = AVPlayer(url: url) }
+        if let urlString = videoURL {
+            ZStack(alignment: .bottomTrailing) {
+                VideoPlayer(player: player)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if let videoError = videoError {
+                    VStack(spacing: 8) {
+                        Text(videoError)
+                            .font(.caption)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.white.opacity(0.85))
+                        Button("在网页版播放") { openWebNote() }
+                            .font(.caption)
+                            .buttonStyle(.bordered)
+                            .tint(.white)
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black.opacity(0.55))
+                } else {
+                    Button("网页版") { openWebNote() }
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.black.opacity(0.45))
+                        .clipShape(Capsule())
+                        .padding(10)
                 }
+            }
+            .aspectRatio(9.0 / 16.0, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .background(Color.black)
+            .onAppear {
+                if player == nil {
+                    player = makeVideoPlayer(urlString)
+                }
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(
+                    for: .AVPlayerItemFailedToPlayToEndTime
+                )
+            ) { note in
+                guard
+                    let failed = note.object as? AVPlayerItem,
+                    failed === player?.currentItem
+                else { return }
+                videoError = "视频加载失败，可点「在网页版播放」"
+            }
+            .onDisappear {
+                player?.pause()
+            }
         } else if current.images.isEmpty {
             Rectangle()
                 .fill(Color(.tertiarySystemFill))
@@ -153,9 +217,6 @@ struct XhsNoteView: View {
                 .clipped()
                 .contentShape(Rectangle())
                 .onTapGesture { viewer = XhsViewerTarget(index: 0) }
-                .overlay(alignment: .bottomTrailing) {
-                    if current.images.count > 1 { pageBadge }
-                }
         } else {
             TabView(selection: $page) {
                 ForEach(Array(current.images.enumerated()), id: \.offset) { index, url in
@@ -186,13 +247,45 @@ struct XhsNoteView: View {
     private var mediaAspect: CGFloat {
         let value = current.aspect
         if value <= 0 { return 0.75 }
-        return min(max(value, 0.5), 1.8)
+        // 长图按原比例铺开，靠外层 ScrollView 往下滑；不要为了「一屏放得下」
+        // 把它裁掉，用户看到的就是「我贴的是长图，这里只有一张短图」。
+        return min(max(value, 0.28), 1.8)
     }
 
     private var mediaHeight: CGFloat {
         let width = UIScreen.main.bounds.width
         let height = width / mediaAspect
-        return min(max(height, 240), 560)
+        // 多图横滑时每张都按这个高度居中显示；长图给到 3 屏高左右，
+        // 仍然可以用外层 ScrollView 继续往下看正文。
+        return min(max(height, 240), UIScreen.main.bounds.height * 2.2)
+    }
+
+    private func makeVideoPlayer(_ urlString: String) -> AVPlayer? {
+        guard let url = URL(string: urlString) else {
+            videoError = "视频地址无效"
+            return nil
+        }
+        let cookie = XhsStore.shared.cookie
+        var headers: [String: String] = [
+            "Referer": "https://www.xiaohongshu.com/",
+            "User-Agent": XhsSigner.desktopUserAgent,
+        ]
+        if !cookie.isEmpty {
+            headers["Cookie"] = cookie
+        }
+        let asset = AVURLAsset(
+            url: url,
+            // 用字符串 key：`AVURLAssetHTTPHeaderFieldsKey` 在部分 SDK 里
+            // 并没有暴露成 Swift 可见符号，直接引用会编译失败。
+            options: ["AVURLAssetHTTPHeaderFieldsKey": headers]
+        )
+        videoError = nil
+        return AVPlayer(playerItem: AVPlayerItem(asset: asset))
+    }
+
+    private func openWebNote() {
+        guard let url = URL(string: current.webURL) else { return }
+        UIApplication.shared.open(url)
     }
 
     // MARK: - 作者
@@ -212,9 +305,9 @@ struct XhsNoteView: View {
         if current.user.id.isEmpty {
             authorRow
         } else {
-            NavigationLink(
-                destination: XhsUserView(userId: current.user.id, name: current.user.name)
-            ) {
+            Button {
+                profileTarget = XhsUserTarget(id: current.user.id, name: current.user.name)
+            } label: {
                 authorRow
             }
             .buttonStyle(.plain)
@@ -322,7 +415,9 @@ struct XhsNoteView: View {
                     .padding(.horizontal, 14)
             } else {
                 ForEach(comments) { comment in
-                    XhsCommentRow(comment: comment)
+                    XhsCommentRow(comment: comment) { target in
+                        profileTarget = target
+                    }
                         .padding(.horizontal, 14)
                 }
                 if hasMoreComments {
@@ -450,19 +545,58 @@ struct XhsNoteView: View {
     private func loadDetail() async {
         guard !detailRequested else { return }
         detailRequested = true
-        do {
-            let full = try await XhsService.shared.note(id: note.id, xsecToken: note.xsecToken)
-            await MainActor.run {
-                detail = full
-                // 详情里的图可能比首页卡片多：页码越界会直接显示空白。
-                if page >= full.images.count { page = 0 }
-                liked = full.liked || liked
-                collected = full.collected || collected
-                if !full.likedCount.isEmpty { likeCount = full.likedCount }
-                if !full.commentCount.isEmpty { commentCount = full.commentCount }
+
+        // 同一个 xsec_token 在「笔记页来源」和「首页卡片来源」之间不一定通用：
+        // 只试 pc_feed 的话，从关注流 / 搜索进来的笔记经常整条详情被拒，
+        // 表现就是「只有封面一张图、正文和评论都出不来」。
+        var candidates: [(token: String, source: String)] = [
+            (note.xsecToken, "pc_note"),
+            (note.xsecToken, "pc_feed"),
+        ]
+        if !note.xsecToken.isEmpty {
+            // 令牌过期时，不带令牌再试一次：公开笔记有时仍然能拿到。
+            candidates.append(("", "pc_note"))
+        }
+
+        for candidate in candidates {
+            guard
+                let full = try? await XhsService.shared.note(
+                    id: note.id,
+                    xsecToken: candidate.token,
+                    xsecSource: candidate.source,
+                    timeout: 10,
+                    attempts: 1
+                )
+            else {
+                continue
             }
-        } catch {
-            // 详情接口被风控挡了不影响看：首页流里已经带了图片和正文。
+            await MainActor.run {
+                var merged = full
+                // 详情接口偶尔只回一张图；首页卡片已经有多图时不要倒退。
+                if merged.images.count < note.images.count {
+                    merged.images = note.images
+                }
+                detail = merged
+                // 详情里的图可能比首页卡片多：页码越界会直接显示空白。
+                if page >= merged.images.count { page = 0 }
+                liked = merged.liked || liked
+                collected = merged.collected || collected
+                if !merged.likedCount.isEmpty { likeCount = merged.likedCount }
+                if !merged.commentCount.isEmpty { commentCount = merged.commentCount }
+                detailFailed = false
+                // 评论是和详情并行发的，第一次多半还拿着卡片上的旧 token。
+                // 详情回来时 token 可能已经刷新，这里自动重试一次，
+                // 用户不用再手点「重新加载评论」。
+                if commentsError != nil, !commentsLoading {
+                    loadComments(reset: true)
+                }
+            }
+            return
+        }
+
+        // 三个来源全挂：给出「网页版打开」兜底，而不是留一个只剩封面的空页面。
+        await MainActor.run {
+            detailFailed = true
         }
     }
 
@@ -684,15 +818,15 @@ struct XhsZoomableImage: View {
 
 struct XhsCommentRow: View {
     let comment: XhsComment
+    /// 点评论者 / 回复者 / 头像时回调，由详情页统一用 sheet 打开用户主页。
+    /// 以前这里用 NavigationLink，评论一多就会把详情页的导航栈撑爆。
+    let onUser: (XhsUserTarget) -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             avatar
             VStack(alignment: .leading, spacing: 3) {
-                Text(comment.user.name.isEmpty ? "小红书用户" : comment.user.name)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                nameLink
                 Text(comment.content)
                     .font(.system(size: 14))
                     .fixedSize(horizontal: false, vertical: true)
@@ -715,9 +849,7 @@ struct XhsCommentRow: View {
                 }
                 ForEach(Array(comment.subComments.prefix(2))) { sub in
                     HStack(alignment: .top, spacing: 6) {
-                        Text(sub.user.name + "：")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(.secondary)
+                        subNameLink(sub)
                         Text(sub.content)
                             .font(.system(size: 12))
                             .fixedSize(horizontal: false, vertical: true)
@@ -729,14 +861,55 @@ struct XhsCommentRow: View {
         }
     }
 
+    private var nameText: some View {
+        Text(comment.user.name.isEmpty ? "小红书用户" : comment.user.name)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+    }
+
+    @ViewBuilder
+    private var nameLink: some View {
+        if comment.user.id.isEmpty {
+            nameText
+        } else {
+            Button {
+                onUser(XhsUserTarget(id: comment.user.id, name: comment.user.name))
+            } label: {
+                nameText
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func subNameText(_ sub: XhsComment) -> Text {
+        Text(sub.user.name + "：")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundColor(.secondary)
+    }
+
+    @ViewBuilder
+    private func subNameLink(_ sub: XhsComment) -> some View {
+        if sub.user.id.isEmpty {
+            subNameText(sub)
+        } else {
+            Button {
+                onUser(XhsUserTarget(id: sub.user.id, name: sub.user.name))
+            } label: {
+                subNameText(sub)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
     @ViewBuilder
     private var avatar: some View {
         if comment.user.id.isEmpty {
             avatarImage
         } else {
-            NavigationLink(
-                destination: XhsUserView(userId: comment.user.id, name: comment.user.name)
-            ) {
+            Button {
+                onUser(XhsUserTarget(id: comment.user.id, name: comment.user.name))
+            } label: {
                 avatarImage
             }
             .buttonStyle(.plain)

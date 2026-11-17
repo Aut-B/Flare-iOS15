@@ -11,7 +11,7 @@ public struct SearchScreen: View {
     private let onAskAi: (String?) -> Void
     // iOS 15 回退：@StateObject 的 wrappedValue 只读，无法整体替换 presenter（换查询时要换实例），
     // 所以用 @State 存，再把 objectWillChange 手动转成一次视图失效。
-    @State private var searchPresenter: KotlinPresenter<SearchState>
+    @StateObject private var searchPresenter: KotlinPresenter<SearchState>
     @State private var searchPresenterTick = 0
     @StateObject private var searchHistoryPresenter: KotlinPresenter<SearchHistoryState>
     @State private var searchText: String
@@ -53,6 +53,7 @@ public struct SearchScreen: View {
     private var content: some View {
         scrollingContent
         .searchListRowSpacing(2)
+        .flareTextBackground(.flareSystemBackground)
         .listStyle(.plain)
         .refreshable {
             try? await searchPresenter.state.refreshSuspend()
@@ -165,6 +166,7 @@ public struct SearchScreen: View {
                     .padding(.horizontal)
                     .listRowSeparator(.hidden)
                     .listRowInsets(.init(top: 0, leading: 0, bottom: 0, trailing: 0))
+                    .flareTextBackground(.flareSystemGroupedBackground)
                     .listRowBackground(Color.clear)
                 }
                 Section {
@@ -213,21 +215,21 @@ public struct SearchScreen: View {
                                 }
                             })) {
                                 Label {
-                                    Text(account.handle.canonical)
+                                    Text(account.handle.display)
                                 } icon: {
-                                    AvatarView(data: account.avatar?.url, customHeader: account.avatar?.customHeaders)
+                                    AvatarView(data: account.avatar)
                                 }
                             }
                         }
                     } label: {
                         if let selectedAccount = searchPresenter.state.selectedAccount {
                             HStack {
-                                AvatarView(data: selectedAccount.avatar?.url, customHeader: selectedAccount.avatar?.customHeaders)
+                                AvatarView(data: selectedAccount.avatar)
                                     .frame(width: 24, height: 24)
-                                Text(selectedAccount.handle.canonical)
+                                Text(selectedAccount.handle.display)
                                 Image(fontAwesome: .chevronDown)
                                     .font(.footnote)
-                                    .foregroundStyle(.secondary)
+                                    .flareSecondaryText()
                                     .scaledToFit()
                                     .frame(width: 8, height: 8)
                                     .padding(8)
@@ -268,13 +270,12 @@ public struct SearchScreen: View {
                         isMacAccountPopoverPresented.toggle()
                     } label: {
                         AvatarView(
-                            data: toolbarAccount.avatar?.url,
-                            customHeader: toolbarAccount.avatar?.customHeaders
+                            data: toolbarAccount.avatar
                         )
                         .frame(width: 26, height: 26)
                     }
                     .buttonStyle(.plain)
-                    .help(toolbarAccount.handle.canonical)
+                    .help(toolbarAccount.handle.display)
                     .popover(isPresented: $isMacAccountPopoverPresented, arrowEdge: .top) {
                         MacSearchAccountPopover(
                             accounts: accounts,
@@ -341,10 +342,10 @@ private struct MacSearchAccountRow: View {
                     .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                     .frame(width: 18)
 
-                AvatarView(data: account.avatar?.url, customHeader: account.avatar?.customHeaders)
+                AvatarView(data: account.avatar)
                     .frame(width: 28, height: 28)
 
-                Text(account.handle.canonical)
+                Text(account.handle.display)
                     .lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -353,6 +354,7 @@ private struct MacSearchAccountRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .flareTextBackground(isSelected ? nil : .flareSystemGroupedBackground)
         .background(
             isSelected ? Color.accentColor.opacity(0.12) : Color.clear,
             in: RoundedRectangle(cornerRadius: 6, style: .continuous)

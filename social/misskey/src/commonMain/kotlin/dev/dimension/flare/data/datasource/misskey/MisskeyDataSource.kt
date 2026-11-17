@@ -40,6 +40,7 @@ import dev.dimension.flare.data.datasource.microblog.paging.notSupported
 import dev.dimension.flare.data.datasource.microblog.paging.toPagingSource
 import dev.dimension.flare.data.datasource.microblog.pagingConfig
 import dev.dimension.flare.data.model.IconType
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.model.tab.ShortcutSpec
 import dev.dimension.flare.data.model.tab.TimelineSpec
 import dev.dimension.flare.data.network.misskey.api.model.AdminAccountsDeleteRequest
@@ -158,6 +159,7 @@ internal class MisskeyDataSource(
 
     override val userHandler by lazy {
         UserHandler(
+            proxy = ProxyRef.forAccount(accountKey),
             host = accountKey.host,
             loader = loader,
         )
@@ -502,15 +504,13 @@ internal class MisskeyDataSource(
             NotesCreateRequest(
                 text = data.content.takeIf { it.isNotEmpty() && it.isNotBlank() },
                 visibility =
-                    when (data.visibility) {
+                    when (requireNotNull(data.visibility)) {
                         UiTimelineV2.Post.Visibility.Public -> "public"
                         UiTimelineV2.Post.Visibility.Home -> "home"
                         UiTimelineV2.Post.Visibility.Followers -> "followers"
                         UiTimelineV2.Post.Visibility.Specified -> "specified"
                         UiTimelineV2.Post.Visibility.Channel -> "public"
-                        // Misskey 没有「仅自己可见 / 互相关注」选项，退回最接近的语义。
-                        UiTimelineV2.Post.Visibility.Private -> "specified"
-                        UiTimelineV2.Post.Visibility.Mutual -> "followers"
+                        UiTimelineV2.Post.Visibility.Friends, UiTimelineV2.Post.Visibility.SelfOnly -> error("Unsupported visibility")
                     },
                 renoteId = renoteId,
                 replyId = inReplyToID,

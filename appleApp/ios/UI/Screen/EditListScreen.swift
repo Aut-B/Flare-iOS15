@@ -36,9 +36,9 @@ struct EditListScreen: View {
                                     .frame(width: 96, height: 96)
                             } else {
                                 StateView(state: presenter.state.listInfo) { info in
-                                    let avatar: String? = switch onEnum(of: info) {
-                                    case .list(let data): data.avatar
-                                    case .feed(let data): data.avatar
+                                    let avatar: UiMediaImage? = switch onEnum(of: info) {
+                                    case .list(let data): data.media
+                                    case .feed(let data): data.media
                                     default: nil
                                     }
                                     if let remote = avatar {
@@ -164,7 +164,7 @@ struct EditListScreen: View {
                                 listMetaData: .init(
                                     title: self.title,
                                     description: self.desc.isEmpty ? nil : self.desc,
-                                    avatar: .init(name: avatar.itemIdentifier, data: imageByteArray, type: .image)
+                                    avatar: .init(name: avatar.itemIdentifier, data: imageByteArray, type: .image, mimeType: nil)
                                 )
                             )
                         } else {
@@ -172,6 +172,7 @@ struct EditListScreen: View {
                                 listMetaData: .init(
                                     title: self.title,
                                     description: self.desc.isEmpty ? nil : self.desc,
+                                    avatar: nil
                                 )
                             )
                         }

@@ -292,23 +292,30 @@ public extension BehaviorSettingsSection where LinkOpenDefaultsLink == EmptyView
     }
 }
 
-public struct LinkOpenDefaultsSettingsSection: View {
+public struct LinkOpenDefaultsSettingsView: View {
     @StateObject private var presenter = KotlinPresenter(presenter: LinkOpenDefaultsPresenter())
 
     public init() {}
 
     public var body: some View {
-        Section {
-            StateView(state: presenter.state.targets) { data in
-                let targets = data.cast(LinkOpenDefaultsPresenter.Target.self)
-                ForEach(targets, id: \.id) { target in
-                    LinkOpenDefaultSettingsMenu(
-                        target: target,
-                        state: presenter.state
-                    )
+        List {
+            Section {
+                StateView(state: presenter.state.targets) { data in
+                    let targets = data.cast(LinkOpenDefaultsPresenter.Target.self)
+                    ForEach(targets, id: \.id) { target in
+                        LinkOpenDefaultSettingsMenu(
+                            target: target,
+                            state: presenter.state
+                        )
+                    }
+                } loadingContent: {
+                    EmptyView()
                 }
-            } loadingContent: {
-                EmptyView()
+            }
+        }
+        .overlay {
+            if case .success(let targets) = onEnum(of: presenter.state.targets), targets.data.count == 0 {
+                ListEmptyView("link_open_defaults_empty", icon: .globe)
             }
         }
     }
@@ -338,12 +345,12 @@ private struct LinkOpenDefaultSettingsMenu: View {
                         .foregroundStyle(.primary)
                     LinkOpenDefaultSelectedOptionLabel(option: target.selectedOption)
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .flareSecondaryText()
                 }
                 Spacer()
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .flareTertiaryText()
             }
             .contentShape(.rect)
         }
@@ -361,7 +368,7 @@ private struct LinkOpenDefaultSelectedOptionLabel: View {
     var body: some View {
         if let account = option.account {
             StateView(state: account.profile) { user in
-                Text(user.handle.canonical)
+                Text(user.handle.display)
             } errorContent: { error in
                 Text(error.message ?? "Unknown error")
             } loadingContent: {
@@ -393,9 +400,9 @@ private struct LinkOpenDefaultAccountRow: View {
     var body: some View {
         StateView(state: account.profile) { user in
             Label {
-                Text(user.handle.canonical)
+                Text(user.handle.display)
             } icon: {
-                AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                AvatarView(data: user.avatar)
             }
         } errorContent: { error in
             Text(error.message ?? "Unknown error")
@@ -448,6 +455,17 @@ public struct AppearanceMediaSettingsSection: View {
                 })) {
                     Text("appearance_expand_media_size", bundle: FlareAppleUILocalization.bundle)
                     Text("appearance_expand_media_size_description", bundle: FlareAppleUILocalization.bundle)
+                }
+                if appearance.expandMediaSize {
+                    Toggle(isOn: Binding(get: {
+                        appearance.limitSingleMediaHeight
+                    }, set: { newValue in
+                        presenter.state.updateLimitSingleMediaHeight(value: newValue)
+                    })) {
+                        Text("appearance_limit_single_media_height", bundle: FlareAppleUILocalization.bundle)
+                        Text("appearance_limit_single_media_height_description", bundle: FlareAppleUILocalization.bundle)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 Picker(selection: Binding(get: {
                     appearance.mediaLayout
@@ -502,5 +520,6 @@ public struct AppearanceMediaSettingsSection: View {
                 }
             }
         }
+        .animation(.easeInOut(duration: 0.2), value: appearance.expandMediaSize)
     }
 }

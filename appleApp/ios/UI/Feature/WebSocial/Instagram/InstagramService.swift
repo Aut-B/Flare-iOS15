@@ -218,11 +218,16 @@ final class InstagramService {
         urlRequest.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         urlRequest.setValue(appID, forHTTPHeaderField: "X-IG-App-ID")
         urlRequest.setValue(asbdID, forHTTPHeaderField: "X-ASBD-ID")
-        // 网页版会把这个 claim 带上；缺了的时候点赞容易被当成未登录。
-        urlRequest.setValue(
-            Self.sanitizeHeader(CookieJar.value(inHeader: cookie, named: "x-ig-www-claim") ?? "0"),
-            forHTTPHeaderField: "X-IG-WWW-Claim"
-        )
+        // 网页版只有拿到真实 claim 才带这个头。以前这里缺省填 `"0"`，
+        // 等于主动告诉服务端「这个会话没有 claim」，点赞 / 评论更容易被判
+        // feedback_required。没有就不发，让服务端按 cookie 自己判断。
+        if let claim = CookieJar.value(inHeader: cookie, named: "x-ig-www-claim"),
+           !claim.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            urlRequest.setValue(
+                Self.sanitizeHeader(claim),
+                forHTTPHeaderField: "X-IG-WWW-Claim"
+            )
+        }
         urlRequest.setValue("1", forHTTPHeaderField: "X-Instagram-AJAX")
         urlRequest.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
         urlRequest.setValue("https://www.instagram.com/", forHTTPHeaderField: "Referer")
@@ -263,6 +268,16 @@ final class InstagramService {
         if message == "login_required" || message == "checkpoint_required" {
             throw interaction ? IGError.interactionDenied : IGError.notLoggedIn
         }
+        // 风控最常见的是 HTTP 200 + `feedback_required`。以前这里当成成功
+        // 直接返回，用户看到的就是「点了赞没反应，也不报错」。
+        if message == "feedback_required" || message == "spam" {
+            throw interaction
+                ? IGError.interactionDenied
+                : IGError(
+                    message: "Instagram 触发了风控（feedback_required），请稍后再试或切换网络",
+                    needLogin: false
+                )
+        }
         if looksLikeHTML {
             // 只有真的是登录 / 验证码页才算掉登录；其它 HTML 多半是风控页，
             // 不要把用户踢回登录界面。
@@ -283,6 +298,13 @@ final class InstagramService {
         }
         guard !json.isEmpty else {
             throw IGError(message: "接口返回格式异常", needLogin: false)
+        }
+        // 写操作即使 200 也可能 `status: fail`，别让它静默成功。
+        if interaction, IGJSON.string(json["status"]) == "fail" {
+            throw IGError(
+                message: message.isEmpty ? "Instagram 拒绝了这次操作，稍后再试" : message,
+                needLogin: false
+            )
         }
         return json
     }

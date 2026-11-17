@@ -42,9 +42,9 @@ internal interface StatusApi {
         @Field("content") content: String,
         @Field("st") st: String,
         @Header("X-Xsrf-Token") xsrfToken: String = st,
+        @Field("visible") visible: String? = null,
         @Field("picId") picId: String? = null,
         @Field("mid") mid: String = id,
-        @Field("visible") visible: String? = null,
     ): VVOResponse<Status>
 
     @POST("api/comments/create")

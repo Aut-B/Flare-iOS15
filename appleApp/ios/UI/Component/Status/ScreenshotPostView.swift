@@ -256,10 +256,6 @@ private struct ScreenshotPostHeader: View {
                         Text("@\(handle)")
                             .lineLimit(1)
                     }
-                    if let location = post.ipLocation, !location.isEmpty {
-                        Text(location)
-                            .lineLimit(1)
-                    }
                 }
                 .font(.system(size: compact ? 11 : 12))
                 .foregroundStyle(.secondary)

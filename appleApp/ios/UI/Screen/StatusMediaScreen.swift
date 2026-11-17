@@ -25,6 +25,7 @@ struct StatusMediaScreen: View {
             medias: medias,
             initialIndex: initialIndex,
             preview: preview,
+            previewProxy: ProxyRef.companion.forAccountType(accountType: accountType),
             previewAspectRatio: initialMediaAspectRatio,
             previewIsImage: initialMediaIsImage,
             shareContext: MediaViewerShareContext(
@@ -146,116 +147,43 @@ private extension UIWindowScene {
 }
 
 struct AdaptiveKFImage: View {
-    let data: String
-    let placeholder: String?
-    let customHeader: [String: String]?
+    let data: any UiMedia
+    let placeholder: UiMedia?
     let mediaAspectRatio: CGFloat?
-
+    var onImageFailure: (() -> Void)? = nil
     @State private var measuredImageSize: CGSize?
-    /// 加载失败标记。Kingfisher 的 placeholder 只在加载中显示，失败后会消失，
-    /// 而查看器是黑底——失败时用户看到的就是一块纯黑，必须显式兜底。
+    @State private var isLoading = false
     @State private var loadFailed = false
 
-    init(
-        data: String,
-        placeholder: String?,
-        customHeader: [String: String]? = nil,
-        mediaAspectRatio: CGFloat? = nil
-    ) {
-        self.data = data
-        self.placeholder = placeholder
-        self.customHeader = customHeader
-        self.mediaAspectRatio = mediaAspectRatio
-    }
-
     private var shouldFill: Bool {
-        MediaViewerImageLayoutPolicy.shouldFillWidth(
-            mediaAspectRatio: mediaAspectRatio,
-            measuredImageSize: measuredImageSize
-        )
+        MediaViewerImageLayoutPolicy.shouldFillWidth(mediaAspectRatio: mediaAspectRatio, measuredImageSize: measuredImageSize)
     }
-
     var body: some View {
-        if shouldFill {
-            ScrollView(.vertical, showsIndicators: false) {
-                kfImageView
-            }
-        } else {
-            kfImageView
+        Group {
+            if shouldFill { ScrollView(.vertical, showsIndicators: false) { image } }
+            else { image }
         }
     }
-
-    @ViewBuilder
-    private var placeholderView: some View {
-        if let placeholder {
-            NetworkImage(
-                data: placeholder,
-                customHeader: customHeader,
-                contentMode: shouldFill ? .fill : .fit
-            )
-        } else {
-            // 给 ProgressView 确定尺寸：无图阶段 KFImage 高度为 0，
-            // ZStack 会跟着塌成 0，加载指示也跟着消失。
-            ProgressView()
-                .frame(width: 48, height: 48)
-        }
-    }
-
-    var kfImageView: some View {
-        ZStack {
-            if URL(string: data)?.pathExtension.lowercased() == "gif" {
-                KFAnimatedImage(.init(string: data))
-                    // iOS 15 回退：与时间线 NetworkImage 的加载链保持一致。
-                    // 上游这里缺 loadDiskFileSynchronously(false)，iOS 15 上同步
-                    // 解码大图会导致原图在查看器里加载不出（表现为纯黑）。
-                    .loadDiskFileSynchronously(false)
-                    .requestModifier({ request in
-                        if let customHeader {
-                            for (key, value) in customHeader {
-                                request.setValue(value, forHTTPHeaderField: key)
-                            }
-                        }
-                    })
-                    .placeholder { placeholderView }
-                    .onSuccess { result in
-                        loadFailed = false
-                        measuredImageSize = result.image.size
-                    }
-                    .onFailure { _ in
-                        loadFailed = true
-                    }
-                    .fade(duration: 0.25)
-                    .aspectRatio(contentMode: shouldFill ? .fill : .fit)
-            } else {
-                KFImage(.init(string: data))
-                    .loadDiskFileSynchronously(false)
-                    .requestModifier({ request in
-                        if let customHeader {
-                            for (key, value) in customHeader {
-                                request.setValue(value, forHTTPHeaderField: key)
-                            }
-                        }
-                    })
-                    .placeholder { placeholderView }
-                    .onSuccess { result in
-                        loadFailed = false
-                        measuredImageSize = result.image.size
-                    }
-                    .onFailure { _ in
-                        loadFailed = true
-                    }
-                    .fade(duration: 0.25)
-                    .resizable()
-                    .aspectRatio(contentMode: shouldFill ? .fill : .fit)
+    private var image: some View {
+        NetworkImage(data: data, placeholder: placeholder, contentMode: shouldFill ? .fill : .fit,
+                     onProgress: { isLoading = $0.map { $0 < 1 } ?? false },
+                     onImageFailure: {
+                         loadFailed = true
+                         onImageFailure?()
+                     },
+                     onImageSize: {
+                         loadFailed = false
+                         measuredImageSize = $0
+                     },
+                     keepsCurrentImage: true)
+            .originalImage()
+            .overlay { if isLoading, !data.isRemote { ProgressView() } }
+            .overlay {
+                if loadFailed {
+                    Image(systemName: "photo")
+                        .font(.largeTitle)
+                        .foregroundStyle(.secondary)
+                }
             }
-            if loadFailed {
-                Image(systemName: "photo")
-                    .font(.largeTitle)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        // 给 ZStack 确定的空间：无图/无比例阶段由外层约束撑开，
-        // 避免查看器塌成一块黑。
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

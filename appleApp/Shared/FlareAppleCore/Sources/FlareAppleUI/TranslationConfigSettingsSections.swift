@@ -37,7 +37,8 @@ public struct TranslationConfigSettingsSections: View {
 // ObservableObject），@Perceptible 的注册表按 (对象, keyPath) 登记，收不到嵌套
 // presenter 的变化，必须自己转发 objectWillChange。
 private final class TranslationConfigSettingsState: ObservableObject {
-    let presenter = KotlinPresenter(presenter: AiConfigPresenter())
+    let presenter = KotlinPresenter(presenter: AiConfigPresenter(agentConfig: false))
+    let imageTranslation = ImageTranslationSettingsState()
     let aiTranslationTestPresenter = KotlinPresenter(presenter: AiTranslationTestPresenter())
     @Published var editingField: TranslationConfigEditableField?
     @Published var editingText = ""
@@ -49,6 +50,7 @@ private final class TranslationConfigSettingsState: ObservableObject {
     init() {
         presenter.objectWillChange
             .merge(with: aiTranslationTestPresenter.objectWillChange)
+            .merge(with: imageTranslation.objectWillChange)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
             }
@@ -220,7 +222,7 @@ private struct TranslationConfigSettingsSectionsContent: View {
         }
         .animation(.easeInOut(duration: 0.2), value: state.presenter.state.translateProvider.name)
         .animation(.easeInOut(duration: 0.2), value: state.presenter.state.preTranslate)
-    
+        ImageTranslationSettingsSection(state: state.imageTranslation)
     }
 
     @ViewBuilder
@@ -236,10 +238,10 @@ private struct TranslationConfigSettingsSectionsContent: View {
                     bundle: FlareAppleUILocalization.bundle
                 )
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .flareSecondaryText()
                 Text("Sample text", bundle: FlareAppleUILocalization.bundle)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .flareSecondaryText()
                 RichText(text: state.aiTranslationTestPresenter.state.sampleText)
                 Button {
                     state.aiTranslationTestPresenter.state.runTest()
@@ -257,7 +259,7 @@ private struct TranslationConfigSettingsSectionsContent: View {
                 if let translatedText = state.aiTranslationTestPresenter.state.translatedText {
                     Text("Translated text", bundle: FlareAppleUILocalization.bundle)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .flareSecondaryText()
                     RichText(text: translatedText)
                 }
             }
@@ -372,6 +374,11 @@ private struct TranslationExcludedLanguagesSheet: View {
 
         NBNavigationStack {
             languageList
+            .overlay {
+                if state.filteredLanguageOptions.isEmpty {
+                    ListEmptyView("translation_languages_empty", icon: .language)
+                }
+            }
             #if os(iOS)
             .environment(\.editMode, .constant(.active))
             #endif
@@ -439,7 +446,7 @@ private struct TranslationExcludedLanguagesSheet: View {
             if option.title != option.tag {
                 Text(option.tag)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .flareSecondaryText()
             }
         } icon: {
             EmptyView()
@@ -464,6 +471,7 @@ private extension View {
         .sheet(isPresented: pickerBinding) {
             TranslationExcludedLanguagesSheet(state: state)
         }
+        .imageTranslationSettingsSheets(state: state.imageTranslation)
     }
 }
 

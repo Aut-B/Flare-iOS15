@@ -7,7 +7,7 @@ public struct LocalHistoryContentScreen<AskAiOverlay: View>: View {
     @Environment(\.timelineListRenderer) private var listRenderer
     // iOS 15 回退：@StateObject 的 wrappedValue 只读，无法整体替换 presenter（换查询时要换实例），
     // 所以用 @State 存，再把 objectWillChange 手动转成一次视图失效。
-    @State private var searchPresenter = KotlinPresenter(presenter: LocalCacheSearchPresenter())
+    @StateObject private var searchPresenter = KotlinPresenter(presenter: LocalCacheSearchPresenter())
     @State private var searchPresenterTick = 0
     @Environment(\.timelineAppearance.aiConfig.agent) private var agentEnabled
     @StateObject private var presenter = KotlinPresenter(presenter: LocalCacheSearchPresenter())
@@ -213,6 +213,7 @@ private struct LocalHistoryListStyle: ViewModifier {
         if selection == .status {
             content
                 .listRowSpacing(2)
+                .flareTextBackground(.flareSystemBackground)
                 .listStyle(.plain)
         } else {
             content

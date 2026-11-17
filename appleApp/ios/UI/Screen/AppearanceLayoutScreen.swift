@@ -19,6 +19,7 @@ struct AppearanceLayoutScreen: View {
                 }
             }
         }
+        .timelineMediaViewport()
         .navigationTitle("appearance_layout_group_title")
     }
 }

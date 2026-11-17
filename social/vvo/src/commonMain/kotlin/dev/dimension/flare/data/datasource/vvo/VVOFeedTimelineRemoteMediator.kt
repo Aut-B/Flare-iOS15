@@ -27,7 +27,7 @@ internal class VVOFeedTimelineRemoteMediator(
     private val accountKey: MicroBlogKey,
     private val feed: VVOFeed,
 ) : CacheableRemoteLoader<UiTimelineV2> {
-    // Keep conservative cache boundaries until feed ordering is verified with a logged-in account.
+    // shortcut: Keep conservative cache boundaries until feed ordering is verified with a logged-in account.
     override val pagingKey: String =
         when (feed) {
             is VVOFeed.Group -> "vvo_group_${accountKey}_${feed.id}"

@@ -38,9 +38,11 @@ public struct ListErrorView: View {
                     .scaledToFit()
                     .frame(width: 64, height: 64)
                 Text("permission_denied_title", bundle: FlareAppleUILocalization.bundle)
+                    .flarePrimaryText()
                     .multilineTextAlignment(.center)
                     .font(.headline)
                 Text("permission_denied_message", bundle: FlareAppleUILocalization.bundle)
+                    .flarePrimaryText()
                 Button {
                     if let url = reloginURL(
                         accountKey: reloginError.accountKey,
@@ -61,6 +63,7 @@ public struct ListErrorView: View {
                     .frame(width: 44, height: 44)
                     .foregroundStyle(.secondary)
                 Text("error", bundle: FlareAppleUILocalization.bundle)
+                    .flarePrimaryText()
                     .multilineTextAlignment(.center)
                     .font(.headline)
                 Button {
@@ -69,7 +72,6 @@ public struct ListErrorView: View {
                     Text("action_retry", bundle: FlareAppleUILocalization.bundle)
                 }
                 .buttonStyle(.borderedProminent)
-                // 真实原因放大 + 可长按选中，方便直接复制/截图反馈。
                 VStack(alignment: .leading, spacing: 4) {
                     if let message = error.message, !message.isEmpty {
                         Text(message)

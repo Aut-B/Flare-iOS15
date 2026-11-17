@@ -11,10 +11,12 @@ import Perception
 public struct MediaView: View {
     private let data: UiMedia
     private let allowsAutoplay: Bool
+    private let contentMode: ContentMode
 
-    public init(data: UiMedia, allowsAutoplay: Bool = true) {
+    public init(data: UiMedia, allowsAutoplay: Bool = true, contentMode: ContentMode = .fill) {
         self.data = data
         self.allowsAutoplay = allowsAutoplay
+        self.contentMode = contentMode
     }
 
     public var body: some View {
@@ -23,16 +25,16 @@ public struct MediaView: View {
             case .image(let image):
                 Color.gray
                     .overlay {
-                        NetworkImage(data: image.previewUrl, customHeader: image.customHeaders)
+                        NetworkImage(data: image.preview)
                             .allowsHitTesting(false)
                     }
                     .clipped()
             case .video(let video):
-                MediaVideoView(data: video, allowsAutoplay: allowsAutoplay)
+                MediaVideoView(data: video, allowsAutoplay: allowsAutoplay, contentMode: contentMode)
             case .gif(let gif):
                 Color.gray
                     .overlay {
-                        NetworkImage(data: gif.url, customHeader: gif.customHeaders)
+                        NetworkImage(data: gif)
                             .allowsHitTesting(false)
                     }
                     .clipped()
@@ -62,15 +64,18 @@ public struct MediaVideoView: View {
     @State private var appeared = false
     private let data: any UiMedia
     private let allowsAutoplay: Bool
+    private let contentMode: ContentMode
 
-    public init(data: UiMediaVideo, allowsAutoplay: Bool = true) {
+    public init(data: UiMediaVideo, allowsAutoplay: Bool = true, contentMode: ContentMode = .fill) {
         self.data = data
         self.allowsAutoplay = allowsAutoplay
+        self.contentMode = contentMode
     }
 
     public init(data: UiMediaUgoira, allowsAutoplay: Bool = true) {
         self.data = data
         self.allowsAutoplay = allowsAutoplay
+        self.contentMode = .fill
     }
 
     private var playback: TimelinePlaybackCoordinator { timelinePlayback ?? fallbackPlayback }
@@ -90,10 +95,8 @@ public struct MediaVideoView: View {
 
         Color.gray
             .overlay {
-                // iOS 15 回退：overlay 的内容闭包是惰性求值的，@Perceptible 的读取
-                // 必须再包一层才会被登记（player / ugoira 是 @Perceptible）。
                 WithPerceptionTracking {
-                    NetworkImage(data: data.mediaPreviewURL, customHeader: data.customHeaders)
+                    NetworkImage(data: data.preview, contentMode: contentMode)
                         .allowsHitTesting(false)
                         .opacity(data is UiMediaUgoira && ugoira.image != nil ? 0 : 1)
                 }
@@ -105,12 +108,13 @@ public struct MediaVideoView: View {
                         UgoiraFrameView(media: animation, session: ugoira).allowsHitTesting(false)
                     } else if let avPlayer = player.player {
                         #if os(macOS)
-                        MacAVPlayerView(player: avPlayer, videoGravity: .resizeAspectFill, showsControls: false,
+                        MacAVPlayerView(player: avPlayer, videoGravity: contentMode == .fit ? .resizeAspect : .resizeAspectFill, showsControls: false,
                                         canDisplayFrame: player.hasRestoredPosition)
                             .id(data.url)
                             .allowsHitTesting(false)
                         #elseif os(iOS)
-                        InlineAVPlayerView(player: avPlayer, canDisplayFrame: player.hasRestoredPosition)
+                        InlineAVPlayerView(player: avPlayer, videoGravity: contentMode == .fit ? .resizeAspect : .resizeAspectFill,
+                                           canDisplayFrame: player.hasRestoredPosition)
                             .id(data.url)
                             .allowsHitTesting(false)
                         #endif
@@ -182,7 +186,7 @@ public struct MediaVideoView: View {
         let ugoiraModel = ugoira
         coordinator.register(id: id) { playing in
             if playing {
-                if let animation { ugoiraModel.play(animation) } else { model.play(url: url) }
+                if let animation { ugoiraModel.play(animation) } else { model.play(media: data) }
             } else {
                 model.detach()
                 ugoiraModel.detach()
@@ -217,10 +221,14 @@ public struct MediaVideoView: View {
                 let remaining = max(Int((duration - player.position).rounded(.down)), 0)
                 Text(String(format: "%d:%02d", remaining / 60, remaining % 60))
                     .font(.caption)
+                    .lineLimit(1)
                     .foregroundStyle(.white)
                     .mediaVideoBadgeStyle()
-            case .error:
-                Image(systemName: "exclamationmark.triangle.fill").mediaVideoBadgeStyle()
+            case .error(let error):
+                Label(error.localizedDescription, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .lineLimit(2)
+                    .mediaVideoBadgeStyle()
             }
         }
     }
@@ -265,9 +273,15 @@ struct InlineAVPlayerView: UIViewRepresentable {
 
 extension View {
     func mediaVideoBadgeStyle() -> some View {
-        padding(8)
+        mediaBadgePadding(8)
             .background(.black, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .padding()
+            .mediaBadgePadding(16)
             .foregroundStyle(.white)
+    }
+
+    func mediaBadgePadding(_ padding: CGFloat) -> some View {
+        // iOS 15 回退：没有 visualEffect / Layout，直接给角标留内边距。
+        // 极端窄缩略图下角标可能被裁切，但不影响点击与播放。
+        self.padding(padding)
     }
 }

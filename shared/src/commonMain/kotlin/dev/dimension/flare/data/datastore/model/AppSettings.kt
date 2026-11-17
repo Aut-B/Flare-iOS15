@@ -15,6 +15,7 @@ public data class AppSettings(
     val refreshHomeTimelineOnLaunch: Boolean = true,
     val homeTimelineAutoRefreshInterval: TimelineAutoRefreshInterval = TimelineAutoRefreshInterval.DISABLED,
     val rememberHomeTimelinePosition: Boolean = false,
+    val imageTranslationConfig: ImageTranslationConfig = ImageTranslationConfig(),
 ) {
     public companion object {
         // for SwiftUI environment defaults
@@ -99,7 +100,14 @@ public data class AppSettings(
         )
         val preTranslation: Boolean = false,
         val agent: Boolean = true,
+        val agentType: Type.OpenAI? = null,
     ) {
+        public val effectiveAgentType: Type
+            get() = agentType ?: type
+
+        public val isAgentEnabled: Boolean
+            get() = agent && (effectiveAgentType as? Type.OpenAI)?.model?.isNotBlank() == true
+
         public companion object {
             // for iOS
             public val default: AiConfig = AiConfig()
@@ -117,6 +125,7 @@ public data class AppSettings(
                 val model: String = "",
                 val reasoningEffort: String = "",
                 val extraBody: String = "",
+                val contextWindow: Int? = null,
             ) : Type
         }
     }

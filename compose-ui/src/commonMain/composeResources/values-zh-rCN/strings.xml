@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="media_video_error">视频加载失败</string>
     <string name="delete">删除</string>
     <string name="done">完成</string>
     <string name="cancel">取消</string>
@@ -69,12 +70,6 @@
     <string name="mastodon_visibility_unlisted_description">任何人都可以看到此帖，但不会出现在公共时间轴上</string>
     <string name="mastodon_visibility_private_description">只有关注者可以看到此帖</string>
     <string name="mastodon_visibility_direct_description">只有被提到的人可以看到此帖</string>
-    <string name="status_visibility_private">仅自己可见</string>
-    <string name="status_visibility_mutual">互相关注</string>
-    <string name="status_visibility_fans">仅粉丝可见</string>
-    <string name="status_visibility_private_description">只有你自己可以看到这条微博</string>
-    <string name="status_visibility_mutual_description">只有互相关注的人可以看到这条微博</string>
-    <string name="status_visibility_fans_description">只有你的粉丝可以看到这条微博</string>
     <string name="settings_notifications_title">通知</string>
     <string name="settings_notifications_subtitle">自定义 Flare 如何通知你</string>
     <string name="status_loadmore_end">没有更多帖子了</string>
@@ -445,6 +440,14 @@
     <string name="timeline_load_missing_posts">加载缺失的内容</string>
     <string name="timeline_loading_missing_posts">正在加载缺失的内容…</string>
     <string name="timeline_retry_missing_posts">加载失败，点击重试。</string>
+    <string name="share_replies_empty">暂无可选回复</string>
+    <string name="share_replies_failed">回复加载失败，已保留当前选择。</string>
+    <string name="share_replies_more">加载更多回复</string>
+    <string name="share_replies_retry">重试</string>
+    <string name="share_replies_children">加载这条评论的回复</string>
+
     <string name="weibo_friends_circle_title">好友圈</string>
     <string name="weibo_private_following_title">悄悄关注</string>
+    <string name="visibility_friends">好友圈可见</string>
+    <string name="visibility_self">仅自己可见</string>
 </resources>

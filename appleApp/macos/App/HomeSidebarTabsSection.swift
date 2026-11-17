@@ -505,11 +505,10 @@ struct HomeSidebarAddTabPopover: View {
                             }
                         } label: {
                             Label {
-                                Text(account.profile.handle.canonical)
+                                Text(account.profile.handle.display)
                             } icon: {
                                 AvatarView(
-                                    data: account.profile.avatar?.url,
-                                    customHeader: account.profile.avatar?.customHeaders
+                                    data: account.profile.avatar
                                 )
                                 .frame(width: 20, height: 20)
                             }
@@ -653,7 +652,7 @@ private struct HomeSidebarCreateGroupPopover: View {
             enabled: true,
             tabs: tabs,
             mergePolicy: .timePerPage,
-            filterConfig: TimelineFilterConfig(),
+            filterConfig: TimelineFilterConfig(excludedKinds: [], excludedContents: []),
             defaultGroupName: String(localized: "tab_settings_group_default_name", bundle: .main)
         ) {
             onCreate(group)

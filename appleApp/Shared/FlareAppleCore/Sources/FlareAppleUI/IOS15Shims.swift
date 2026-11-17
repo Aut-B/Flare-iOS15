@@ -289,6 +289,17 @@ public extension View {
             self
         }
     }
+
+    /// `contentMargins(_:_:for:)` 是 iOS 17 API。iOS 15 下滚动视图默认没有额外
+    /// 内容边距，直接透传即可保持与显式置零相同的布局。
+    @ViewBuilder
+    func flareScrollContentTopMarginZero() -> some View {
+        if #available(iOS 17.0, *) {
+            self.contentMargins(.top, 0, for: .scrollContent)
+        } else {
+            self
+        }
+    }
 }
 
 // MARK: - iOS 16+ 的 PresentationDetent 记账类型

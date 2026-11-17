@@ -36,9 +36,20 @@ enum LaunchGuard {
             let crashes = defaults.integer(forKey: crashKey) + 1
             defaults.set(crashes, forKey: crashKey)
             defaults.set(true, forKey: safeKey)
+            // 只要上次是「带着 Instagram 登录态」崩的，第一次重试就把 Instagram 隔离掉。
+            // 其他账号（微博 / 小红书 / 微信读书）都不动，用户顶多重登一次 Instagram，
+            // 总比每次冷启动都崩、只能重装强。
+            if let cookie = defaults.string(forKey: "instagram.cookie"), !cookie.isEmpty {
+                InstagramStateIsolator.requestQuarantineOnNextLaunch()
+            }
             if crashes >= 2 {
                 // 连着两次：连主界面都别画了，先停到安全模式界面。
                 defaults.set(true, forKey: recoveryKey)
+                // 15PM 上「登录 Instagram 后每次冷启动都崩」的坏状态在
+                // DbAccount / WKWebsiteDataStore 里。恢复界面出现时先隔离
+                // Instagram，否则点「重新加载」还是会在 HomeTabsPresenter
+                // 初始化时再崩一次。
+                InstagramStateIsolator.requestQuarantineOnNextLaunch()
             }
         } else {
             defaults.set(0, forKey: crashKey)
@@ -49,40 +60,46 @@ enum LaunchGuard {
         fullUIShown = false
         defaults.set(safeMode, forKey: safeKey)
         defaults.set(true, forKey: activeKey)
+        // 崩溃可能发生在 begin() 之后几百毫秒内；不强制落盘的话，
+        // 下次启动可能还看到旧的 crashKey / recoveryKey，恢复界面永远等不到。
+        defaults.synchronize()
 
-        // 12 秒足够走完首屏；还活着就认为这次启动没问题。
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
-            defaults.set(false, forKey: activeKey)
-            guard fullUIShown else {
-                // 停在安全模式界面本身不算「修好了」，下次继续停在这里。
-                defaults.set(0, forKey: crashKey)
-                return
-            }
-            defaults.set(0, forKey: crashKey)
-            defaults.set(false, forKey: safeKey)
-            defaults.set(false, forKey: recoveryKey)
-            safeMode = false
-            recoveryMode = false
-        }
+        // 这里不再用「活过 12 秒」当作启动成功：15 Pro Max 上的崩溃发生在
+        // 主界面出现十几秒之后，旧的定时器会先把 activeKey 清掉、把崩溃计数归零，
+        // 于是每次都是「干净启动 → 再崩」，兜底界面永远等不到。
+        // 现在只有真正进入后台（说明这次启动已经稳定可用）才清标记，见 markStable()。
     }
 
-    /// 主界面真正出现后调用。只有活过 12 秒才会清掉安全模式标记。
+    /// 主界面真正出现后调用。安全模式在主界面稳定存活 45 秒后解除。
     static func markFullUIShown() {
         guard !fullUIShown else { return }
         fullUIShown = true
-        let defaults = UserDefaults.standard
         InstagramStateIsolator.clearQuarantinePendingOnFullUI()
-        // 用户可能是从安全模式界面点进来的，重新开始计时。
-        defaults.set(true, forKey: activeKey)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
-            guard fullUIShown else { return }
-            defaults.set(false, forKey: activeKey)
-            defaults.set(0, forKey: crashKey)
-            defaults.set(false, forKey: safeKey)
-            defaults.set(false, forKey: recoveryKey)
+        // 安全模式下隐藏网页是禁用的（小红书首页流、微信读书书架都靠它）。
+        // 以前只有「进后台」才解除，用户如果一直在前台用，就会一直看到
+        // 「请求失败」。主界面稳定存活 45 秒后自动解除；崩溃计数不归零，
+        // 真崩了下次启动仍然会回到安全模式。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
+            guard fullUIShown, safeMode else { return }
             safeMode = false
-            recoveryMode = false
+            UserDefaults.standard.set(false, forKey: safeKey)
         }
+    }
+
+    /// 进入后台时调用：这次启动已经完整可用，清掉崩溃标记。
+    ///
+    /// 崩溃若发生在前台（包括首屏出现后很久），activeKey 会一直保留，
+    /// 下次启动继续累加崩溃计数，连续两次就会落到恢复界面。
+    static func markStable() {
+        guard fullUIShown else { return }
+        let defaults = UserDefaults.standard
+        defaults.set(false, forKey: activeKey)
+        defaults.set(0, forKey: crashKey)
+        defaults.set(false, forKey: safeKey)
+        defaults.set(false, forKey: recoveryKey)
+        safeMode = false
+        recoveryMode = false
+        defaults.synchronize()
     }
 
     /// 用户在界面上点「仍然尝试」时调用：本次运行放行隐藏网页。
@@ -109,6 +126,7 @@ enum LaunchGuard {
         defaults.set(true, forKey: safeKey)
         recoveryMode = false
         safeMode = true
+        defaults.synchronize()
     }
 
     /// 稍等一下再退出，让「请重新打开」这句提示有机会被看到。
@@ -122,6 +140,7 @@ enum LaunchGuard {
     static func purgeInstagramAndExitRecovery() {
         InstagramStateIsolator.requestQuarantineOnNextLaunch()
         UserDefaults.standard.set(0, forKey: crashKey)
+        UserDefaults.standard.synchronize()
         exitRecovery()
     }
 

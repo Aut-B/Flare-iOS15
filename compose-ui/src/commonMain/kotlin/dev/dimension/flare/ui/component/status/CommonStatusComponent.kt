@@ -59,8 +59,8 @@ import compose.icons.FontAwesomeIcons
 import compose.icons.fontawesomeicons.Solid
 import compose.icons.fontawesomeicons.solid.At
 import compose.icons.fontawesomeicons.solid.Ellipsis
-import compose.icons.fontawesomeicons.solid.EyeSlash
 import compose.icons.fontawesomeicons.solid.Globe
+import compose.icons.fontawesomeicons.solid.Heart
 import compose.icons.fontawesomeicons.solid.Image
 import compose.icons.fontawesomeicons.solid.Language
 import compose.icons.fontawesomeicons.solid.Lock
@@ -69,7 +69,6 @@ import compose.icons.fontawesomeicons.solid.Reply
 import compose.icons.fontawesomeicons.solid.Robot
 import compose.icons.fontawesomeicons.solid.TriangleExclamation
 import compose.icons.fontawesomeicons.solid.Tv
-import compose.icons.fontawesomeicons.solid.UserPlus
 import dev.dimension.flare.compose.ui.Res
 import dev.dimension.flare.compose.ui.bookmark_add
 import dev.dimension.flare.compose.ui.bookmark_remove
@@ -121,6 +120,8 @@ import dev.dimension.flare.compose.ui.user_mute_with_parameter
 import dev.dimension.flare.compose.ui.user_send_message
 import dev.dimension.flare.compose.ui.user_unblock
 import dev.dimension.flare.compose.ui.user_unmute
+import dev.dimension.flare.compose.ui.visibility_friends
+import dev.dimension.flare.compose.ui.visibility_self
 import dev.dimension.flare.compose.ui.vote
 import dev.dimension.flare.data.datasource.microblog.ActionMenu
 import dev.dimension.flare.data.datasource.microblog.applyPostActionLayout
@@ -136,6 +137,7 @@ import dev.dimension.flare.ui.component.FlareDividerDefaults
 import dev.dimension.flare.ui.component.HorizontalDivider
 import dev.dimension.flare.ui.component.LocalTimelineAppearance
 import dev.dimension.flare.ui.component.RichText
+import dev.dimension.flare.ui.component.TabIcon
 import dev.dimension.flare.ui.component.placeholder
 import dev.dimension.flare.ui.component.platform.PlatformCard
 import dev.dimension.flare.ui.component.platform.PlatformCheckbox
@@ -235,7 +237,7 @@ public fun CommonStatusComponent(
                     contentDescription =
                         stringResource(
                             Res.string.profile_open_user,
-                            it.handle.canonical,
+                            it.handle.display,
                         ),
                     modifier =
                         Modifier.clickable {
@@ -282,37 +284,17 @@ public fun CommonStatusComponent(
                                     state = item.translationDisplayState,
                                 )
                             }
-                            val ipLocation = item.ipLocation?.takeIf { it.isNotBlank() }
-                            if (appearanceSettings.showPlatformLogo || ipLocation != null) {
-                                // 平台图标在上、IP 属地在下的竖排（对应 iOS 右上角的位置）。
-                                // 只显示地名本身，不带「发布于」这类前缀；关闭图标开关时 IP 仍然显示。
-                                Column(
-                                    horizontalAlignment = Alignment.End,
-                                    verticalArrangement = Arrangement.spacedBy(1.dp),
-                                ) {
-                                    if (appearanceSettings.showPlatformLogo) {
-                                        FAIcon(
-                                            imageVector = item.platformIcon.toImageVector(),
-                                            contentDescription =
-                                                stringResource(
-                                                    Res.string.status_platform,
-                                                    item.platformId,
-                                                ),
-                                            modifier =
-                                                Modifier
-                                                    .size(PlatformTheme.typography.caption.fontSize.value.dp),
-                                            tint = PlatformTheme.colorScheme.caption,
-                                        )
-                                    }
-                                    if (ipLocation != null) {
-                                        PlatformText(
-                                            text = ipLocation,
-                                            style = PlatformTheme.typography.caption,
-                                            color = PlatformTheme.colorScheme.caption,
-                                            maxLines = 1,
-                                        )
-                                    }
-                                }
+                            if (appearanceSettings.showPlatformLogo) {
+                                TabIcon(
+                                    icon = item.platformIcon,
+                                    contentDescription =
+                                        stringResource(
+                                            Res.string.status_platform,
+                                            item.platformId,
+                                        ),
+                                    size = PlatformTheme.typography.caption.fontSize.value.dp,
+                                    color = PlatformTheme.colorScheme.caption,
+                                )
                             }
                             if (!isDetail) {
                                 DateTimeText(
@@ -352,6 +334,7 @@ public fun CommonStatusComponent(
                     if (showAsFullWidth) {
                         UserCompat(
                             user = user,
+                            subtitle = item.authorSubtitle,
                             onUserClick = {
                                 user.onClicked.invoke(
                                     ClickContext(
@@ -368,6 +351,7 @@ public fun CommonStatusComponent(
                     } else if (isQuote) {
                         UserCompat(
                             user,
+                            subtitle = item.authorSubtitle,
                             onUserClick = {
                                 user.onClicked.invoke(
                                     ClickContext(
@@ -383,6 +367,7 @@ public fun CommonStatusComponent(
                     } else {
                         CommonStatusHeaderComponent(
                             data = user,
+                            subtitle = item.authorSubtitle,
                             nameModifier = nameModifier,
                             handleModifier = handleModifier,
                             avatarModifier = avatarModifier,
@@ -402,7 +387,7 @@ public fun CommonStatusComponent(
                     }
                 }
                 item.replyToHandle?.let { replyHandle ->
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(if (showAsFullWidth || isQuote) 2.dp else 4.dp))
                     StatusReplyComponent(
                         replyHandle = replyHandle,
                     )
@@ -426,6 +411,7 @@ public fun CommonStatusComponent(
                         maxLines = maxLines,
                         showExpandButton = showExpandButton,
                         translationDisplayed = item.translationDisplayState == TranslationDisplayState.Translated,
+                        topSpacing = if ((showAsFullWidth || isQuote) && (item.user != null || item.replyToHandle != null)) 2.dp else 0.dp,
                     )
                 }
 
@@ -748,7 +734,7 @@ private fun StatusReactionComponent(
                             PlatformText(reaction.name)
                         } else {
                             EmojiImage(
-                                uri = reaction.url,
+                                media = reaction.media,
                                 modifier = Modifier.height(16.dp),
                             )
                         }
@@ -990,19 +976,19 @@ public fun StatusVisibilityComponent(
             )
         }
 
-        UiTimelineV2.Post.Visibility.Private -> {
+        UiTimelineV2.Post.Visibility.Friends -> {
             FAIcon(
-                imageVector = FontAwesomeIcons.Solid.EyeSlash,
-                contentDescription = stringResource(resource = Res.string.mastodon_visibility_private),
+                imageVector = FontAwesomeIcons.Solid.Heart,
+                contentDescription = stringResource(Res.string.visibility_friends),
                 modifier = modifier,
                 tint = tint,
             )
         }
 
-        UiTimelineV2.Post.Visibility.Mutual -> {
+        UiTimelineV2.Post.Visibility.SelfOnly -> {
             FAIcon(
-                imageVector = FontAwesomeIcons.Solid.UserPlus,
-                contentDescription = stringResource(resource = Res.string.mastodon_visibility_private),
+                imageVector = FontAwesomeIcons.Solid.Lock,
+                contentDescription = stringResource(Res.string.visibility_self),
                 modifier = modifier,
                 tint = tint,
             )
@@ -1346,6 +1332,7 @@ private fun StatusContentComponent(
     maxLines: Int?,
     showExpandButton: Boolean,
     translationDisplayed: Boolean,
+    topSpacing: Dp = 0.dp,
     modifier: Modifier = Modifier,
 ) {
     val appearanceSettings = LocalTimelineAppearance.current
@@ -1386,6 +1373,9 @@ private fun StatusContentComponent(
     Column(
         modifier = modifier,
     ) {
+        if (topSpacing > 0.dp && visibleContentWarning.all { it.isEmpty } && visibleContent.any { !it.isEmpty }) {
+            Spacer(modifier = Modifier.height(topSpacing))
+        }
         val expandContentWarning = appearanceSettings.expandContentWarning
         if (visibleContentWarning.any { !it.isEmpty }) {
             Column(

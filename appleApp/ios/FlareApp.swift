@@ -3,6 +3,7 @@ import Perception
 import KotlinSharedUI
 import FlareAppleCore
 import FlareAppleUI
+import AVFAudio
 import UIKit
 
 @main
@@ -16,7 +17,12 @@ struct FlareApp: App {
         case ready
     }
 
-    init() {}
+    init() {
+        // 必须在任何 SwiftUI 视图 / Kotlin 初始化之前落盘启动标记：
+        // 若首屏渲染阶段就崩，onAppear 永远不会执行，崩溃计数也就永远不会累加，
+        // 15 Pro Max 上就会表现为「每次冷启动都闪退、兜底界面永远不出现」。
+        LaunchGuard.begin()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -35,6 +41,14 @@ struct FlareApp: App {
                     .ugoiraExportStatus()
                     .backportOnChange(of: scenePhase) { _, phase in
                         MediaCacheMaintenance.handleScenePhase(phase)
+                        if phase == .background {
+                            LaunchGuard.markStable()
+                        }
+                    }
+                    .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+                        Task.detached {
+                            try? await PluginRuntimeLifecycleFacadeV1().onMemoryPressure()
+                        }
                     }
                 }
             }
@@ -48,7 +62,6 @@ struct FlareApp: App {
             InstagramStateIsolator.seedCorruptStateForTesting()
         }
         #endif
-        LaunchGuard.begin()
         if LaunchGuard.recoveryMode {
             bootPhase = .recovery
             return
@@ -71,6 +84,7 @@ struct FlareApp: App {
         if firebaseEnabled {
             AppleSharedHelper.shared.setupCrashlytics()
         }
+        ProxySessionConfigurator.install()
         AppleSharedHelper.shared.initialize(
             inAppNotification: SwiftInAppNotification.shared,
             swiftFormatter: Formatter.shared,
@@ -89,6 +103,8 @@ struct FlareApp: App {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--media-viewer-test") {
             MediaViewerTestFixture()
+        } else if ProcessInfo.processInfo.arguments.contains("--timeline-media-scroll-test") {
+            TimelineMediaScrollTestFixture()
         } else {
             appRoot
         }
@@ -169,31 +185,31 @@ private struct LaunchRecoveryView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 42))
                 .foregroundStyle(.orange)
-            Text("Last launch did not finish")
+            Text("上次启动没有完成")
                 .font(.headline)
-            Text("Flare has paused in safe mode. Your accounts are still here; no reinstall is needed.")
+            Text("Flare 已停在安全模式。账号还在，不用重装。若最近登录过 Instagram，优先清掉 Instagram 登录再试。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             Button {
-                onRetry()
+                onPurgeInstagram()
             } label: {
-                Text("Reload main screen")
+                Text("清掉 Instagram 登录并重试")
                     .font(.system(size: 15, weight: .semibold))
                     .frame(maxWidth: 240)
                     .padding(.vertical, 10)
             }
             .buttonStyle(.borderedProminent)
             Button {
-                onPurgeInstagram()
+                onRetry()
             } label: {
-                Text("Clear Instagram login and retry")
+                Text("只重新加载主界面")
                     .font(.system(size: 14, weight: .semibold))
                     .frame(maxWidth: 240)
                     .padding(.vertical, 10)
             }
             .buttonStyle(.bordered)
-            Text("Xiaohongshu, WeRead and other accounts are not affected.")
+            Text("小红书、微信读书等其它账号不受影响。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

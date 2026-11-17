@@ -32,13 +32,14 @@ import dev.dimension.flare.data.datasource.microblog.handler.UserHandler
 import dev.dimension.flare.data.datasource.microblog.paging.PagingRequest
 import dev.dimension.flare.data.datasource.microblog.paging.PagingResult
 import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
+import dev.dimension.flare.data.datasource.microblog.paging.ShareRepliesLoader
 import dev.dimension.flare.data.datasource.microblog.pagingConfig
 import dev.dimension.flare.data.model.IconType
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.model.tab.ShortcutSpec
 import dev.dimension.flare.data.model.tab.TimelineSpec
 import dev.dimension.flare.data.network.vvo.VVOService
 import dev.dimension.flare.data.network.vvo.model.StatusDetailItem
-import dev.dimension.flare.data.network.vvo.model.VVOResponse
 import dev.dimension.flare.data.platform.CommonTimelineSpecs
 import dev.dimension.flare.data.platform.VVO_PLATFORM_ID
 import dev.dimension.flare.data.platform.VVoCredential
@@ -55,16 +56,14 @@ import dev.dimension.flare.ui.model.UiState
 import dev.dimension.flare.ui.model.UiStrings
 import dev.dimension.flare.ui.model.UiText
 import dev.dimension.flare.ui.model.UiTimelineV2
+import dev.dimension.flare.ui.model.contentPostOrNull
 import dev.dimension.flare.ui.model.mapper.render
 import dev.dimension.flare.ui.model.toUi
 import dev.dimension.flare.ui.presenter.compose.ComposeStatus
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.update
 
 private val MEDIA_COMPRESSION =
     ComposeConfig.Media.Compression(
@@ -73,9 +72,28 @@ private val MEDIA_COMPRESSION =
         maxHeight = 4096,
     )
 
-/** 评论兜底缓存的上限与保留量。 */
-private const val COMMENT_CACHE_LIMIT = 800
-private const val COMMENT_CACHE_KEEP = 600
+internal fun ComposeType.vvoVisibility(): ComposeConfig.Visibility? =
+    if (this == ComposeType.New || this == ComposeType.Quote) {
+        ComposeConfig.Visibility(
+            allVisibilities =
+                persistentListOf(
+                    UiTimelineV2.Post.Visibility.Public,
+                    UiTimelineV2.Post.Visibility.Friends,
+                    UiTimelineV2.Post.Visibility.SelfOnly,
+                ),
+        )
+    } else {
+        null
+    }
+
+internal fun UiTimelineV2.Post.Visibility.toVvoVisible(): String? =
+    when (this) {
+        UiTimelineV2.Post.Visibility.Public -> null
+        UiTimelineV2.Post.Visibility.Followers -> "10"
+        UiTimelineV2.Post.Visibility.Friends -> "6"
+        UiTimelineV2.Post.Visibility.SelfOnly -> "1"
+        else -> error("Unsupported Weibo visibility: $this")
+    }
 
 @OptIn(ExperimentalPagingApi::class)
 internal class VVODataSource(
@@ -95,6 +113,7 @@ internal class VVODataSource(
     private val imageCompressor: ImageCompressor by koinInject()
     private val service by lazy {
         VVOService(
+            proxy = ProxyRef.forAccount(accountKey),
             credentialFlow = credentialFlow,
             refreshCookieWhenStale = true,
             onCredentialRefreshed = { credential ->
@@ -224,6 +243,7 @@ internal class VVODataSource(
 
     override val userHandler by lazy {
         UserHandler(
+            proxy = ProxyRef.forAccount(accountKey),
             host = accountKey.host,
             loader = loader,
         )
@@ -332,6 +352,18 @@ internal class VVODataSource(
         mediaOnly = mediaOnly,
     )
 
+    override fun shareReplies(statusKey: MicroBlogKey): RemoteLoader<UiTimelineV2> =
+        ShareRepliesLoader(statusComment(statusKey), statusKey, comments = true)
+
+    override fun shareReplyChildren(reply: UiTimelineV2): RemoteLoader<UiTimelineV2>? =
+        reply
+            .contentPostOrNull()
+            ?.takeIf { post ->
+                post.actions.filterIsInstance<dev.dimension.flare.data.datasource.microblog.ActionMenu.Item>().any {
+                    it.actionFamily == dev.dimension.flare.data.datasource.microblog.PostActionFamily.Comment && (it.count?.value ?: 0) > 0
+                }
+            }?.let { ShareRepliesLoader(commentChild(it.statusKey), it.statusKey, comments = true) }
+
     override fun context(statusKey: MicroBlogKey): RemoteLoader<UiTimelineV2> =
         object : RemoteLoader<UiTimelineV2> {
             override suspend fun load(
@@ -432,6 +464,9 @@ internal class VVODataSource(
         data: ComposeData,
         progress: () -> Unit,
     ) {
+        // 评论（Reply）没有可见范围概念，composeConfig 不会给可见度，这里必须容忍 null，
+        // 否则每次发评论都会在 requireNotNull 上直接崩掉。
+        val visible = data.visibility?.toVvoVisible()
         val st = ensureWriteLogin()
 
         val mediaIds =
@@ -443,59 +478,45 @@ internal class VVODataSource(
         val mediaId = mediaIds.joinToString(",")
         val referenceStatus = data.referenceStatus
         val composeStatus = referenceStatus?.composeStatus
-        // 公开时不传 visible，与网页版 / 官方客户端一致；其余范围仍保留旧菜单语义。
-        val visible = data.visibility.toVvoVisible()
-        try {
-            if (composeStatus is ComposeStatus.VVOComment) {
-                service.replyComment(
-                    cid = composeStatus.statusKey.id,
-                    reply = composeStatus.statusKey.id,
-                    id = composeStatus.rootId,
-                    mid = composeStatus.rootId,
-                    content = data.content,
-                    st = st,
-                    picId = mediaId,
-                )
-            } else if (composeStatus is ComposeStatus.Reply) {
-                service.commentStatus(
-                    id = composeStatus.statusKey.id,
-                    content = data.content,
-                    st = st,
-                    picId = mediaId,
-                )
-            } else if (composeStatus is ComposeStatus.Quote) {
-                service.repostStatus(
-                    id = composeStatus.statusKey.id,
-                    // 纯转发保持空内容，由微博服务端生成「转发微博」。
-                    // 之前客户端塞固定文案「转发微博」，连续转发时内容完全一致，
-                    // 会被当成重复内容刷屏，是「操作频繁」的诱因之一。
-                    content = data.content,
-                    st = st,
-                    picId = mediaId,
-                    visible = visible,
-                ).requireSuccess("转发")
-            } else {
-                service.updateStatus(
-                    content = data.content,
-                    st = st,
-                    picId = mediaId,
-                    visible = visible,
-                ).requireSuccess("发布")
-            }
-        } catch (error: kotlinx.coroutines.CancellationException) {
-            throw error
-        } catch (error: LoginExpiredException) {
-            throw error
-        } catch (error: Exception) {
-            // 写失败常见原因是 st / 登录态过期，清缓存让下一次读取重新校验。
-            service.invalidateConfigCache()
-            throw error
+        if (composeStatus is ComposeStatus.VVOComment) {
+            service.replyComment(
+                cid = composeStatus.statusKey.id,
+                reply = composeStatus.statusKey.id,
+                id = composeStatus.rootId,
+                mid = composeStatus.rootId,
+                content = data.content,
+                st = st,
+                picId = mediaId,
+            )
+        } else if (composeStatus is ComposeStatus.Reply) {
+            service.commentStatus(
+                id = composeStatus.statusKey.id,
+                content = data.content,
+                st = st,
+                picId = mediaId,
+            )
+        } else if (composeStatus is ComposeStatus.Quote) {
+            service.repostStatus(
+                id = composeStatus.statusKey.id,
+                content = data.content,
+                st = st,
+                visible = visible,
+                picId = mediaId,
+            )
+        } else {
+            service.updateStatus(
+                content = data.content,
+                st = st,
+                visible = visible,
+                picId = mediaId,
+            )
         }
     }
 
     override fun composeConfig(type: ComposeType): ComposeConfig =
         ComposeConfig(
             text = ComposeConfig.Text(2000),
+            visibility = type.vvoVisibility(),
             media =
                 ComposeConfig.Media(
                     if (type == ComposeType.New) 18 else 1,
@@ -504,23 +525,6 @@ internal class VVODataSource(
                     allowMediaOnly = false,
                     compression = MEDIA_COMPRESSION,
                 ),
-            // 微博的可见范围：公开 / 仅自己可见 / 互相关注 / 仅粉丝可见。
-            // 评论（Reply）没有可见范围概念，因此只在发博和转发时提供。
-            visibility =
-                if (type == ComposeType.Reply) {
-                    null
-                } else {
-                    ComposeConfig.Visibility(
-                        allVisibilities =
-                            persistentListOf(
-                                UiTimelineV2.Post.Visibility.Public,
-                                UiTimelineV2.Post.Visibility.Private,
-                                UiTimelineV2.Post.Visibility.Mutual,
-                                UiTimelineV2.Post.Visibility.Followers,
-                            ),
-                        defaultVisibility = UiTimelineV2.Post.Visibility.Public,
-                    )
-                },
             emoji =
                 ComposeConfig.Emoji(
                     emoji = emojiHandler.emoji,
@@ -573,23 +577,7 @@ internal class VVODataSource(
             service = service,
             accountKey = accountKey,
             statusKey = statusKey,
-            onRendered = ::cacheComments,
         )
-
-    /**
-     * 截图面板用：一次性取第一页热门评论。
-     * 这里不走 Pager，只是给「挑选要截进图片的评论」提供一个列表。
-     */
-    suspend fun screenshotComments(statusKey: MicroBlogKey): List<UiTimelineV2> =
-        service
-            .getHotComments(
-                id = statusKey.id,
-                mid = statusKey.id,
-                maxId = null,
-            ).data
-            ?.data
-            .orEmpty()
-            .map { it.render(accountKey) }
 
     fun statusRepost(statusKey: MicroBlogKey): RemoteLoader<UiTimelineV2> =
         StatusRepostRemoteMediator(
@@ -603,61 +591,17 @@ internal class VVODataSource(
             service = service,
             accountKey = accountKey,
             commentKey = commentKey,
-            onRendered = ::cacheComments,
         )
-
-    /**
-     * 最近渲染过的评论（id -> 评论本身）。
-     *
-     * 微博的 `comments/hotFlowChild` 在「这条评论没有任何回复」时不会返回 rootComment，
-     * 导致点进 0 回复的评论只会看到 `status not found`。而这条评论其实刚刚在列表里
-     * 渲染过，所以这里留一份内存缓存做兜底：先查缓存，缓存没有再去请求。
-     *
-     * 放在 companion 里是因为 DataSource 实例会随订阅重建，缓存要跨实例共享。
-     */
-    internal fun cacheComments(items: List<UiTimelineV2>) {
-        if (items.isEmpty()) return
-        commentCache.update { current ->
-            val merged = current + items.associateBy { it.statusKey.id }
-            // 只保留最近的一批，避免长时间使用后无限增长。
-            if (merged.size <= COMMENT_CACHE_LIMIT) {
-                merged
-            } else {
-                merged.entries
-                    .drop(merged.size - COMMENT_CACHE_KEEP)
-                    .associate { it.key to it.value }
-            }
-        }
-    }
 
     fun comment(statusKey: MicroBlogKey): CacheData<UiTimelineV2> =
         MemCacheable("vvo_comment_${accountKey}_$statusKey") {
-            // 0 回复的评论拿不到 rootComment，属于正常情况，不要把异常抛出去。
-            // 但要放行 CancellationException，否则协程取消会被吞掉。
-            val remote =
-                try {
-                    service
-                        .getHotFlowChild(statusKey.id)
-                        .rootComment
-                        ?.firstOrNull()
-                        ?.render(accountKey)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    null
-                }
-            remote
-                ?: commentCache.value[statusKey.id]
+            service
+                .getHotFlowChild(statusKey.id)
+                .rootComment
+                ?.firstOrNull()
+                ?.render(accountKey)
                 ?: throw Exception("status not found")
         }
-
-    private companion object {
-        /**
-         * 评论兜底缓存（评论 id -> 渲染好的评论），跨 DataSource 实例共享，
-         * 见 [cacheComments]。
-         */
-        val commentCache = MutableStateFlow<Map<String, UiTimelineV2>>(emptyMap())
-    }
 
     fun statusExtendedText(statusKey: MicroBlogKey): Flow<UiState<String>> =
         MemCacheable(
@@ -729,34 +673,4 @@ internal class VVODataSource(
 
         return json.firstOrNull()?.status?.render(accountKey) ?: throw Exception("status not found")
     }
-}
-
-/**
- * 微博「谁可以看」对应的 visible 值（与网页版 / App 一致）：
- * 公开不传该字段，1 仅自己可见、6 互相关注（好友圈）、10 仅粉丝可见。
- */
-internal fun UiTimelineV2.Post.Visibility.toVvoVisible(): String? =
-    when (this) {
-        UiTimelineV2.Post.Visibility.Private -> "1"
-        UiTimelineV2.Post.Visibility.Mutual -> "6"
-        UiTimelineV2.Post.Visibility.Followers -> "10"
-        // 公开，以及微博没有对应语义的取值，统一省略 visible
-        UiTimelineV2.Post.Visibility.Public,
-        UiTimelineV2.Post.Visibility.Home,
-        UiTimelineV2.Post.Visibility.Specified,
-        UiTimelineV2.Post.Visibility.Channel -> null
-    }
-
-/**
- * 微博接口失败时 ok=0，之前直接当成功处理，于是「点了发送但主页没有帖子」。
- * 这里把失败显式抛出来，让 UI 显示错误而不是静默吞掉。
- */
-private fun VVOResponse<*>.requireSuccess(action: String) {
-    val failed = ok == 0L || (ok == null && data == null)
-    if (!failed) return
-    val detail =
-        msg?.takeIf { it.isNotBlank() }
-            ?: httpCode?.let { "HTTP $it" }
-            ?: "ok=$ok"
-    throw Exception("微博${action}失败：$detail")
 }

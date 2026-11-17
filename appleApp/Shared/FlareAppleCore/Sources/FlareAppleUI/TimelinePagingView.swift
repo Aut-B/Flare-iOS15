@@ -147,11 +147,13 @@ private struct TimelinePagingListRowStyle: ViewModifier {
                 .listRowSeparator(.hidden)
                 .padding(.horizontal)
                 .listRowInsets(.init(top: 0, leading: 0, bottom: 0, trailing: 0))
+                .flareTextBackground(.flareSystemGroupedBackground)
                 .listRowBackground(Color.clear)
         } else {
             content
                 .listRowSeparator(.hidden)
                 .listRowInsets(.init(top: 0, leading: 0, bottom: 0, trailing: 0))
+                .flareTextBackground(.flareSystemGroupedBackground)
                 .listRowBackground(Color.clear)
         }
     }
@@ -256,6 +258,7 @@ public struct TimelineGalleryItemView: View {
                 placeholderTile
             }
         }
+        .flareTextBackground(.flareSecondarySystemGroupedBackground)
         .background(Color.flareSecondarySystemGroupedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
@@ -298,7 +301,7 @@ public struct TimelineGalleryItemView: View {
 
             if let user = post.user {
                 HStack(spacing: 6) {
-                    AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                    AvatarView(data: user.avatar)
                         .frame(width: 24, height: 24)
                     RichText(text: user.name)
                         .font(.caption)
@@ -336,20 +339,21 @@ public struct TimelineGalleryItemView: View {
     private func feedTile(_ feed: UiTimelineV2.Feed) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             if showMedia, let media = feed.media {
-                NetworkImage(data: media.url, customHeader: media.customHeaders)
+                NetworkImage(data: media)
                     .aspectRatio(CGFloat(max(media.aspectRatio, 0.3)), contentMode: .fit)
                     .clipped()
             } else {
                 VStack(alignment: .leading, spacing: 4) {
                     if let title = feed.title, !title.isEmpty {
                         Text(title)
+                            .flarePrimaryText()
                             .font(.subheadline.weight(.semibold))
                             .lineLimit(3)
                     }
                     if let description = feed.description_, !description.isEmpty {
                         Text(description)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .flareSecondaryText()
                             .lineLimit(4)
                     }
                 }
@@ -357,7 +361,7 @@ public struct TimelineGalleryItemView: View {
             }
 
             HStack(spacing: 6) {
-                if let icon = feed.source.icon, !icon.isEmpty {
+                if let icon = feed.source.media {
                     NetworkImage(data: icon)
                         .frame(width: 20, height: 20)
                         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))

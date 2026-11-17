@@ -38,6 +38,7 @@ kotlin {
             projects.feature.subscription,
             projects.feature.tab,
             projects.feature.agent,
+            projects.feature.plugin,
         )
 
     listOf("iosArm64", "iosSimulatorArm64", "macosArm64")
@@ -81,6 +82,7 @@ kotlin {
                 api(projects.feature.subscription)
                 api(projects.feature.tab)
                 api(projects.feature.agent)
+                api(projects.feature.plugin)
                 implementation(libs.compose.runtime)
 // START Non-FOSS component
                 implementation(libs.crashkios.crashlytics)
@@ -101,13 +103,21 @@ kotlin {
 }
 
 skie {
+    if (providers.environmentVariable("CI").orNull == "true") {
+        // SKIE's compilers bypass Gradle's worker limit.
+        build {
+            enableParallelSwiftCompilation.set(false)
+            enableConcurrentSkieCompilation.set(false)
+            enableParallelSkieCompilation.set(false)
+        }
+    }
     analytics {
         disableUpload.set(true)
         enabled.set(false)
     }
     features {
         group {
-            DefaultArgumentInterop.Enabled(true)
+            DefaultArgumentInterop.Enabled(false)
         }
         enableFlowCombineConvertorPreview = true
     }

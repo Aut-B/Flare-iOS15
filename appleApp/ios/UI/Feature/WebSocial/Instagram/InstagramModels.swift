@@ -17,13 +17,25 @@ struct IGUser: Identifiable, Hashable {
     }
 }
 
-/// Instagram 的一条帖子。轮播（carousel）已经把子图摊平成 `images`，
-/// 视频帖的 `videoURL` 有值，封面仍在 `images` 里。
+/// 轮播里的一项：可能是一张图，也可能是一段视频（视频也带封面）。
+struct IGMediaItem: Identifiable, Hashable {
+    let id: String
+    let image: String?
+    let video: String?
+    let aspect: CGFloat
+
+    var isVideo: Bool { video != nil }
+}
+
+/// Instagram 的一条帖子。轮播（carousel）已经把子项摊平成 `items`，
+/// `images` 仍然保留全部图片地址，`videoURL` 指向第一条视频。
 struct IGMedia: Identifiable, Hashable {
     let id: String
     /// 短码，用来拼 `https://www.instagram.com/p/<code>/`。
     let shortcode: String
     let user: IGUser
+    /// 逐项媒体，顺序和网页一致；多图 / 视频混排靠它。
+    let items: [IGMediaItem]
     let images: [String]
     let videoURL: String?
     let caption: String
@@ -174,27 +186,41 @@ enum IGJSON {
         guard let user = user(object["user"]) else { return nil }
 
         let carousel = array(object["carousel_media"])
-        var images: [String] = []
-        var aspect: CGFloat = 1
-        var videoURL = IGJSON.videoURL(object)
-        for child in carousel {
-            if let info = bestImageInfo(child) {
-                if images.isEmpty { aspect = info.aspect }
-                images.append(info.url)
-            }
-            if videoURL == nil { videoURL = IGJSON.videoURL(child) }
+        var items: [IGMediaItem] = []
+        for (offset, child) in carousel.enumerated() {
+            let info = bestImageInfo(child)
+            let video = IGJSON.videoURL(child)
+            guard info != nil || video != nil else { continue }
+            items.append(
+                IGMediaItem(
+                    id: identifier(child["pk"]) ?? "\(pk)-\(offset)",
+                    image: info?.url,
+                    video: video,
+                    aspect: info?.aspect ?? 1
+                )
+            )
         }
-        if images.isEmpty, let info = bestImageInfo(object) {
-            aspect = info.aspect
-            images.append(info.url)
+        if items.isEmpty, let info = bestImageInfo(object) {
+            items.append(
+                IGMediaItem(
+                    id: pk,
+                    image: info.url,
+                    video: IGJSON.videoURL(object),
+                    aspect: info.aspect
+                )
+            )
         }
-        guard !images.isEmpty else { return nil }
+        let images = items.compactMap(\.image)
+        let videoURL = items.compactMap(\.video).first
+        guard !images.isEmpty || videoURL != nil else { return nil }
+        let aspect = items.first?.aspect ?? 1
 
         let mediaType = int(object["media_type"])
         return IGMedia(
             id: string(object["id"]) ?? pk,
             shortcode: string(object["code"]) ?? "",
             user: user,
+            items: items,
             images: images,
             videoURL: videoURL,
             caption: string(IGJSON.object(object["caption"])?["text"]) ?? "",
@@ -202,7 +228,7 @@ enum IGJSON {
             likeCount: int(object["like_count"]),
             commentCount: int(object["comment_count"]),
             isVideo: mediaType == 2 || videoURL != nil,
-            isCarousel: mediaType == 8 || !carousel.isEmpty,
+            isCarousel: mediaType == 8 || !carousel.isEmpty || items.count > 1,
             hasLiked: (object["has_liked"] as? Bool) ?? (int(object["has_liked"]) == 1),
             aspect: aspect
         )

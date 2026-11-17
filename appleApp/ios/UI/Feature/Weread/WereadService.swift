@@ -33,6 +33,7 @@ final class WereadService: @unchecked Sendable {
         var result: [WereadBook] = []
         var seen = Set<String>()
         var syncKey = "0"
+        var pages: [[String: Any]] = []
         for _ in 0..<4 {
             let url = URL(string: "\(base)/web/shelf/sync?synckeys=\(syncKey)&teenmode=0&album=1")!
             var request = URLRequest(url: url)
@@ -41,6 +42,7 @@ final class WereadService: @unchecked Sendable {
             let data = try await send(request)
             let json = try parseObject(data)
             try checkError(json)
+            pages.append(json)
 
             var added = 0
             for book in books(fromShelfJSON: json) where !seen.contains(book.id) {
@@ -57,7 +59,36 @@ final class WereadService: @unchecked Sendable {
             }
             syncKey = nextKey
         }
-        return result
+        // 分组和阅读进度往往只在第一页下发：后几页的书单独解析会掉分组、
+        // 丢掉「最近阅读」时间。把每一页合并成一份响应再解析一遍。
+        guard pages.count > 1 else { return result }
+        return books(fromShelfJSON: pages)
+    }
+
+    /// 多页 `shelf/sync` 合并后再解析：`bookGroups` / `bookProgress` 可能
+    /// 分散在不同页，逐页解析会让后几页的书没有分组、排序也不对。
+    func books(fromShelfJSON pages: [[String: Any]]) -> [WereadBook] {
+        var books: [[String: Any]] = []
+        var archive: [[String: Any]] = []
+        var groups: [[String: Any]] = []
+        var progress: [[String: Any]] = []
+        for page in pages {
+            books.append(contentsOf: page["books"] as? [[String: Any]] ?? [])
+            archive.append(contentsOf: page["archive"] as? [[String: Any]] ?? [])
+            for key in ["bookGroups", "book_groups", "groups"] {
+                groups.append(contentsOf: page[key] as? [[String: Any]] ?? [])
+            }
+            for key in ["bookProgress", "book_progress"] {
+                progress.append(contentsOf: page[key] as? [[String: Any]] ?? [])
+            }
+        }
+        let merged: [String: Any] = [
+            "books": books,
+            "archive": archive,
+            "bookGroups": groups,
+            "bookProgress": progress,
+        ]
+        return books(fromShelfJSON: merged)
     }
 
     /// 把 `shelf/sync` 的响应翻成书单。
@@ -148,15 +179,41 @@ final class WereadService: @unchecked Sendable {
                 (item["bookId"] as? String)
                 ?? (item["bookId"] as? NSNumber)?.stringValue
             guard let bookId = id, !bookId.isEmpty else { continue }
-            let percent = min(max(intValue(item["progress"]) ?? 0, 0), 100)
-            var stamp = TimeInterval(max(intValue(item["updateTime"]) ?? 0, 0))
-            if stamp == 0 {
-                stamp = TimeInterval(max(intValue(item["readUpdateTime"]) ?? 0, 0))
-            }
-            if stamp > 10_000_000_000 { stamp /= 1000 }
-            map[bookId] = (percent, stamp)
+            map[bookId] = (percentValue(item), stampValue(item))
         }
         return map
+    }
+
+    /// `bookProgress[].progress` 有三种形态：整数、单个对象、对象数组。
+    /// 只按整数读的话，网页版那种 `{chapterUid, progress}` 会一律变成 0。
+    private func percentValue(_ item: [String: Any]) -> Int {
+        let raw: Int?
+        if let list = item["progress"] as? [[String: Any]] {
+            raw = intValue(list.first?["progress"])
+        } else if let dict = item["progress"] as? [String: Any] {
+            raw = intValue(dict["progress"])
+        } else {
+            raw = intValue(item["progress"])
+        }
+        return min(max(raw ?? 0, 0), 100)
+    }
+
+    /// 最近阅读时间。`readUpdateTime` 是书架级的秒级时间戳，
+    /// `progress[].updateTime` 是每本书自己的（常见是毫秒）。
+    private func stampValue(_ item: [String: Any]) -> TimeInterval {
+        var stamp = intValue(item["readUpdateTime"]) ?? 0
+        if stamp == 0, let list = item["progress"] as? [[String: Any]] {
+            stamp = intValue(list.first?["updateTime"]) ?? 0
+        }
+        if stamp == 0, let dict = item["progress"] as? [String: Any] {
+            stamp = intValue(dict["updateTime"]) ?? 0
+        }
+        if stamp == 0 {
+            stamp = intValue(item["updateTime"]) ?? 0
+        }
+        var value = TimeInterval(max(stamp, 0))
+        if value > 10_000_000_000 { value /= 1000 }
+        return value
     }
 
     // MARK: - 目录
@@ -194,12 +251,19 @@ final class WereadService: @unchecked Sendable {
     func content(bookId: String, chapterUid: Int, cookie: String) async throws -> String {
         let uid = String(chapterUid)
 
-        async let epub0 = fragment("/web/book/chapter/e_0", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie)
-        async let epub1 = fragment("/web/book/chapter/e_1", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie)
-        async let epub2 = fragment("/web/book/chapter/e_2", bookId: bookId, chapterUid: uid, st: 1, cookie: cookie)
-        async let epub3 = fragment("/web/book/chapter/e_3", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie)
+        // 四种分片用 `try?`：txt 书请求 `e_*` 会 404，以前这里 `try await`
+        // 一抛错就整章失败，下面的 `t_*` 兜底根本走不到 —— 表现就是
+        // 「点开一直白屏 / 一直转圈」。
+        async let epub0 = try? fragment("/web/book/chapter/e_0", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie)
+        async let epub1 = try? fragment("/web/book/chapter/e_1", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie)
+        async let epub2 = try? fragment("/web/book/chapter/e_2", bookId: bookId, chapterUid: uid, st: 1, cookie: cookie)
+        async let epub3 = try? fragment("/web/book/chapter/e_3", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie)
 
-        let (part0, part1, part2, part3) = try await (epub0, epub1, epub2, epub3)
+        let (raw0, raw1, raw2, raw3) = await (epub0, epub1, epub2, epub3)
+        let part0 = raw0 ?? ""
+        let part1 = raw1 ?? ""
+        let part2 = raw2 ?? ""
+        let part3 = raw3 ?? ""
 
         if !part0.isEmpty, !part1.isEmpty, !part3.isEmpty {
             let style = WereadCrypto.decrypt(part2)
@@ -213,12 +277,12 @@ final class WereadService: @unchecked Sendable {
         }
 
         // 老 txt 书走 t_0 / t_1。
-        async let txt0 = fragment("/web/book/chapter/t_0", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie)
-        async let txt1 = fragment("/web/book/chapter/t_1", bookId: bookId, chapterUid: uid, st: 1, cookie: cookie)
-        let (text0, text1) = try await (txt0, txt1)
-        let text = WereadCrypto.decrypt(text0 + text1)
+        async let txt0 = try? fragment("/web/book/chapter/t_0", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie)
+        async let txt1 = try? fragment("/web/book/chapter/t_1", bookId: bookId, chapterUid: uid, st: 1, cookie: cookie)
+        let (rawText0, rawText1) = await (txt0, txt1)
+        let text = WereadCrypto.decrypt((rawText0 ?? "") + (rawText1 ?? ""))
         guard !text.isEmpty else { throw WereadError.empty }
-        return text
+        return clean(text)
     }
 
     // MARK: - 进度
@@ -362,29 +426,8 @@ final class WereadService: @unchecked Sendable {
             (item["bookId"] as? String)
             ?? (item["bookId"] as? NSNumber)?.stringValue
         guard let bookId = bookId, !bookId.isEmpty else { return nil }
-        // 进度有时是数组（shelf/sync），有时是单个对象。
-        let percent: Int
-        if let list = item["progress"] as? [[String: Any]] {
-            percent = intValue(list.first?["progress"]) ?? 0
-        } else if let dict = item["progress"] as? [String: Any] {
-            percent = intValue(dict["progress"]) ?? 0
-        } else {
-            percent = 0
-        }
-        // 最近阅读时间：`readUpdateTime` 是书架级的，`progress[].updateTime`
-        // 是每本书自己的；有的一版只给毫秒，所以大于 1e10 就除 1000。
-        var stamp = intValue(item["readUpdateTime"]) ?? 0
-        if stamp == 0, let list = item["progress"] as? [[String: Any]] {
-            stamp = intValue(list.first?["updateTime"]) ?? 0
-        }
-        if stamp == 0, let dict = item["progress"] as? [String: Any] {
-            stamp = intValue(dict["updateTime"]) ?? 0
-        }
-        if stamp == 0 {
-            stamp = intValue(item["updateTime"]) ?? 0
-        }
-        var updated = TimeInterval(max(stamp, 0))
-        if updated > 10_000_000_000 { updated /= 1000 }
+        let percent = percentValue(item)
+        let updated = stampValue(item)
 
         return WereadBook(
             id: bookId,

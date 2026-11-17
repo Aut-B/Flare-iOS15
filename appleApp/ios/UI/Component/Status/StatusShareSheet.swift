@@ -22,13 +22,10 @@ struct StatusShareSheet: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var presenter: KotlinPresenter<StatusState>
-    @StateObject private var commentsPresenter: KotlinPresenter<ScreenshotCommentsState>
+    @StateObject private var presenter: KotlinPresenter<StatusSharePresenterState>
     @State private var theme: ColorScheme? = nil
     @State private var previewStyle: SharePreviewStyle = .card
     @StateObject private var renderer = ScreenshotRenderCoordinator()
-    @State private var selectedComments: [UiTimelineV2] = []
-    @State private var showCommentPicker = false
     @State private var showPreview = false
 
     /// 渲染出来的长图。真正持有它的是 `renderer`，这里只是转发一下，
@@ -49,21 +46,20 @@ struct StatusShareSheet: View {
         self.fxShareUrl = fxShareUrl
         self.fixvxShareUrl = fixvxShareUrl
         self.onCrossPost = onCrossPost
-        self._presenter = .init(wrappedValue: .init(presenter: StatusPresenter(accountType: accountType, statusKey: statusKey)))
-        self._commentsPresenter = .init(
+        self._presenter = .init(
             wrappedValue: .init(
-                presenter: ScreenshotCommentsPresenter(accountType: accountType, statusKey: statusKey)
+                presenter: StatusSharePresenter(accountType: accountType, statusKey: statusKey)
             )
         )
     }
 
     /// 选中评论的指纹，用来触发重新渲染。
     private var selectionSignature: String {
-        selectedComments.map { "\($0.statusKey.id)|\($0.statusKey.host)" }.joined(separator: ",")
+        presenter.state.selectedReplies.map { "\($0.statusKey.id)|\($0.statusKey.host)" }.joined(separator: ",")
     }
 
-    private var availableCommentCount: Int {
-        commentsPresenter.state.comments.count
+    private var selectedComments: [UiTimelineV2] {
+        Array(presenter.state.selectedReplies)
     }
 
     var body: some View {
@@ -98,22 +94,20 @@ struct StatusShareSheet: View {
                     .disabled(image == nil || !renderer.isFinal)
 
                     Button {
-                        showCommentPicker = true
+                        presenter.state.selectReplies()
                     } label: {
                         HStack(spacing: 12) {
                             Label {
-                                Text("screenshot_comments_pick")
+                                Text("share_replies_title")
                             } icon: {
                                 Image(systemName: "text.bubble")
                             }
                             Spacer(minLength: 0)
                             Group {
-                                if commentsPresenter.state.isLoading {
+                                if presenter.state.loading {
                                     ProgressView()
-                                } else if selectedComments.isEmpty {
-                                    Text("screenshot_comments_none")
                                 } else {
-                                    Text(String(format: String(localized: "screenshot_comments_selected"), selectedComments.count))
+                                    Text(String(format: String(localized: "share_replies_count"), Int(presenter.state.selectedCount)))
                                 }
                             }
                             .font(.footnote)
@@ -125,7 +119,6 @@ struct StatusShareSheet: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .disabled(commentsPresenter.state.isLoading || availableCommentCount == 0)
 
                     // 保存博文里带的原图（不是截图）。长按图片也有同样入口，
                     // 这里放一份是因为长按不容易被发现。
@@ -205,12 +198,11 @@ struct StatusShareSheet: View {
             }
         }
         .navigationTitle("fx_share")
-        .sheet(isPresented: $showCommentPicker) {
-            ScreenshotCommentPickerView(
-                accountType: accountType,
-                statusKey: statusKey,
-                selected: $selectedComments
-            )
+        .sheet(isPresented: Binding(
+            get: { presenter.state.selecting },
+            set: { if !$0 { presenter.state.cancelSelection() } }
+        )) {
+            StatusShareReplyPicker(state: presenter.state)
         }
         .sheet(isPresented: $showPreview) {
             ScrollView {
@@ -423,110 +415,6 @@ extension StatusShareSheet {
         }
     }
 }
-
-// MARK: - 评论选择
-
-private struct ScreenshotCommentPickerView: View {
-    @Environment(\.dismiss) private var dismiss
-    @StateObject private var presenter: KotlinPresenter<ScreenshotCommentsState>
-    @Binding var selected: [UiTimelineV2]
-
-    init(
-        accountType: AccountType,
-        statusKey: MicroBlogKey,
-        selected: Binding<[UiTimelineV2]>
-    ) {
-        _presenter = .init(
-            wrappedValue: .init(
-                presenter: ScreenshotCommentsPresenter(accountType: accountType, statusKey: statusKey)
-            )
-        )
-        _selected = selected
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("screenshot_comments_title")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    dismiss()
-                } label: {
-                    Text("screenshot_comments_done")
-                }
-            }
-            .padding()
-            Divider()
-            content
-        }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if presenter.state.isLoading {
-            VStack {
-                ProgressView()
-                Text("screenshot_comments_loading")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 8)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if let error = presenter.state.error {
-            ListErrorView(error: error, onRetry: {})
-        } else if presenter.state.comments.isEmpty {
-            ListEmptyView()
-        } else {
-            List {
-                ForEach(0..<presenter.state.comments.count, id: \.self) { index in
-                    let comment = presenter.state.comments[index]
-                    Button {
-                        toggle(comment)
-                    } label: {
-                        row(comment)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    private func row(_ comment: UiTimelineV2) -> some View {
-        let post = StatusShareSheet.postOf(comment)
-        let isSelected = isSelected(comment)
-        return HStack(alignment: .top, spacing: 10) {
-            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(post?.user?.name.innerText ?? "")
-                    .font(.footnote.weight(.semibold))
-                if let text = post?.content.original.innerText {
-                    Text(text)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(4)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .contentShape(Rectangle())
-        .padding(.vertical, 4)
-    }
-
-    private func isSelected(_ comment: UiTimelineV2) -> Bool {
-        selected.contains { $0.statusKey.id == comment.statusKey.id && $0.statusKey.host == comment.statusKey.host }
-    }
-
-    private func toggle(_ comment: UiTimelineV2) {
-        if let index = selected.firstIndex(where: { $0.statusKey.id == comment.statusKey.id && $0.statusKey.host == comment.statusKey.host }) {
-            selected.remove(at: index)
-        } else {
-            selected.append(comment)
-        }
-    }
-}
-
 
 // MARK: - 截图渲染调度
 //

@@ -19,9 +19,11 @@ final class TimelineItemHeightCacheTests: XCTestCase {
         var cache = TimelineItemHeightCache()
         let wide = TimelineItemHeightCache.Geometry(widthInPixels: 980, multipleColumns: false)
         let card = TimelineItemHeightCache.Geometry(widthInPixels: 780, multipleColumns: true)
+        let shorter = TimelineItemHeightCache.Geometry(widthInPixels: 780, multipleColumns: false, singleMediaMaxHeightInPixels: 520)
         cache.publish(70, for: "post", geometry: single, renderHash: 1)
         XCTAssertNil(cache.height(for: "post", geometry: wide))
         XCTAssertNil(cache.height(for: "post", geometry: card))
+        XCTAssertNil(cache.height(for: "post", geometry: shorter))
         cache.publish(60, for: "post", geometry: wide, renderHash: 1)
         XCTAssertEqual(cache.height(for: "post", geometry: single), 70)
         cache.publish(90, for: "post", geometry: card, renderHash: 1)
@@ -97,11 +99,13 @@ final class TimelineItemHeightCacheTests: XCTestCase {
         cache.stage(400, for: "changed", geometry: single, renderHash: 1)
         cache.stage(500, for: "current", geometry: single, renderHash: 2)
         cache.keep(["changed", "current"])
+        XCTAssertEqual(Set(cache.pendingItemIDs), ["changed", "current"])
         XCTAssertNil(cache.measuredHeight(for: "removed", geometry: single, renderHash: 1))
         XCTAssertTrue(cache.commitPendingMeasurements { id, _, hash in id == "current" && hash == 2 })
         XCTAssertNil(cache.height(for: "changed", geometry: single))
         XCTAssertEqual(cache.height(for: "current", geometry: single), 500)
         XCTAssertFalse(cache.hasPendingMeasurements)
+        XCTAssertTrue(cache.pendingItemIDs.isEmpty)
     }
 
     func testClearingMeasurementsAlsoClearsPendingGeometry() {

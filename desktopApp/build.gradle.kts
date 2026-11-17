@@ -31,6 +31,7 @@ dependencies {
     implementation(projects.feature.subscription)
     implementation(projects.feature.tab)
     implementation(projects.feature.agent)
+    implementation(projects.feature.plugin)
     implementation(projects.composeUi)
 
     implementation(compose("org.jetbrains.compose.runtime:runtime"))
@@ -71,10 +72,10 @@ dependencies {
     implementation(libs.systemColor)
     implementation(libs.sentry)
     implementation(libs.richtext.ui)
-    implementation(libs.richtext.commonmark)
 
     testImplementation(compose("org.jetbrains.compose.ui:ui-test-junit4"))
     testImplementation(libs.junit)
+    testImplementation(libs.ktor.client.mock)
 }
 
 val fdroid = rootProject.file("fdroid.properties")
@@ -123,6 +124,7 @@ buildConfig {
 
 nucleus.application {
     jvmArgs += "--enable-native-access=ALL-UNNAMED"
+    jvmArgs += "-Djava.net.useSystemProxies=true"
     mainClass = "dev.dimension.flare.MainKt"
     buildTypes {
         release {
@@ -139,7 +141,7 @@ nucleus.application {
         cleanupNativeLibs = true
         enableAotCache = false
         modules("jdk.localedata", "java.management")
-        homepage = "https://github.com/DimensionDev/Flare"
+        homepage = "https://github.com/flaresocialapp/Flare"
         // Higher compression level can cause laggy for linux AppImage
         compressionLevel = CompressionLevel.Store
         targetFormats(
@@ -299,6 +301,10 @@ val compileFoundationModelsBridge = tasks.register<Exec>("compileFoundationModel
         foundationModelsBridgeLibrary.get().asFile.absolutePath,
         foundationModelsBridgeSourceDir.file("FoundationModelsBridge.swift").asFile.absolutePath,
     )
+}
+
+tasks.test {
+    testLogging.exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
 }
 
 tasks.named<ProcessResources>("processResources") {

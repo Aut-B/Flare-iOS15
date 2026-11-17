@@ -172,8 +172,9 @@ final class WereadStore: ObservableObject {
             DispatchQueue.main.async { self.errorMessage = message }
         }
         DispatchQueue.main.async { self.isLoading = false }
-        // 接口只给数字 id，阅读器要的是网页里的 hash，所以顺手再抄一遍网页书架。
-        syncWebShelf()
+        // 原生阅读器只要数字 bookId，不再为了 reader hash 在后台跑隐藏网页。
+        // 线上书架的补全/链接抄取保留为「重新同步线上书架」的手动操作，
+        // 避免每次刷新书架都建一个 WebView 把 6s 拖慢。
     }
 
     // MARK: - 网页书架（拿阅读器地址 + 补齐书单）

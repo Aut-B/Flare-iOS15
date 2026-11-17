@@ -280,6 +280,7 @@ private val UiStrings.desktopStringResource: StringResource
             UiStrings.Articles -> Res.string.profile_tab_articles
 
             UiStrings.WeiboFriendsCircle -> Res.string.weibo_friends_circle_title
+
             UiStrings.WeiboPrivateFollowing -> Res.string.weibo_private_following_title
 
             UiStrings.Media -> Res.string.profile_tab_media

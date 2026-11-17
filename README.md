@@ -1,7 +1,7 @@
 # Flare
-[![license](https://img.shields.io/github/license/DimensionDev/Flare)](https://github.com/DimensionDev/Flare/blob/master/LICENSE)
+[![license](https://img.shields.io/github/license/flaresocialapp/Flare)](https://github.com/flaresocialapp/Flare/blob/master/LICENSE)
 [![Crowdin](https://badges.crowdin.net/flareapp/localized.svg)](https://crowdin.com/project/flareapp)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/DimensionDev/Flare)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/flaresocialapp/Flare)
 [![Telegram](https://img.shields.io/badge/-telegram-blue?logo=telegram&color=white)](https://t.me/+fEJ2UYnOlVM0NmM1)
 [![Discord](https://img.shields.io/badge/-discord-blue?logo=discord&color=white)](https://discord.gg/De9NhXBryT)
 
@@ -20,7 +20,7 @@ Flare is an open-source, privacy-first social client that brings Mastodon, Missk
 <a href='https://apps.apple.com/us/app/flare-social-network-client/id6476077738'><img alt='Get it on Google Play' src='https://developer.apple.com/app-store/marketing/guidelines/images/badge-example-preferred_2x.png' width=150/></a>
 <a href='https://play.google.com/store/apps/details?id=dev.dimension.flare&pcampaignid=pcampaignidMKT-Other-global-all-co-prtnr-py-PartBadge-Mar2515-1'><img alt='Get it on Google Play' src='docs/GetItOnGooglePlay_Badge_Web_color_English.svg' width=170/></a>
 <a href='https://f-droid.org/packages/dev.dimension.flare'><img alt='Get it on F-Droid' src='https://f-droid.org/badge/get-it-on.svg' width=150/></a>
-<a href='https://github.com/DimensionDev/Flare/releases/latest'><img alt='Download AppImage' src='docs/appimage_badge.svg' width=150/></a>
+<a href='https://github.com/flaresocialapp/Flare/releases/latest'><img alt='Download AppImage' src='docs/appimage_badge.svg' width=150/></a>
 
 ## Features
  - Unified social inbox: Flare brings Mastodon, Misskey, Bluesky, X, Pixiv, Fanbox, Nostr and RSS together in one place, so users can follow fragmented communities through a single timeline.
@@ -30,6 +30,24 @@ Flare is an open-source, privacy-first social client that brings Mastodon, Missk
  - Cross-posting workflow: Users can publish to multiple platforms at once, making it practical for creators and heavy social media users.
  - Built in AI Agent: Configure OpenAI-compatible or on-device AI, enable summaries, or ask for post or profile insights, chat with Flare’s agent, and query local cache/history.
  - Privacy-first approach: As a FOSS client, it emphasizes user control with features like anonymous mode, local filtering, local history, and transparent data handling.
+
+## Plugins (Beta)
+
+Connect additional websites with social plugins on Android, Desktop, iOS, and
+native macOS. Use a Flare build that includes Plugins in Settings; plugin support
+is not available in the Web client.
+
+- **Install a plugin:** open Settings → Plugins, add its public GitHub repository
+  URL, and review its source and permissions before confirming. See the
+  [installation and update guide](feature/plugin/sdk/skill/flare-plugin/references/publishing.md).
+- **Create with Flare AI:** ask the configured AI assistant to build an adapter
+  for your website. See [creating plugins in Flare](feature/plugin/AI_AUTHORING.md).
+- **Develop a plugin:** create a typed TypeScript project with
+  `npx flare-plugin-sdk@next init my-plugin` and follow
+  the [SDK quick start](feature/plugin/sdk/README.md) through local debugging and
+  recommended GitHub publication (with local `.fpp` packaging as an alternative),
+  then use the [complete developer guide](feature/plugin/sdk/skill/flare-plugin/README.md)
+  for authentication, capabilities, data types, desktop development, and examples.
 
 ## Roadmap
 Here're some features we're planning to implement in the future.

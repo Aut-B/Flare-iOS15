@@ -203,7 +203,7 @@ struct XhsFeedView: View {
     }
 
     private func estimatedHeight(_ note: XhsNote) -> CGFloat {
-        let imageHeight = cardWidth / max(note.aspect, 0.4)
+        let imageHeight = cardWidth / max(note.aspect, 0.28)
         let textHeight: CGFloat = note.displayTitle.isEmpty ? 36 : 62
         return imageHeight + textHeight + 10
     }
@@ -403,7 +403,7 @@ struct XhsNoteCard: View {
     }
 
     private var mediaHeight: CGFloat {
-        cardWidth / max(note.aspect, 0.4)
+        cardWidth / max(note.aspect, 0.28)
     }
 
     /// 多图笔记在卡片上就能横滑看后面的图，不再只显示封面。
@@ -414,7 +414,7 @@ struct XhsNoteCard: View {
             if note.images.count > 1 {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 2) {
-                        ForEach(Array(note.images.prefix(9).enumerated()), id: \.offset) { _, url in
+                        ForEach(Array(note.images.enumerated()), id: \.offset) { _, url in
                             XhsImageView(url: url)
                                 .frame(width: cardWidth, height: mediaHeight)
                                 .clipped()
@@ -489,30 +489,56 @@ final class XhsImageCache {
             return
         }
         waiters[url] = [completion]
-        load(url, original: url, retry: true)
+        load(url, original: url, stage: 0)
     }
 
     /// 小红书图床对 Referer / UA 有要求，个别机型还要避开 `!` 样式后缀。
     /// `original` 是最初请求的 key：回退到原图后结果仍要交回原来的等待者，
     /// 否则 `finish` 找不到 waiter，界面就一直灰着。
-    private func load(_ url: String, original: String, retry: Bool) {
-        guard let target = URL(string: url) else {
+    ///
+    /// 三级回退：带 cookie 的桌面请求 → 去掉 `!` 样式后缀的原图 →
+    /// 不带 cookie 的移动端请求。第二张之后经常是受保护图床，前两级都可能
+    /// 403，最后一级能救回来一部分。
+    private func load(_ url: String, original: String, stage: Int) {
+        // 图床偶尔下发 `http://`，ATS 会直接拦掉；统一提到 https 再请求。
+        var value = url
+        if value.hasPrefix("//") { value = "https:" + value }
+        if value.hasPrefix("http://") { value = "https://" + value.dropFirst(7) }
+        guard let target = URL(string: value) else {
             finish(original, image: nil)
             return
         }
         var request = URLRequest(url: target)
         request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
-        request.setValue(WebPlatformUserAgent.desktop, forHTTPHeaderField: "User-Agent")
+        request.setValue(
+            stage >= 2 ? WebPlatformUserAgent.mobile : WebPlatformUserAgent.desktop,
+            forHTTPHeaderField: "User-Agent"
+        )
         request.setValue("image/webp,image/apng,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        // 受保护的图（尤其是详情页第二张之后）不带登录 Cookie 会回 403，
+        // 表现就是卡片一直灰着。`XhsStore` 把 cookie 存在这个 key 里。
+        let cookie =
+            UserDefaults.standard.string(forKey: "xhs.cookie")?
+                .replacingOccurrences(of: "\r", with: " ")
+                .replacingOccurrences(of: "\n", with: " ") ?? ""
+        if stage < 2, !cookie.isEmpty {
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        }
         session.dataTask(with: request) { [weak self] data, _, _ in
             let image = data.flatMap { UIImage(data: $0) }
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                if image == nil, retry, let fallback = Self.originalURL(url), fallback != url {
-                    // 末尾的 `!xxx` 是图床的处理样式（webp / 裁切），
-                    // iOS 15 上偶尔解不出来，退回原图再试一次。
-                    self.load(fallback, original: original, retry: false)
-                    return
+                if image == nil {
+                    if stage == 0, let fallback = Self.originalURL(url), fallback != url {
+                        // 末尾的 `!xxx` 是图床的处理样式（webp / 裁切），
+                        // iOS 15 上偶尔解不出来，退回原图再试一次。
+                        self.load(fallback, original: original, stage: 1)
+                        return
+                    }
+                    if stage < 2 {
+                        self.load(original, original: original, stage: 2)
+                        return
+                    }
                 }
                 self.finish(original, image: image)
             }

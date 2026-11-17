@@ -1,6 +1,8 @@
+import FlareAppleUI
 import UIKit
 import Kingfisher
 import KotlinSharedUI
+import FlareAppleUI
 
 final class StatusReactionUIView: UIView, ManualLayoutMeasurable, TimelineHeightProviding {
     var onReactionTapped: ((UiTimelineV2.PostEmojiReaction) -> Void)?
@@ -219,6 +221,8 @@ private final class ReactionChipView: UIControl, ManualLayoutMeasurable, Timelin
     private var showsImage = false
     private var isMyReaction = false
     private var imageURL: URL?
+    private var imageMedia: UiMediaImage?
+    private var imageProxy: ProxyRef?
     private var imageWidth: CGFloat = 0
 
     private static let horizontalPadding: CGFloat = 8
@@ -271,15 +275,17 @@ private final class ReactionChipView: UIControl, ManualLayoutMeasurable, Timelin
     }
 
     func configure(item: UiTimelineV2.PostEmojiReaction) {
+        imageMedia = item.isUnicode ? nil : item.media
         isMyReaction = item.me
         showsImage = !item.isUnicode
 
         if item.isUnicode {
             imageURL = nil
+            imageProxy = nil
             imageWidth = 0
             nameLabel.text = item.name
             nameLabel.isHidden = false
-            imageView.kf.cancelDownloadTask()
+            imageView.cancelMediaLoad()
             imageView.image = nil
             imageView.isHidden = true
         } else {
@@ -287,18 +293,15 @@ private final class ReactionChipView: UIControl, ManualLayoutMeasurable, Timelin
             nameLabel.isHidden = true
             imageView.isHidden = false
             let url = URL(string: item.url)
-            if imageURL != url {
+            if imageURL != url || imageProxy != item.media.proxy {
                 imageURL = url
+                imageProxy = item.media.proxy
                 imageWidth = 0
-                imageView.kf.cancelDownloadTask()
+                imageView.cancelMediaLoad()
                 imageView.image = nil
             }
             if let url, imageView.image == nil {
-                imageView.kf.setImage(with: url, options: [.backgroundDecode]) { [weak self] result in
-                    guard let self, self.imageURL == url,
-                          case .success(let value) = result else { return }
-                    self.updateImageWidth(for: value.image)
-                }
+                loadImage(url)
             }
         }
 
@@ -314,6 +317,22 @@ private final class ReactionChipView: UIControl, ManualLayoutMeasurable, Timelin
     override func tintColorDidChange() {
         super.tintColorDidChange()
         updateColors()
+    }
+
+    private func loadImage(_ url: URL) {
+        guard let media = imageMedia else { return }
+        let scale = max(traitCollection.displayScale, 1)
+        let processor = ImageDownsamplingProcessor(
+            pixelSize: CGSize(width: .greatestFiniteMagnitude, height: ceil(Self.imageHeight * scale)),
+            fillsBounds: false)
+        imageView.setMedia(media, options: [
+            .processor(processor), .scaleFactor(scale), .cacheOriginalImage,
+            .backgroundDecode, .asyncCacheTypeCheck,
+        ]) { [weak self] result in
+            guard let self, self.imageURL == url,
+                  case .success(let value) = result else { return }
+            self.updateImageWidth(for: value.image)
+        }
     }
 
     override func layoutSubviews() {
@@ -408,11 +427,12 @@ private final class ReactionChipView: UIControl, ManualLayoutMeasurable, Timelin
     }
 
     private func updateColors() {
-        nameLabel.textColor = .label
-        countLabel.textColor = .label
+        nameLabel.textColor = .flareLabel
+        countLabel.textColor = .flareLabel
         backgroundColor = isMyReaction
             ? tintColor.withAlphaComponent(0.18)
             : .tertiarySystemGroupedBackground
+        traitOverrides[FlareTextBackgroundTrait.self] = backgroundColor
         layer.borderWidth = isMyReaction ? Self.borderWidth : 0
         layer.borderColor = isMyReaction ? tintColor.cgColor : UIColor.clear.cgColor
     }

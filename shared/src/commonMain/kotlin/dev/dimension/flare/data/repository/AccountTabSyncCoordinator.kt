@@ -1,6 +1,6 @@
 package dev.dimension.flare.data.repository
 
-import dev.dimension.flare.data.datasource.microblog.datasource.TimelineTabConfigurationDataSource
+import dev.dimension.flare.data.datasource.microblog.capabilities
 import dev.dimension.flare.data.model.MixedTimelineTabItem
 import dev.dimension.flare.data.model.TabSettings
 import dev.dimension.flare.data.model.TimelineTabItem
@@ -14,6 +14,7 @@ import dev.dimension.flare.data.model.tab.TimelineSlotContent
 import dev.dimension.flare.model.MicroBlogKey
 import dev.dimension.flare.ui.model.UiAccount
 import kotlinx.collections.immutable.toImmutableList
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -28,68 +29,21 @@ internal class AccountTabSyncCoordinator(
 ) {
     init {
         coroutineScope.launch {
-            runCatching { removeTabsForDeletedAccounts() }
-        }
-        coroutineScope.launch {
-            runCatching { ensureTabsForExistingAccounts() }
-        }
-        coroutineScope.launch {
-            accountRepository.onAdded.collect { account ->
-                // 建数据源可能抛（平台没注册 / 凭证解析失败 / DB 里查不到）。
-                // 这个 coroutine 在启动时创建，异常抛出去就是整机闪退 ——
-                // 表现就是「登录成功后闪退」「装上以后再也进不去」。
-                runCatching { addDefaultTabs(account) }
-            }
-        }
-        coroutineScope.launch {
-            accountRepository.onRemoved.collect { accountKey ->
-                runCatching { removeTabsForAccount(accountKey) }
+            removeTabsForDeletedAccounts()
+            accountRepository.accountChanges.collect { change ->
+                try {
+                    when (change) {
+                        is AccountChange.Added -> addDefaultTabs(change.account)
+                        is AccountChange.Removed -> removeTabsForAccount(change.accountKey)
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    error.printStackTrace()
+                }
             }
         }
     }
-
-    /**
-     * 给「已经添加、但标签栏里什么都没有」的账号补一个默认标签页。
-     *
-     * `addDefaultTabs` 只在账号新增的那一刻触发。小红书 / Instagram 是先加了账号、
-     * 后来才补上 `defaultTabs` 的，所以老账号永远等不到那一次 —— 表现就是
-     * 账号在，但标签栏里没有这个平台，等于没法刷。这里在启动时补一次，幂等。
-     */
-    private suspend fun ensureTabsForExistingAccounts() {
-        val accounts = accountRepository.allAccounts.first()
-        if (accounts.isEmpty()) return
-        val existingSlots = settingsRepository.currentHomeSlots()
-        val missing =
-            accounts.filter { account ->
-                existingSlots.none { slot -> slot.containsAccount(account.accountKey) }
-            }
-        if (missing.isEmpty()) return
-        val extraSlots =
-            missing
-                .flatMap { account ->
-                    runCatching {
-                        (accountRepository.getOrCreateDataSource(account) as? TimelineTabConfigurationDataSource)
-                            ?.defaultTabs
-                            .orEmpty()
-                    }.getOrNull().orEmpty()
-                }.map(timelineResolver::toSlot)
-        if (extraSlots.isEmpty()) return
-        settingsRepository.updateTabSettingsV2 {
-            val newSlots =
-                (homeSlots + extraSlots)
-                    .distinctBy { it.id }
-                    .normalizeSystemHomeMixedTimeline(
-                        enabled = homeSlots.anySystemHomeMixedTimeline(),
-                    )
-            if (newSlots == homeSlots) this else copy(homeSlots = newSlots)
-        }
-    }
-
-    private fun TimelineSlot.containsAccount(accountKey: MicroBlogKey): Boolean =
-        when (val slotContent = content) {
-            is TimelineSlotContent.Source -> timelineResolver.resolveAccountKey(this) == accountKey
-            is TimelineSlotContent.Group -> slotContent.children.any { it.containsAccount(accountKey) }
-        }
 
     private suspend fun removeTabsForDeletedAccounts() {
         val existingAccounts =
@@ -110,11 +64,19 @@ internal class AccountTabSyncCoordinator(
 
     private suspend fun addDefaultTabs(account: UiAccount) {
         val defaultTabs =
-            runCatching {
-                (accountRepository.getOrCreateDataSource(account) as? TimelineTabConfigurationDataSource)
+            accountRepository.withAccountChanges {
+                val current = accountRepository.find(account.accountKey)
+                if (current == null || current.platformId != account.platformId || !current.platformAvailable) {
+                    return@withAccountChanges emptyList()
+                }
+                accountRepository
+                    .getOrCreateDataSource(current)
+                    .capabilities
+                    .tabCatalog
+                    ?.configuration
                     ?.defaultTabs
                     .orEmpty()
-            }.getOrNull().orEmpty()
+            }
         if (defaultTabs.isEmpty()) {
             return
         }
@@ -163,8 +125,20 @@ internal class AccountTabSyncCoordinator(
     private fun TimelineSlot.cleanupAccountSlots(shouldKeep: (MicroBlogKey?) -> Boolean): TimelineSlot? =
         when (val slotContent = content) {
             is TimelineSlotContent.Source -> {
-                if (shouldKeep(timelineResolver.resolveAccountKey(this))) {
-                    this
+                val accountKey = timelineResolver.resolveAccountKey(this)
+                val normalized =
+                    if (accountKey != null && slotContent.source.ownerAccountKey == null) {
+                        copy(
+                            content =
+                                TimelineSlotContent.Source(
+                                    slotContent.source.copy(ownerAccountKey = accountKey),
+                                ),
+                        )
+                    } else {
+                        this
+                    }
+                if (shouldKeep(accountKey)) {
+                    normalized
                 } else {
                     null
                 }

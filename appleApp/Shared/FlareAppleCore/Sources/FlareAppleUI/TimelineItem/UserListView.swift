@@ -14,7 +14,7 @@ struct UserListView: View {
                         UserCompatView(data: user)
                             .padding(8)
                             .frame(width: 280)
-                            .clipShape(.rect(cornerRadius: 16))
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 16)
                                     .stroke(Color.flareSeparator, lineWidth: 1)
@@ -31,7 +31,7 @@ struct UserListView: View {
                         .padding(8)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipShape(.rect(cornerRadius: 16))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
                 .overlay(
                     RoundedRectangle(cornerRadius: 16)
                         .stroke(Color.flareSeparator, lineWidth: 1)

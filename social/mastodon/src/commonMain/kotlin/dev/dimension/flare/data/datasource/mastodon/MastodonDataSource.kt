@@ -34,6 +34,7 @@ import dev.dimension.flare.data.datasource.microblog.paging.RemoteLoader
 import dev.dimension.flare.data.datasource.microblog.paging.notSupported
 import dev.dimension.flare.data.datasource.pleroma.PleromaDataSource
 import dev.dimension.flare.data.model.IconType
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.model.tab.ShortcutSpec
 import dev.dimension.flare.data.model.tab.TimelineSpec
 import dev.dimension.flare.data.network.mastodon.DefaultMastodonMaxStatusCharactersProvider
@@ -98,6 +99,7 @@ internal open class MastodonDataSource(
     private val imageCompressor: ImageCompressor by koinInject()
     private val service by lazy {
         MastodonService(
+            proxy = ProxyRef.forAccount(accountKey),
             baseUrl = "https://$instance/",
             accessTokenFlow = credentialFlow.map { it.accessToken },
         )
@@ -134,6 +136,7 @@ internal open class MastodonDataSource(
 
     override val userHandler by lazy {
         UserHandler(
+            proxy = ProxyRef.forAccount(accountKey),
             host = accountKey.host,
             loader = loader,
         )
@@ -319,15 +322,13 @@ internal open class MastodonDataSource(
             PostStatus(
                 status = data.content,
                 visibility =
-                    when (data.visibility) {
+                    when (requireNotNull(data.visibility)) {
                         UiTimelineV2.Post.Visibility.Public -> Visibility.Public
                         UiTimelineV2.Post.Visibility.Home -> Visibility.Unlisted
                         UiTimelineV2.Post.Visibility.Followers -> Visibility.Private
                         UiTimelineV2.Post.Visibility.Specified -> Visibility.Direct
                         UiTimelineV2.Post.Visibility.Channel -> Visibility.Public
-                        // Mastodon 没有「仅自己可见 / 互相关注」选项，退回最接近的语义。
-                        UiTimelineV2.Post.Visibility.Private -> Visibility.Direct
-                        UiTimelineV2.Post.Visibility.Mutual -> Visibility.Private
+                        UiTimelineV2.Post.Visibility.Friends, UiTimelineV2.Post.Visibility.SelfOnly -> error("Unsupported visibility")
                     },
                 inReplyToID = inReplyToID,
                 mediaIDS = mediaIds.takeIf { it.isNotEmpty() },

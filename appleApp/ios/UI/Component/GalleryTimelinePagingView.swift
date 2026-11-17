@@ -1,7 +1,6 @@
 import SwiftUI
 import FlareAppleUI
 import UIKit
-import Kingfisher
 import KotlinSharedUI
 import CHTCollectionViewWaterfallLayoutObjC
 import FlareAppleCore
@@ -95,25 +94,30 @@ final class UIGalleryTimelineController: UIViewController, UICollectionViewDeleg
     private var lastLoadedItemIDs: Set<String> = []
 
     // Filling a gap can replace the local paging window several times. Keep its
-    // predecessor until the reader moves, even while the gap is outside the window.
+    // successor until the reader moves, even while the gap is outside the window.
     private var gapScrollAnchor: ScrollAnchor?
     private var leadingGap: (key: String, revision: Int64, insertedKeys: Set<String>?, offset: CGFloat)?
 
     func willLoadTimelineGap(_ message: UiTimelineV2.Gap) {
         guard let success = currentSuccess,
               let gapIndex = (0..<success.items.count).first(where: { success.post(at: Int32($0))?.stableItemKey == message.stableItemKey }) else { return }
-        let predecessor = (0..<gapIndex).reversed().first(where: { success.post(at: Int32($0))?.isPaginationGap == false })
-        let index = predecessor ?? gapIndex
-        guard success.post(at: Int32(index)) != nil,
-              let id = itemIndexMap.first(where: { $0.value == index })?.key,
-              let path = dataSource.indexPath(for: id),
-              let frame = collectionView.layoutAttributesForItem(at: path)?.frame else { return }
-        let offset = frame.minY - effectiveViewportTop
-        if predecessor == nil {
-            leadingGap = (message.stableItemKey, message.revision, nil, offset)
-        } else {
-            gapScrollAnchor = ScrollAnchor(itemID: id, distanceFromViewportTop: offset, keepVisible: false)
-            reading?.positionChanged(index: Int32(index), offset: offset)
+        gapScrollAnchor = nil
+        leadingGap = nil
+        let successor = ((gapIndex + 1)..<success.items.count).first { success.post(at: Int32($0))?.isPaginationGap == false }
+        let visible = captureScrollAnchor().flatMap { itemIndexMap[$0.itemID] }
+        for index in [successor, visible, gapIndex].compactMap({ $0 }) {
+            guard let id = itemIndexMap.first(where: { $0.value == index })?.key,
+                  let path = dataSource.indexPath(for: id),
+                  let frame = collectionView.layoutAttributesForItem(at: path)?.frame else { continue }
+            let offset = frame.minY - effectiveViewportTop
+            if index == gapIndex {
+                leadingGap = (message.stableItemKey, message.revision, nil, offset)
+            } else {
+                gapScrollAnchor = ScrollAnchor(itemID: id, distanceFromViewportTop: offset, keepVisible: false,
+                    itemOrder: collectionView.readingItemIDs?() ?? [id])
+                if frame.intersects(collectionView.bounds) { reading?.positionChanged(index: Int32(index), offset: offset) }
+            }
+            return
         }
     }
 
@@ -210,6 +214,7 @@ final class UIGalleryTimelineController: UIViewController, UICollectionViewDeleg
         let itemID: String
         let distanceFromViewportTop: CGFloat
         var keepVisible = true
+        var itemOrder: [String] = []
     }
 
     override func viewDidLoad() {
@@ -217,6 +222,7 @@ final class UIGalleryTimelineController: UIViewController, UICollectionViewDeleg
         NotificationCenter.default.addObserver(self, selector: #selector(saveReadingBookmark),
             name: UIApplication.willResignActiveNotification, object: nil)
         view.backgroundColor = .systemGroupedBackground
+        view.traitOverrides[FlareTextBackgroundTrait.self] = .systemGroupedBackground
         setupCollectionView()
         setupDataSource()
         setupRefreshControl()
@@ -575,8 +581,14 @@ final class UIGalleryTimelineController: UIViewController, UICollectionViewDeleg
                 newLoadedItemIDs: newLoadedItemIDs
             ))
         }
-        if data.state == .loaded || data.state == .empty,
-           let anchor = gapScrollAnchor, !newLoadedItemIDs.contains(anchor.itemID) {
+        if data.state == .empty {
+            gapScrollAnchor = nil
+            leadingGap = nil
+        } else if data.state == .loaded,
+           let anchor = gapScrollAnchor, !newLoadedItemIDs.contains(anchor.itemID),
+           let index = anchor.itemOrder.firstIndex(of: anchor.itemID),
+           anchor.itemOrder[..<index].contains(where: newLoadedItemIDs.contains),
+           anchor.itemOrder.dropFirst(index + 1).contains(where: newLoadedItemIDs.contains) {
             gapScrollAnchor = nil
             leadingGap = nil
         }
@@ -585,21 +597,23 @@ final class UIGalleryTimelineController: UIViewController, UICollectionViewDeleg
                guard let index = newIndexMap[id], let item = data.post(at: Int32(index)) else { return false }
                return !item.isPaginationGap && insertedKeys.contains(item.stableItemKey)
            }) {
-            gapScrollAnchor = ScrollAnchor(itemID: id, distanceFromViewportTop: leadingGap.offset, keepVisible: false)
+            gapScrollAnchor = ScrollAnchor(itemID: id, distanceFromViewportTop: leadingGap.offset, keepVisible: false,
+                itemOrder: itemIDs.filter { newIndexMap[$0].flatMap { data.post(at: Int32($0)) }?.isPaginationGap == false })
             self.leadingGap = nil
         }
+        let activeGapAnchor = gapScrollAnchor.flatMap { newLoadedItemIDs.contains($0.itemID) ? $0 : nil }
         itemIndexMap = newIndexMap
         pruneHeightCache(keepingItemIDs: Set(newIndexMap.keys))
         lastAppliedSignature = newSignature
         lastRenderHashMap = newRenderHashMap
         lastLoadedItemIDs = newLoadedItemIDs
         guard previousSignature != newSignature || !toReconfigure.isEmpty || needsAppearanceReconfigure else {
-            if let gapScrollAnchor { restoreScrollAnchorIfNeeded(gapScrollAnchor) }
+            if let activeGapAnchor { restoreScrollAnchorIfNeeded(activeGapAnchor) }
             restoreBookmarkIfReady()
             scheduleVisiblePagingAccess()
             return
         }
-        let scrollAnchor = gapScrollAnchor ?? (previousSignature != nil
+        let scrollAnchor = activeGapAnchor ?? (previousSignature != nil
             ? captureSnapshotAnchor(keepingItemIDs: newLoadedItemIDs) : nil)
         snapshot.reconfigureItems(toReconfigure)
         // Content-only and footer changes can also reflow the waterfall. Use the
@@ -1074,6 +1088,7 @@ private final class GalleryPostTileUIView: UIView, UIGestureRecognizerDelegate {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .secondarySystemGroupedBackground
+        traitOverrides[FlareTextBackgroundTrait.self] = .secondarySystemGroupedBackground
         layer.cornerRadius = 12
         clipsToBounds = true
 
@@ -1171,7 +1186,7 @@ private final class GalleryPostTileUIView: UIView, UIGestureRecognizerDelegate {
         imageAspectConstraint = nil
         imageView.cancel()
         playBadgeBackground.isHidden = true
-        avatar.set(url: nil)
+        avatar.set(media: nil)
         bodyText.text = nil
         bodyTranslationText.text = nil
         bodyTranslationText.isHidden = true
@@ -1201,7 +1216,7 @@ private final class GalleryPostTileUIView: UIView, UIGestureRecognizerDelegate {
                 imageView.isHidden = false
                 playBadgeBackground.isHidden = !isVideo(media)
                 if loadsRemoteImages {
-                    imageView.set(url: preview, customHeaders: media.customHeaders)
+                    imageView.set(media: media.preview)
                 }
                 let ratio = max(media.aspectRatio ?? 1.0, 0.3)
                 imageAspectConstraint = imageView.heightAnchor.constraint(equalTo: imageView.widthAnchor, multiplier: 1 / ratio)
@@ -1227,13 +1242,12 @@ private final class GalleryPostTileUIView: UIView, UIGestureRecognizerDelegate {
         if let user = post.user {
             userRow.isHidden = false
             avatar.set(
-                url: loadsRemoteImages ? user.avatar?.url : nil,
-                customHeaders: loadsRemoteImages ? user.avatar?.customHeaders : nil
+                media: loadsRemoteImages ? user.avatar : nil
             )
             userName.text = user.name
         } else {
             userRow.isHidden = true
-            avatar.set(url: nil)
+            avatar.set(media: nil)
             userName.text = nil
         }
     }
@@ -1304,6 +1318,7 @@ private final class GalleryFeedTileUIView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .secondarySystemGroupedBackground
+        traitOverrides[FlareTextBackgroundTrait.self] = .secondarySystemGroupedBackground
         layer.cornerRadius = 12
         clipsToBounds = true
 
@@ -1328,6 +1343,7 @@ private final class GalleryFeedTileUIView: UIView {
         textStack.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
         stack.addArrangedSubview(textStack)
 
+        titleLabel.textColor = .flareLabel
         titleLabel.font = .preferredFont(forTextStyle: .caption1).bold()
         titleLabel.numberOfLines = 2
         textStack.addArrangedSubview(titleLabel)
@@ -1379,7 +1395,7 @@ private final class GalleryFeedTileUIView: UIView {
         if appearance.showMedia, let media = feed.media {
             imageView.isHidden = false
             if loadsRemoteImages {
-                imageView.set(url: media.url, customHeaders: media.customHeaders)
+                imageView.set(media: media)
             }
             let ratio = max(CGFloat(media.aspectRatio), 0.3)
             imageAspectConstraint = imageView.heightAnchor.constraint(equalTo: imageView.widthAnchor, multiplier: 1 / ratio)
@@ -1397,7 +1413,7 @@ private final class GalleryFeedTileUIView: UIView {
         if let icon = feed.source.icon, !icon.isEmpty {
             sourceIcon.isHidden = false
             if loadsRemoteImages {
-                sourceIcon.set(url: icon, customHeaders: nil)
+                sourceIcon.set(media: feed.source.media)
             } else {
                 sourceIcon.cancel()
             }
@@ -1429,6 +1445,7 @@ private final class GalleryPlaceholderTileUIView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .secondarySystemGroupedBackground
+        traitOverrides[FlareTextBackgroundTrait.self] = .secondarySystemGroupedBackground
         layer.cornerRadius = 12
         clipsToBounds = true
 
@@ -1462,7 +1479,7 @@ private final class GalleryPlaceholderTileUIView: UIView {
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 }
 
-private final class GalleryNetworkImageView: UIImageView {
+private final class GalleryNetworkImageView: NetworkImageView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         contentMode = .scaleAspectFill
@@ -1471,27 +1488,12 @@ private final class GalleryNetworkImageView: UIImageView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
 
-    func set(url: String, customHeaders: [String: String]?) {
-        guard let url = URL(string: url) else {
-            image = nil
-            return
-        }
-        var options: KingfisherOptionsInfo = [.transition(.fade(0.25)), .cacheOriginalImage, .backgroundDecode]
-        if let customHeaders, !customHeaders.isEmpty {
-            options.append(.requestModifier(AnyModifier { request in
-                var request = request
-                for (key, value) in customHeaders {
-                    request.setValue(value, forHTTPHeaderField: key)
-                }
-                return request
-            }))
-        }
-        kf.setImage(with: url, options: options)
+    func set(media: UiMedia?) {
+        setImage(media: media)
     }
 
     func cancel() {
-        kf.cancelDownloadTask()
-        image = nil
+        cancelImageLoad()
     }
 }
 

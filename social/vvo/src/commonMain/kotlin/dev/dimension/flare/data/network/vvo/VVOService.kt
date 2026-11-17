@@ -4,6 +4,7 @@ import de.jensklingenberg.ktorfit.converter.ResponseConverterFactory
 import dev.dimension.flare.common.JSON
 import dev.dimension.flare.common.UploadMedia
 import dev.dimension.flare.common.decodeJson
+import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.network.appendMedia
 import dev.dimension.flare.data.network.ktorClient
 import dev.dimension.flare.data.network.nullableFallbackJson
@@ -37,7 +38,6 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.URLBuilder
 import io.ktor.http.URLProtocol
 import io.ktor.http.takeFrom
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -54,20 +54,19 @@ import kotlin.time.Duration.Companion.seconds
 
 private val baseUrl = "https://$vvoHost/"
 
-// SUB 在 ALF 会话窗口结束前就会轮换，所以要在使用期间主动续签，
-// 而不是等满一天再刷。
+// SUB rotates well before the ALF session window ends, so refresh proactively
+// while the app is in use instead of waiting a full day.
 private val chocolateRefreshInterval = 6.hours
-// 写操作前续签的最小间隔：连点/连发时不会每次都多跑一跳跳转链。
-private val writeCredentialRefreshInterval = 2.minutes
 private val defaultConfigLoginRetryDelay = 500.milliseconds
 private const val CONFIG_LOGIN_RETRY_LIMIT = 5
 
-// m.weibo.cn 会把过期的 SUB 302 到 passport.weibo.cn 重新签名。
+// m.weibo.cn bounces an expired SUB through passport.weibo.cn to re-sign it.
 private const val REFRESH_REDIRECT_LIMIT = 5
 
-private typealias VVOHttpClientFactory = (HttpClientConfig<*>.() -> Unit) -> HttpClient
+// 写操作前续签的最小间隔：连点/连发时不会每次都多跑一跳跳转链。
+private val writeCredentialRefreshInterval = 2.minutes
 
-private fun defaultVvoHttpClient(config: HttpClientConfig<*>.() -> Unit): HttpClient = ktorClient(config)
+private typealias VVOHttpClientFactory = (HttpClientConfig<*>.() -> Unit) -> HttpClient
 
 private fun vvoKtorfit(
     url: String = baseUrl,
@@ -122,7 +121,8 @@ internal class VVOService private constructor(
         refreshCookieWhenStale: Boolean = false,
         configLoginRetryDelay: Duration = defaultConfigLoginRetryDelay,
         onCredentialRefreshed: suspend (VVoCredential) -> Unit = {},
-        httpClientFactory: (HttpClientConfig<*>.() -> Unit) -> HttpClient = ::defaultVvoHttpClient,
+        proxy: ProxyRef = ProxyRef.Global,
+        httpClientFactory: (HttpClientConfig<*>.() -> Unit) -> HttpClient = { ktorClient(proxy, it) },
     ) : this(
         credentialFlow = credentialFlow,
         refreshCookieWhenStale = refreshCookieWhenStale,
@@ -137,11 +137,6 @@ internal class VVOService private constructor(
     )
 
     private val refreshMutex = Mutex()
-    private val configMutex = Mutex()
-    private var cachedConfig: VVOResponse<Config>? = null
-    private var cachedConfigAtEpochMillis: Long = 0L
-    private var configInFlight: CompletableDeferred<VVOResponse<Config>>? = null
-    private val configCacheTtl = 10.minutes
 
     companion object {
         fun checkChocolates(chocolate: String): Boolean =
@@ -154,65 +149,7 @@ internal class VVOService private constructor(
                 }
     }
 
-    override suspend fun config(): VVOResponse<Config> = config(allowCached = true)
-
-    private suspend fun config(allowCached: Boolean): VVOResponse<Config> {
-        // 每次刷新时间线都串行打一次 api/config 会白等一个 RTT（弱网下就是 1~2 秒）。
-        // 登录态在短时间内不会变，这里缓存结果，写操作失败时再主动失效。
-        var owned: CompletableDeferred<VVOResponse<Config>>? = null
-        val pending =
-            configMutex.withLock {
-                val cached = if (allowCached) cachedConfig else null
-                if (cached != null &&
-                    cached.data?.login == true &&
-                    Clock.System.now().toEpochMilliseconds() - cachedConfigAtEpochMillis < configCacheTtl.inWholeMilliseconds
-                ) {
-                    return cached
-                }
-                // 多路时间线同时刷新时共用同一个在途请求，避免并发打 api/config。
-                configInFlight
-                    ?: CompletableDeferred<VVOResponse<Config>>().also {
-                        configInFlight = it
-                        owned = it
-                    }
-            }
-
-        // 只有创建了在途请求的协程负责真正发网络请求，其余协程等它的结果。
-        val mine = owned
-        if (mine == null) {
-            return pending.await()
-        }
-
-        try {
-            val response = loadConfig()
-            if (response.data?.login == true) {
-                configMutex.withLock {
-                    cachedConfig = response
-                    cachedConfigAtEpochMillis = Clock.System.now().toEpochMilliseconds()
-                    if (configInFlight === mine) configInFlight = null
-                }
-            } else {
-                invalidateConfigCache()
-            }
-            mine.complete(response)
-            return response
-        } catch (error: Throwable) {
-            configMutex.withLock { if (configInFlight === mine) configInFlight = null }
-            mine.completeExceptionally(error)
-            throw error
-        }
-    }
-
-    /** 登录态变化（Cookie 刷新 / 写操作失败）后调用，下一次 [config] 会重新校验。 */
-    suspend fun invalidateConfigCache() {
-        configMutex.withLock {
-            cachedConfig = null
-            cachedConfigAtEpochMillis = 0L
-            configInFlight = null
-        }
-    }
-
-    private suspend fun loadConfig(): VVOResponse<Config> {
+    override suspend fun config(): VVOResponse<Config> {
         val refreshedCredential = refreshChocolateIfNeeded()
         var requestCredential = refreshedCredential ?: currentCredential()
 
@@ -236,6 +173,32 @@ internal class VVOService private constructor(
 
         return response
     }
+
+    /**
+     * 写操作（发博 / 转发 / 评论 / 点赞 / 关注 / 置顶）前续签 Cookie。
+     *
+     * 微博的 SUB 只在 passport 的 SSO 跳转链里才会被重新签名。读接口对旧 SUB 很宽容，
+     * 写接口则会直接判成异常请求返回「转发频繁」/「操作频繁」—— 这就是「同一篇贴文，
+     * 官方客户端立刻能转，这里一直失败」的由来。
+     *
+     * 两分钟内已经续签过就跳过，避免连续点赞/连续转发时每次多跑一跳跳转链。
+     */
+    suspend fun refreshCredentialForWrite() {
+        val now = Clock.System.now().toEpochMilliseconds()
+        val lastRefresh = currentCredential()?.lastCookieRefreshEpochMillis
+        if (lastRefresh != null && now - lastRefresh < writeCredentialRefreshInterval.inWholeMilliseconds) {
+            return
+        }
+        runCatching {
+            // 续签只是写操作的准备动作，链路卡住时不能把转发/评论一起拖死。
+            withTimeoutOrNull(8.seconds) {
+                refreshChocolate(refreshedAtEpochMillis = now, refreshOnlyWhenStale = false)
+            }
+        }
+    }
+
+    /** 写操作每次重新取 st；读接口继续走 [config]。 */
+    suspend fun freshConfig(): VVOResponse<Config> = config()
 
     suspend fun getUid(screenName: String): String? {
         val response =
@@ -323,40 +286,6 @@ internal class VVOService private constructor(
         }
     }
 
-    /**
-     * 写操作（发博 / 转发 / 评论 / 点赞 / 置顶）前续签 Cookie。
-     *
-     * 微博的 SUB 只在 passport 的 SSO 跳转链里才会被重新签名。读接口对旧 SUB 很宽容，
-     * 写接口则会直接判成异常请求返回「转发频繁」/「操作频繁」—— 这就是「同一篇贴文，
-     * 官方客户端立刻能转，这里一直失败」的由来。
-     *
-     * 两分钟内已经续签过就跳过，避免连续点赞/连续转发时每次多跑一跳跳转链。
-     */
-    suspend fun refreshCredentialForWrite() {
-        val now = Clock.System.now().toEpochMilliseconds()
-        val lastRefresh = currentCredential()?.lastCookieRefreshEpochMillis
-        if (lastRefresh != null && now - lastRefresh < writeCredentialRefreshInterval.inWholeMilliseconds) {
-            return
-        }
-        val refreshed =
-            runCatching {
-                // 续签只是写操作的准备动作，链路卡住时不能把转发/评论一起拖死。
-                withTimeoutOrNull(8.seconds) {
-                    refreshChocolate(refreshedAtEpochMillis = now, refreshOnlyWhenStale = false)
-                }
-            }.getOrNull()
-        // 续签后旧的 st 可能已经失效，强制下一次 config() 重新取。
-        if (refreshed != null) {
-            invalidateConfigCache()
-        }
-    }
-
-    /** 写操作每次重新取 st；登录态缓存只用于只读请求。 */
-    suspend fun freshConfig(): VVOResponse<Config> {
-        invalidateConfigCache()
-        return config(allowCached = false)
-    }
-
     private suspend fun refreshChocolate(
         refreshedAtEpochMillis: Long = Clock.System.now().toEpochMilliseconds(),
         refreshOnlyWhenStale: Boolean = false,
@@ -388,8 +317,8 @@ internal class VVOService private constructor(
                     .takeIf { it.isNotBlank() }
                     ?: return@withLock null
 
-            // ALF 窗口关闭后 Cookie 已经无法再续签，别再无谓地打请求，
-            // 直接把当前凭证交回去，让上层提示重新登录。
+            // Once the ALF window closes the cookies can no longer be re-signed,
+            // so stop spending requests and let the caller surface a re-login.
             if (isVvoSessionExpired(currentChocolate, refreshedAtEpochMillis)) {
                 return@withLock currentCredential
             }
@@ -400,55 +329,44 @@ internal class VVOService private constructor(
                     initialCookieHeader = currentChocolate,
                 )
 
-            val updated =
-                currentCredential
-                    .copy(
-                        chocolate = refreshedChocolate,
-                        lastCookieRefreshEpochMillis = refreshedAtEpochMillis,
-                    )
-            onCredentialRefreshed(updated)
-            updated
+            currentCredential
+                .copy(
+                    chocolate = refreshedChocolate,
+                    lastCookieRefreshEpochMillis = refreshedAtEpochMillis,
+                ).also {
+                    onCredentialRefreshed(it)
+                }
         }
     }
 
-    // 手动跟一遍跳转链，把每一跳新下发的 Cookie 带到下一跳，
-    // 这样 passport 的 SSO 环节才能用 ALF/SCF 签出新的 SUB。
-    // 只打一次 m.weibo.cn 首页是拿不到新 SUB 的 —— 少了这一步，Cookie 会一直是
-    // 旧的，读接口还能凑合，但转发/评论这类写操作会被风控判成异常，
-    // 返回「转发频繁」「操作频繁」。
+    // Follows the redirect chain by hand, carrying every freshly set cookie to
+    // the next hop so the passport SSO leg can mint a new SUB from ALF/SCF.
+    // shortcut: Keep the legacy shared Cookie header; use scoped storage if per-site isolation is required.
     private suspend fun followRefreshRedirects(
         startUrl: String,
         initialCookieHeader: String,
     ): String {
         var cookieHeader = initialCookieHeader
         var url = startUrl
-        // 整条链共用同一个 client：chocolateProvider 闭包读的是最新的 cookieHeader，
-        // 所以每一跳都会自动带上上一跳新下发的 Cookie。用完即关，避免每次续签都
-        // 泄漏一个 HttpClient（旧实现是每跳新建一个，从没关过）。
-        val client =
-            httpClientFactory {
-                followRedirects = false
-                install(VVOHeaderPlugin) {
-                    chocolateProvider = { cookieHeader }
-                }
+        repeat(REFRESH_REDIRECT_LIMIT + 1) {
+            val response =
+                httpClientFactory {
+                    followRedirects = false
+                    install(VVOHeaderPlugin) {
+                        chocolateProvider = { cookieHeader }
+                    }
+                }.get(url)
+            mergeVvoCookieHeader(
+                currentCookieHeader = cookieHeader,
+                setCookieHeaders = response.headers.getAll(HttpHeaders.SetCookie).orEmpty(),
+            )?.let { cookieHeader = it }
+            val location = response.headers[HttpHeaders.Location]
+            if (!isRefreshRedirect(response.status.value, location)) {
+                return cookieHeader
             }
-        try {
-            repeat(REFRESH_REDIRECT_LIMIT + 1) {
-                val response = client.get(url)
-                mergeVvoCookieHeader(
-                    currentCookieHeader = cookieHeader,
-                    setCookieHeaders = response.headers.getAll(HttpHeaders.SetCookie).orEmpty(),
-                )?.let { cookieHeader = it }
-                val location = response.headers[HttpHeaders.Location]
-                if (!isRefreshRedirect(response.status.value, location)) {
-                    return cookieHeader
-                }
-                url = resolveRefreshRedirectUrl(current = url, location = location!!) ?: return cookieHeader
-            }
-            return cookieHeader
-        } finally {
-            client.close()
+            url = resolveRefreshRedirectUrl(current = url, location = location!!) ?: return cookieHeader
         }
+        return cookieHeader
     }
 
     private suspend fun currentCredential(): VVoCredential? = credentialFlow.firstOrNull()
@@ -497,7 +415,7 @@ internal fun resolveRefreshRedirectUrl(
                 )
         }?.toString()
 
-// ALF 里带的是会话的绝对过期时间（epoch 秒）。
+// ALF carries the session's absolute expiry as epoch seconds.
 internal fun vvoSessionExpiryEpochMillis(cookieHeader: String): Long? =
     cookieHeader
         .split(';')
@@ -664,6 +582,6 @@ private val VVOHeaderPlugin =
                     request.headers.append("Cookie", chocolate)
                 }
             }
-            request.headers.append("Referer", "https://$vvoHost/")
+            if (request.headers["Referer"] == null) request.headers.append("Referer", "https://$vvoHost/")
         }
     }

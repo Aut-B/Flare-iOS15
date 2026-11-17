@@ -14,7 +14,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastForEach
 import androidx.compose.ui.util.fastForEachIndexed
 import dev.dimension.flare.ui.component.platform.PlatformText
+import dev.dimension.flare.ui.model.TimelineSingleMediaLayout
 import dev.dimension.flare.ui.theme.PlatformTheme
+import kotlin.math.roundToInt
 
 private const val ADAPTIVE_GRID_MAX_ITEMS = 9
 private const val ADAPTIVE_GRID_OVERFLOW_DISPLAY_LIMIT = 100
@@ -26,6 +28,8 @@ internal fun AdaptiveGrid(
     modifier: Modifier = Modifier,
     spacing: Dp = 4.dp,
     expandedSize: Boolean = true,
+    singleMediaAspectRatio: Float = 1f,
+    singleMediaMaxHeight: Dp? = null,
     maxItems: Int = ADAPTIVE_GRID_MAX_ITEMS,
     overflowContent: @Composable (Int) -> Unit = { overflowCount ->
         Box(
@@ -65,15 +69,32 @@ internal fun AdaptiveGrid(
 
             if (visibleMeasurables.size == 1) {
                 val placeable =
-                    if (expandedSize) {
+                    if (expandedSize && singleMediaMaxHeight != null) {
+                        val ratio = TimelineSingleMediaLayout.aspectRatio(singleMediaAspectRatio, cropTallMedia = false)
+                        val heightLimit = minOf(singleMediaMaxHeight.roundToPx(), constraints.maxHeight)
+                        val width =
+                            TimelineSingleMediaLayout
+                                .width(
+                                    availableWidth = constraints.maxWidth.toFloat(),
+                                    aspectRatio = ratio,
+                                    maximumHeight = heightLimit.toFloat(),
+                                ).roundToInt()
                         visibleMeasurables[0].measure(
-                            constraints.copy(
+                            Constraints.fixed(width, minOf((width / ratio).roundToInt(), heightLimit)),
+                        )
+                    } else if (expandedSize) {
+                        visibleMeasurables[0].measure(
+                            Constraints(
+                                maxWidth = constraints.maxWidth,
                                 maxHeight = constraints.maxWidth * 21 / 9,
                             ),
                         )
                     } else {
                         visibleMeasurables[0].measure(
-                            constraints.copy(maxHeight = constraints.maxWidth * 9 / 16),
+                            Constraints(
+                                maxWidth = constraints.maxWidth,
+                                maxHeight = constraints.maxWidth * 9 / 16,
+                            ),
                         )
                     }
                 overflowWidth = placeable.width
@@ -94,7 +115,6 @@ internal fun AdaptiveGrid(
                 }
             }
 
-            val gapPx = spacing.roundToPx()
             if (visibleMeasurables.size in 2..4) {
                 val width = constraints.maxWidth
                 val height = (width * 9) / 16
@@ -104,6 +124,7 @@ internal fun AdaptiveGrid(
                     } else {
                         height
                     }
+                val gapPx = spacing.roundToPx().coerceIn(0, minOf(width, containerHeight))
 
                 val placeables =
                     when (visibleMeasurables.size) {
@@ -111,7 +132,7 @@ internal fun AdaptiveGrid(
                             val childWidth = (width - gapPx) / 2
                             visibleMeasurables.map { child ->
                                 child.measure(
-                                    constraints.copy(
+                                    Constraints(
                                         maxWidth = childWidth,
                                         maxHeight = containerHeight,
                                     ),
@@ -128,7 +149,7 @@ internal fun AdaptiveGrid(
                                 when (index) {
                                     0 -> {
                                         measurable.measure(
-                                            constraints.copy(
+                                            Constraints(
                                                 maxWidth = leftWidth,
                                                 maxHeight = containerHeight,
                                             ),
@@ -137,7 +158,7 @@ internal fun AdaptiveGrid(
 
                                     else -> {
                                         measurable.measure(
-                                            constraints.copy(
+                                            Constraints(
                                                 maxWidth = rightWidth,
                                                 maxHeight = rightHeight,
                                             ),
@@ -152,7 +173,7 @@ internal fun AdaptiveGrid(
                             val cellH = (containerHeight - gapPx) / 2
                             visibleMeasurables.map { child ->
                                 child.measure(
-                                    constraints.copy(
+                                    Constraints(
                                         maxWidth = cellW,
                                         maxHeight = cellH,
                                     ),
@@ -229,6 +250,7 @@ internal fun AdaptiveGrid(
 
             val maxColumns = 3
             val columns = maxColumns
+            val gapPx = spacing.roundToPx().coerceIn(0, constraints.maxWidth / (columns - 1))
             val itemSize = (constraints.maxWidth - gapPx * (columns - 1)) / columns
             val rows = (visibleMeasurables.size + columns - 1) / columns
 
@@ -247,7 +269,7 @@ internal fun AdaptiveGrid(
                         }
 
                     measurable.measure(
-                        constraints.copy(
+                        Constraints(
                             maxWidth = childWidth,
                             maxHeight = itemSize,
                         ),

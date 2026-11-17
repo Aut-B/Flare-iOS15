@@ -39,12 +39,10 @@ private func nativeSocialView(for tab: NativeSocialTab) -> some View {
     case .instagram:
         InstagramFeedView()
     case .xiaohongshu:
-        // 原生瀑布流要现算签名，服务端风控一收紧就只回 code -1，
-        // 用户看到的就是「请求失败 / 签名没拿到」。这里直接进网页版。
+        // 默认进原生瀑布流；只有用户在页面内主动切换时才走网页版。
         XhsTabView()
     case .weread:
-        // 原生书架走 shelf/sync，字段一改就少书；阅读器还要拼加密 bookId，
-        // 拼错就是 404。网页版书架 + 网页版阅读器才是用户 App 里那一份。
+        // 默认进原生书架；只有用户在页面内主动切换时才走网页版。
         WereadTabView()
     }
 }
@@ -257,6 +255,7 @@ struct HomeTimelineScreen: View {
                                                 }
                                             }
                                         }
+                                        .padding(.top, 6)
                                         .padding(.horizontal)
                                         .animation(.interactiveSpring(response: 0.25, dampingFraction: 0.85), value: selectedTabId)
                                     }
@@ -376,7 +375,7 @@ private struct ChangeLogNotice: View {
                 .font(.headline)
             Text("changelog_message")
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .flareSecondaryText()
             Text(message)
                 .font(.body)
                 .fixedSize(horizontal: false, vertical: true)
@@ -385,6 +384,7 @@ private struct ChangeLogNotice: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
+        .flareTextBackground(nil)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
         .overlay {
             RoundedRectangle(cornerRadius: 16)

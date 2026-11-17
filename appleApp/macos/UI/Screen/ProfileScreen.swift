@@ -98,7 +98,8 @@ struct ProfileScreen: View {
                         data: presenter.state.actions,
                         useText: false,
                         allowSpacer: false,
-                        applyPostActionLayout: false
+                        applyPostActionLayout: false,
+                        isDetail: true
                     )
                     .buttonStyle(.plain)
                 }
@@ -159,13 +160,13 @@ struct ProfileScreen: View {
         switch onEnum(of: tab) {
         case .timeline(let timeline):
             ProfileTimelineTabContent(presenter: timeline.presenter)
-                .id(profileTimelineID(for: tab))
+                .id(ObjectIdentifier(timeline.presenter))
         case .media(let media):
             ProfileGalleryTabContent(
                 presenter: media.presenter,
                 accountType: accountType
             )
-            .id(profileTimelineID(for: tab))
+            .id(ObjectIdentifier(media.presenter))
         }
     }
 
@@ -389,10 +390,9 @@ private struct ProfileGalleryTile: View {
 
     @ViewBuilder
     private var imageContent: some View {
-        if let previewURL = item.media.profileGalleryPreviewURL {
+        if let media = item.media.preview {
             NetworkImage(
-                data: previewURL,
-                customHeader: item.media.profileGalleryCustomHeaders
+                data: media
             )
         } else {
             ProfileGalleryPlaceholder()

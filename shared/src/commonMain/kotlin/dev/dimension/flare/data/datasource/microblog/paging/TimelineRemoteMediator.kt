@@ -1,3 +1,5 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package dev.dimension.flare.data.datasource.microblog.paging
 
 import androidx.paging.ExperimentalPagingApi
@@ -38,6 +40,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
+import kotlin.concurrent.atomics.AtomicReference
 import kotlin.time.Clock
 import kotlin.uuid.Uuid
 
@@ -87,7 +90,14 @@ internal open class TimelineRemoteMediator(
     RemoteLoader<DbPagingTimelineWithStatus> {
     private var suppressInitialPrepend = false
     private var refreshSharedHomeOnPrepend = false
-    private val ordersByTime = (loader as? MixedRemoteMediator)?.pageLoader()?.ordersByTime == true
+    private val mixedPageLoader = (loader as? MixedRemoteMediator)?.pageLoader()
+    private val ordersByTime = mixedPageLoader?.ordersByTime == true
+    private val cachedNextKey = AtomicReference<CachedNextKey?>(null)
+
+    private data class CachedNextKey(
+        val metadata: DbPagingKey,
+        val nextKey: String?,
+    )
 
     private val deferredRefreshScope = CoroutineScope(SupervisorJob() + PlatformDispatchers.IO)
     private val refreshGate = Mutex()
@@ -281,7 +291,7 @@ internal open class TimelineRemoteMediator(
         val request =
             when (loadType) {
                 LoadType.REFRESH -> PagingRequest.Refresh
-                LoadType.APPEND -> PagingRequest.Append(dao.getNextKey(pagingKey) ?: return MediatorResult.Success(true))
+                LoadType.APPEND -> PagingRequest.Append(nextKey(before) ?: return MediatorResult.Success(true))
                 LoadType.PREPEND -> PagingRequest.Prepend(before.prevKey ?: return MediatorResult.Success(true))
             }
         val sourceHeads = Json.decodeFromString<Map<String, List<String>>>(before.sourceHeads)
@@ -315,6 +325,7 @@ internal open class TimelineRemoteMediator(
         val requestContext = currentCoroutineContext()
         // Finish the commit and session update together if cancellation arrives during commit.
         withContext(NonCancellable) {
+            var nextKeyCache: CachedNextKey? = null
             val committed =
                 database.connect {
                     requestContext.ensureActive()
@@ -322,7 +333,7 @@ internal open class TimelineRemoteMediator(
                     val first = dao.getFirstRow(pagingKey)
                     val (gapNext, tailUpdates) =
                         if (retainHistory == true && loadType == LoadType.REFRESH && first != null && loader is MixedRemoteMediator) {
-                            loader.pageLoader().splitContinuation(result.nextKey, boundary.keys)
+                            checkNotNull(mixedPageLoader).splitContinuation(result.nextKey, boundary.keys)
                         } else {
                             result.nextKey to null
                         }
@@ -382,12 +393,14 @@ internal open class TimelineRemoteMediator(
                     } else {
                         onSaveCache(request, mapped)
                     }
+                    val nextKey = if (updateTail) updatedTail else result.nextKey
+                    val keepNextKey =
+                        loadType == LoadType.PREPEND ||
+                            (loadType == LoadType.REFRESH && retainHistory == true && first != null && !updateTail)
                     dao.updatePage(
                         pagingKey = pagingKey,
-                        nextKey = if (updateTail) updatedTail else result.nextKey,
-                        keepNextKey =
-                            loadType == LoadType.PREPEND ||
-                                (loadType == LoadType.REFRESH && retainHistory == true && first != null && !updateTail),
+                        nextKey = nextKey,
+                        keepNextKey = keepNextKey,
                         prevKey = if (loadType == LoadType.APPEND) before.prevKey else result.previousKey,
                         sourceHeads =
                             Json.encodeToString(
@@ -397,8 +410,12 @@ internal open class TimelineRemoteMediator(
                     )
                     enqueuePreTranslation(mapped)
                     requestContext.ensureActive()
+                    if (mixedPageLoader != null && !keepNextKey) {
+                        nextKeyCache = dao.getPagingKeyMetadata(pagingKey)?.let { CachedNextKey(it, nextKey) }
+                    }
                     true
                 }
+            if (committed) cachedNextKey.store(nextKeyCache)
             if (committed && loadType == LoadType.REFRESH) refreshSession?.refreshedSources?.addAll(result.refreshedSources)
             check(committed) { "Timeline changed while loading; retry" }
         }
@@ -420,7 +437,7 @@ internal open class TimelineRemoteMediator(
         val result =
             try {
                 if (ordersByTime && loader is MixedRemoteMediator) {
-                    val pages = loader.pageLoader()
+                    val pages = checkNotNull(mixedPageLoader)
                     val pending = pages.drainPending(gap.nextKey)
                     val (continuation, tail) = pages.splitContinuation(pending.nextKey, gap.lowerBound.keys)
                     migratedTail = tail
@@ -460,13 +477,13 @@ internal open class TimelineRemoteMediator(
             if (current.revision != gap.revision || current.nextKey != gap.nextKey) return@connect
             val (gapNext, tailUpdates) =
                 if (loader is MixedRemoteMediator) {
-                    loader.pageLoader().splitContinuation(result.nextKey, gap.lowerBound.keys)
+                    checkNotNull(mixedPageLoader).splitContinuation(result.nextKey, gap.lowerBound.keys)
                 } else {
                     result.nextKey to null
                 }
             val combinedTail =
                 if (migratedTail != null && loader is MixedRemoteMediator) {
-                    loader.pageLoader().mergeTailContinuation(migratedTail, tailUpdates)
+                    checkNotNull(mixedPageLoader).mergeTailContinuation(migratedTail, tailUpdates)
                 } else {
                     tailUpdates
                 }
@@ -578,7 +595,7 @@ internal open class TimelineRemoteMediator(
             }
         val result =
             if (loader is MixedRemoteMediator) {
-                loader.pageLoader().loadPage(
+                checkNotNull(mixedPageLoader).loadPage(
                     pageSize,
                     request,
                     cachedItemKeys = { if (checkCachedItems) cachedItemKeys(it) else emptySet() },
@@ -623,7 +640,13 @@ internal open class TimelineRemoteMediator(
     }
 
     private fun continuationIdentity(cursor: String?): String? =
-        cursor?.let { if (loader is MixedRemoteMediator) loader.pageLoader().continuationIdentity(it) else it }
+        cursor?.let { if (loader is MixedRemoteMediator) checkNotNull(mixedPageLoader).continuationIdentity(it) else it }
+
+    private suspend fun nextKey(metadata: DbPagingKey): String? {
+        // Metadata is read from Room for every load; another writer invalidates this single frontier.
+        cachedNextKey.load()?.takeIf { it.metadata == metadata }?.let { return it.nextKey }
+        return database.pagingTimelineDao().getNextKey(pagingKey)
+    }
 
     private suspend fun mergeTailContinuation(
         updates: String?,
@@ -631,7 +654,7 @@ internal open class TimelineRemoteMediator(
     ): String? {
         if (loader !is MixedRemoteMediator) return null
         val previous = database.pagingTimelineDao().getNextKey(pagingKey)
-        return loader.pageLoader().mergeTailContinuation(
+        return checkNotNull(mixedPageLoader).mergeTailContinuation(
             previous,
             updates,
             refreshedRecommendations,
@@ -830,9 +853,12 @@ internal open class TimelineRemoteMediator(
 internal fun List<UiTimelineV2>.collapseReplyChains(): List<UiTimelineV2> {
     fun UiTimelineV2.TimelinePostItem.key(): Pair<AccountType, MicroBlogKey> = accountType to statusKey
 
+    fun UiTimelineV2.collapsiblePost(): UiTimelineV2.TimelinePostItem? =
+        asTimelinePostItem()?.takeIf { it.presentation.notificationKey == null }
+
     val rootPosts =
         asSequence()
-            .mapNotNull { it.asTimelinePostItem() }
+            .mapNotNull { it.collapsiblePost() }
             .associateBy { it.key() }
     if (rootPosts.isEmpty()) {
         return this
@@ -856,7 +882,7 @@ internal fun List<UiTimelineV2>.collapseReplyChains(): List<UiTimelineV2> {
 
     // Resolve links and break cycles before expanding only the posts that remain visible.
     forEach { item ->
-        var current = item.asTimelinePostItem() ?: return@forEach
+        var current = item.collapsiblePost() ?: return@forEach
         val activeKeys = mutableSetOf<Pair<AccountType, MicroBlogKey>>()
         while (current.key() !in visitedPosts) {
             val currentKey = current.key()
@@ -889,7 +915,7 @@ internal fun List<UiTimelineV2>.collapseReplyChains(): List<UiTimelineV2> {
     }
 
     return mapNotNull { item ->
-        val key = item.asTimelinePostItem()?.key() ?: return@mapNotNull item
+        val key = item.collapsiblePost()?.key() ?: return@mapNotNull item
         if (key in ancestorKeys) {
             return@mapNotNull null
         }

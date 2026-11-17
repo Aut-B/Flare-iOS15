@@ -59,6 +59,7 @@ final class XhsService {
     func note(
         id: String,
         xsecToken: String = "",
+        xsecSource: String = "pc_feed",
         timeout: TimeInterval = 12,
         attempts: Int = 2
     ) async throws -> XhsNote {
@@ -69,7 +70,7 @@ final class XhsService {
         ]
         if !xsecToken.isEmpty {
             payload["xsec_token"] = xsecToken
-            payload["xsec_source"] = "pc_feed"
+            payload["xsec_source"] = xsecSource
         }
         let json = try await post("/api/sns/web/v1/feed", payload: payload, timeout: timeout, attempts: attempts)
         let data = XhsJSON.object(json["data"]) ?? [:]
@@ -123,13 +124,13 @@ final class XhsService {
         // 网页版评论区请求固定带 xsec_source；少了它服务端会认为「来源不明」，
         // 一律回「当前笔记暂时无法浏览」。
         parts.append("xsec_source=" + Self.encode(xsecSource))
-        // 评论是用户点了就要看的：签名页没起来时宁可快速失败一次，
-        // 也别让评论区空白转四十秒。
+        // 评论是用户点了就要看的，但 5 秒对 6s 上的签名页太短：页面还在
+        // 初始化时会连续失败。给到 10 秒、两次尝试，仍然比默认 12 秒短。
         let json = try await get(
             "/api/sns/web/v2/comment/page",
             query: parts.joined(separator: "&"),
-            timeout: 5,
-            attempts: 1
+            timeout: 10,
+            attempts: 2
         )
         let data = XhsJSON.object(json["data"]) ?? [:]
         let items = XhsJSON.array(data["comments"]).compactMap { XhsJSON.comment($0) }

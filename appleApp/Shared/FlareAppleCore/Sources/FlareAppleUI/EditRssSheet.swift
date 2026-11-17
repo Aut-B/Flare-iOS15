@@ -82,7 +82,7 @@ public struct EditRssSheet: View {
                     Section {
                         HStack(spacing: 10) {
                             if let favIcon = rssFeed.icon, !favIcon.isEmpty {
-                                NetworkImage(data: favIcon)
+                                NetworkImage(data: UiMediaImage(url: favIcon, proxy: ProxyRef.Global.shared))
                                     .frame(width: 24, height: 24)
                                     .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                             } else {
@@ -94,7 +94,7 @@ public struct EditRssSheet: View {
 
                         Text(rssFeed.url)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .flareSecondaryText()
                             .textSelection(.enabled)
                     } header: {
                         Text("rss_feed_header")
@@ -144,7 +144,7 @@ public struct EditRssSheet: View {
                         if !presenter.state.actualRssHubUrl.isEmpty {
                             Text(presenter.state.actualRssHubUrl)
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .flareSecondaryText()
                                 .textSelection(.enabled)
                         }
                     } header: {
@@ -322,7 +322,7 @@ private struct RssCheckStateIndicator: View {
                     .accessibilityLabel(Text("rss_source_valid", bundle: FlareAppleUILocalization.bundle))
             case .rssHub, .rssSources:
                 Image(fontAwesome: .circleChevronDown)
-                    .foregroundStyle(.secondary)
+                    .flareSecondaryText()
                     .accessibilityLabel(Text("rss_source_options_available", bundle: FlareAppleUILocalization.bundle))
             }
         } errorContent: { _ in
@@ -365,7 +365,7 @@ private struct SelectableSubscriptionTypeRow: View {
     var body: some View {
         HStack(spacing: 12) {
             if let icon, !icon.isEmpty {
-                NetworkImage(data: icon)
+                NetworkImage(data: UiMediaImage(url: icon, proxy: ProxyRef.Global.shared))
                     .frame(width: 24, height: 24)
                     .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             } else {
@@ -447,7 +447,7 @@ private struct RssReadingModePicker: View {
         if mode.automatic {
             Text(LocalizedStringKey(mode.checking ? "rss_open_mode_checking" : (mode.recommended != nil ? "rss_open_mode_recommended" : "rss_open_mode_unknown")))
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .flareSecondaryText()
         }
     }
 }

@@ -11,6 +11,7 @@ import dev.dimension.flare.R
 import dev.dimension.flare.data.datastore.model.AppSettings
 import dev.dimension.flare.data.model.appearance.GlobalAppearance
 import dev.dimension.flare.data.model.appearance.TimelineAppearance
+import dev.dimension.flare.feature.plugin.management.ProvidePluginTextResolverV1
 import dev.dimension.flare.ui.common.AppUriHandler
 import dev.dimension.flare.ui.common.BindAmberSignerLauncher
 import dev.dimension.flare.ui.component.LocalAppSettings
@@ -25,11 +26,13 @@ import moe.tlaster.precompose.molecule.producePresenter
 
 @Composable
 fun AppContainer(afterInit: () -> Unit) {
-    FlareApp {
-        FlareTheme {
-            HomeScreen(
-                afterInit = afterInit,
-            )
+    ProvidePluginTextResolverV1 {
+        FlareApp {
+            FlareTheme {
+                HomeScreen(
+                    afterInit = afterInit,
+                )
+            }
         }
     }
 }
@@ -52,7 +55,6 @@ fun FlareApp(content: @Composable () -> Unit) {
         }
 
     val appSettings = state.appSettings.takeSuccessOr(AppSettings(""))
-    val openAIConfig = appSettings.aiConfig.type as? AppSettings.AiConfig.Type.OpenAI
     CompositionLocalProvider(
         LocalAppSettings provides appSettings,
         LocalUriHandler provides uriHandler,
@@ -64,7 +66,7 @@ fun FlareApp(content: @Composable () -> Unit) {
                         TimelineAppearance.AiConfig(
                             translation = true,
                             tldr = appSettings.aiConfig.tldr,
-                            agent = appSettings.aiConfig.agent && !openAIConfig?.model.isNullOrBlank(),
+                            agent = appSettings.aiConfig.isAgentEnabled,
                             showOriginalWithTranslation =
                                 appSettings.translateConfig.showOriginalWithTranslation,
                         ),

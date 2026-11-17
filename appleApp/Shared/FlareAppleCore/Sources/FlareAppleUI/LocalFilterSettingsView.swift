@@ -79,7 +79,7 @@ public struct LocalFilterSettingsView: View {
                             if item.isRegex {
                                 Text("local_filter_regex", bundle: FlareAppleUILocalization.bundle)
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .flareSecondaryText()
                             }
                         }
                         .contextMenu {
@@ -170,7 +170,7 @@ private struct MxgaSettingsSection: View {
                                 .foregroundStyle(.primary)
                             refreshStatus
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .flareSecondaryText()
                         }
                         Spacer()
                         if presenter.state.isRefreshing {

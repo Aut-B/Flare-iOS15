@@ -16,7 +16,7 @@ struct BackportWebLoginScreen: View {
     private let onCookie: (String) -> Void
     let url: String
     init(
-        onCookie: @escaping (String) -> Void,
+        onCookie: @escaping ([HTTPCookie]) -> Void,
         url: String
     ) {
         self.url = url
@@ -189,6 +189,18 @@ struct BackportWebLoginScreen: View {
                         Image(systemName: "xmark")
                     }
                 }
+                .task(id: route.key) {
+                    guard viewModel?.route !== route else { return }
+                    viewModel = BackportWebLoginViewModel(onCookie: onCookie, url: url, route: route)
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    WebLoginOriginLabel(current: viewModel?.currentOrigin ?? webLoginHTTPSOrigin(URL(string: url)) ?? "", initial: webLoginHTTPSOrigin(URL(string: url)))
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button { dismiss() } label: { Label("Cancel", systemImage: "xmark") }
+                }
             }
         }
     }
@@ -269,6 +281,7 @@ class WKDelegate: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
 
     init(decidePolicy: @escaping () -> Void
     ) {
+        self.route = route
         self.decidePolicy = decidePolicy
     }
 
@@ -456,6 +469,7 @@ final class BackportWebLoginViewModel {
         // XHR，非持久化仓库在部分 iOS 15 上会让登录 POST 静默失败，表现为
         // 「点了下一步一直卡住」。
         let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = route.dataStore
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         // iOS 15 回退：WKPreferences.javaScriptCanOpenWindowsAutomatically 默认 false，
         // window.open 会被静默拦掉（页面像卡住）。打开后 window.open 会走

@@ -66,6 +66,7 @@ private extension TimelineAppearance {
             showSensitiveContent: showSensitiveContent,
             expandContentWarning: expandContentWarning,
             expandMediaSize: expandMediaSize,
+            limitSingleMediaHeight: limitSingleMediaHeight,
             mediaLayout: mediaLayout,
             limitMediaGridToNine: limitMediaGridToNine,
             videoAutoplay: videoAutoplay,
@@ -83,18 +84,12 @@ private extension TimelineAppearance {
             aiConfig: TimelineAppearance.AiConfig(
                 translation: true,
                 tldr: appSettings.aiConfig.tldr,
-                agent: appSettings.aiConfig.agent && appSettings.aiConfig.type.openAIModel?.isEmpty == false,
+                agent: appSettings.aiConfig.isAgentEnabled,
                 showOriginalWithTranslation: appSettings.translateConfig.showOriginalWithTranslation
             ),
             lineLimit: lineLimit,
             showTranslateButton: showTranslateButton
         )
-    }
-}
-
-private extension AppSettingsAiConfigType {
-    var openAIModel: String? {
-        (self as? AppSettingsAiConfigTypeOpenAI)?.model
     }
 }
 

@@ -60,7 +60,7 @@ packages:
     exactVersion: 1.7.0
   Firebase:
     url: https://github.com/firebase/firebase-ios-sdk.git
-    exactVersion: 12.19.1
+    exactVersion: 12.19.3
   GSPlayer:
     url: https://github.com/wxxsw/GSPlayer
     from: 0.2.30
@@ -69,7 +69,7 @@ packages:
     exactVersion: 1.0.5
   Kingfisher:
     url: https://github.com/onevcat/Kingfisher.git
-    exactVersion: 8.13.0
+    exactVersion: 8.15.0
   LazyPager:
     # Temporary 1.2.1 fork: create the selected page before the first layout.
     # Return to upstream once it includes the initial-page flash fix.
@@ -191,16 +191,6 @@ targets:
       - package: Perception
       - package: NavigationBackport
       - target: OpenInFlare
-    preBuildScripts:
-      - name: Compile Kotlin
-        basedOnDependencyAnalysis: false
-        script: |
-          cd "$SRCROOT/.."
-          if [ -n "${GRADLE_JVM_ARGS:-}" ]; then
-            ./gradlew "-Dorg.gradle.jvmargs=$GRADLE_JVM_ARGS" :apple-shared:embedAndSignAppleFrameworkForXcode
-          else
-            ./gradlew :apple-shared:embedAndSignAppleFrameworkForXcode
-          fi
     settings:
       groups:
         - appleApp
@@ -245,15 +235,22 @@ targets:
     type: bundle.unit-test
     platform: iOS
     dependencies:
+      - package: GSPlayer
+      - package: LazyPager
       - package: CHTCollectionViewWaterfallLayout
         product: CHTCollectionViewWaterfallLayoutObjC
       - package: swiftui-introspect
         product: SwiftUIIntrospect
       - target: TimelineUnitTestHost
+      - target: FlareAppleCore
+      - package: Firebase
+        product: FirebaseCrashlytics
     sources:
       - path: iosTests
       - path: ios/UI/Component/IPadCompactTabBarModifier.swift
+      - path: ios/UI/Component/MediaViewerDismissEffect.swift
       - path: ios/Common/MediaViewerDismissGesturePolicy.swift
+      - path: ios/Common/MediaViewerPostSummaryState.swift
       - path: ios/Common/MediaViewerImageLayoutPolicy.swift
       - path: ios/Common/StatusTextContent.swift
       - path: ios/UI/Route/RouterNavigationState.swift
@@ -299,6 +296,8 @@ targets:
     platform: iOS
     sources:
       - path: iosControllerTests
+        excludes:
+          - "**/*.md"
     dependencies:
       - target: iOS
       - target: FlareAppleCore
@@ -309,6 +308,26 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.dimension.flare.controller-tests
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/Flare.app/Flare
         BUNDLE_LOADER: $(TEST_HOST)
+        SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
+
+  MacTimelineTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: macosTests
+      - path: macos
+        includes:
+          - UI/Component/TimelineReadingScrollView.swift
+    dependencies:
+      - target: FlareAppleCore
+      - target: FlareAppleUI
+      - package: Firebase
+        product: FirebaseCrashlytics
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dimension.flare.mac-timeline-tests
+        INFOPLIST_FILE: ""
         SWIFT_DEFAULT_ACTOR_ISOLATION: nonisolated
 
   TimelineUnitTestHost:
@@ -410,16 +429,6 @@ targets:
         copy:
           destination: resources
         destinationFilters: [macOS]
-    preBuildScripts:
-      - name: Compile Kotlin
-        basedOnDependencyAnalysis: false
-        script: |
-          cd "$SRCROOT/.."
-          if [ -n "${GRADLE_JVM_ARGS:-}" ]; then
-            ./gradlew "-Dorg.gradle.jvmargs=$GRADLE_JVM_ARGS" :apple-shared:embedAndSignAppleFrameworkForXcode
-          else
-            ./gradlew :apple-shared:embedAndSignAppleFrameworkForXcode
-          fi
     settings:
       groups:
         - appleApp
@@ -495,6 +504,9 @@ targets:
         excludes:
           - Resources/**
     dependencies:
+      - package: GSPlayer
+        destinationFilters: [iOS]
+        link: false
       - package: Kingfisher
         link: false
       - package: SwiftUI-Flow
@@ -508,16 +520,6 @@ targets:
       - package: NavigationBackport
         link: false
       - target: FlareAppleCore
-    preBuildScripts:
-      - name: Compile Kotlin
-        basedOnDependencyAnalysis: false
-        script: |
-          cd "$SRCROOT/.."
-          if [ -n "${GRADLE_JVM_ARGS:-}" ]; then
-            ./gradlew "-Dorg.gradle.jvmargs=$GRADLE_JVM_ARGS" :apple-shared:embedAndSignAppleFrameworkForXcode
-          else
-            ./gradlew :apple-shared:embedAndSignAppleFrameworkForXcode
-          fi
     settings:
       base:
         CLANG_ENABLE_MODULE_VERIFIER: YES
@@ -530,6 +532,18 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.dimension.flare.appleui
 
 schemes:
+  CI-iOS:
+    build:
+      targets:
+        iOS: all
+    test:
+      config: Debug
+      targets:
+        - TimelineControllerTests
+        - iOSTests
+        - iOSInteractionTests
+        - MediaViewerInteractionTests
+
   iOS:
     build:
       targets:
@@ -608,3 +622,12 @@ schemes:
       config: Debug
       targets:
         - TimelineControllerTests
+
+  MacTimelineTests:
+    build:
+      targets:
+        MacTimelineTests: all
+    test:
+      config: Debug
+      targets:
+        - MacTimelineTests

@@ -17,7 +17,7 @@ public struct ComposeReferenceStatusPreview: View {
             forceHideActions: true
         )
             .padding()
-            .clipShape(.rect(cornerRadius: 16))
+            .clipShape(RoundedRectangle(cornerRadius: 16))
             .overlay(
                 RoundedRectangle(cornerRadius: 16)
                     .stroke(Color.flareSeparator, lineWidth: 1)

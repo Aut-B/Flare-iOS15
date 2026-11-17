@@ -324,12 +324,15 @@ struct IGMediaCarousel: View {
     var onOpen: () -> Void = {}
 
     @State private var index = 0
-    @State private var playing = false
+    @State private var playingInline = false
     @State private var showGallery = false
 
-    /// 只有「单条视频」才原地播；多图轮播里混的视频进详情看。
-    private var canPlayInline: Bool {
-        media.videoURL != nil && media.images.count <= 1
+    /// 老数据只有 `images` 时按图片兜底，新数据按 `items` 逐项渲染。
+    private var items: [IGMediaItem] {
+        if !media.items.isEmpty { return media.items }
+        return media.images.map {
+            IGMediaItem(id: $0, image: $0, video: nil, aspect: media.aspect)
+        }
     }
 
     var body: some View {
@@ -337,12 +340,13 @@ struct IGMediaCarousel: View {
             let width = geometry.size.width
             let height = max(width / max(media.aspect, 0.1), 120)
             ZStack(alignment: .bottom) {
-                if playing, let video = media.videoURL {
+                if playingInline, items.indices.contains(index),
+                   let video = items[index].video {
                     IGVideoPlayer(url: video)
                         .frame(width: width, height: height)
                         .overlay(alignment: .topTrailing) {
                             Button {
-                                playing = false
+                                playingInline = false
                             } label: {
                                 Image(systemName: "xmark.circle.fill")
                                     .font(.system(size: 20))
@@ -352,52 +356,24 @@ struct IGMediaCarousel: View {
                             }
                             .buttonStyle(.plain)
                         }
-                } else if media.images.count > 1 {
+                } else if items.count > 1 {
                     TabView(selection: $index) {
-                        ForEach(Array(media.images.enumerated()), id: \.offset) { offset, url in
-                            IGImageView(url: url)
-                                .frame(width: width, height: height)
-                                .clipped()
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    index = offset
-                                    showGallery = true
-                                }
-                                .tag(offset)
+                        ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
+                            IGMediaCarouselPage(item: item, width: width, height: height) {
+                                index = offset
+                                open(item, at: offset)
+                            }
+                            .tag(offset)
                         }
                     }
                     .tabViewStyle(.page(indexDisplayMode: .never))
                     .frame(width: width, height: height)
                     pageDots
                         .padding(.bottom, 8)
-                } else {
-                    IGImageView(url: media.cover)
-                        .frame(width: width, height: height)
-                        .clipped()
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            showGallery = true
-                        }
-                }
-
-                if canPlayInline, !playing {
-                    Button {
-                        playing = true
-                    } label: {
-                        Image(systemName: "play.circle.fill")
-                            .font(.system(size: 44))
-                            .foregroundStyle(.white.opacity(0.92))
-                            .shadow(radius: 6)
+                } else if let item = items.first {
+                    IGMediaCarouselPage(item: item, width: width, height: height) {
+                        open(item, at: 0)
                     }
-                    .buttonStyle(.plain)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if media.isVideo, !playing, media.images.count > 1 {
-                    // 轮播里的视频：标一下，点开详情播。
-                    Image(systemName: "play.circle.fill")
-                        .font(.system(size: 34))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .shadow(radius: 4)
-                        .allowsHitTesting(false)
                 }
             }
             .frame(width: width, height: height)
@@ -405,10 +381,20 @@ struct IGMediaCarousel: View {
         .frame(height: estimatedHeight)
         .fullScreenCover(isPresented: $showGallery) {
             IGImageGalleryView(
-                images: media.images,
+                items: items,
                 startIndex: index,
                 caption: media.caption
             )
+        }
+    }
+
+    /// 图片点开全屏看图；视频在当前卡片里原地播。
+    private func open(_ item: IGMediaItem, at position: Int) {
+        index = position
+        if item.isVideo {
+            playingInline = true
+        } else {
+            showGallery = true
         }
     }
 
@@ -420,7 +406,7 @@ struct IGMediaCarousel: View {
 
     private var pageDots: some View {
         HStack(spacing: 5) {
-            ForEach(0..<media.images.count, id: \.self) { position in
+            ForEach(0..<items.count, id: \.self) { position in
                 Circle()
                     .fill(position == index ? Color.white : Color.white.opacity(0.45))
                     .frame(width: 6, height: 6)
@@ -433,14 +419,48 @@ struct IGMediaCarousel: View {
     }
 }
 
-/// `AsyncImage` 的薄封装：失败和加载中都给同一个灰底，避免布局抖动。
+/// 轮播中的一页：图片铺底，视频再叠一个播放角标。
+private struct IGMediaCarouselPage: View {
+    let item: IGMediaItem
+    let width: CGFloat
+    let height: CGFloat
+    let onTap: () -> Void
+
+    var body: some View {
+        ZStack {
+            if item.image != nil {
+                IGImageView(url: item.image)
+                    .frame(width: width, height: height)
+                    .clipped()
+            } else {
+                Color.black
+            }
+            if item.isVideo {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .shadow(radius: 6)
+            }
+        }
+        .frame(width: width, height: height)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
+    }
+}
+
+/// 带缓存的图片视图：失败和加载中都给同一个灰底，避免布局抖动。
+///
+/// 不用 `AsyncImage`：它不带 Instagram 图床需要的 UA / Referer / cookie，
+/// 在 6s 上经常一直灰着，滚回来还会重新下载。
 struct IGImageView: View {
     let url: String?
 
+    @State private var image: UIImage?
+
     var body: some View {
-        AsyncImage(url: url.flatMap { URL(string: $0) }) { phase in
-            if let image = phase.image {
-                image
+        Group {
+            if let image = image {
+                Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
             } else {
@@ -452,6 +472,23 @@ struct IGImageView: View {
                             .foregroundStyle(.secondary)
                     )
             }
+        }
+        .onAppear { load() }
+        .onChange(of: url) { _ in load() }
+    }
+
+    private func load() {
+        guard let url = url, !url.isEmpty else {
+            image = nil
+            return
+        }
+        if let cached = IGImageCache.shared.cached(url) {
+            image = cached
+            return
+        }
+        image = nil
+        IGImageCache.shared.image(for: url) { loaded in
+            if let loaded = loaded { image = loaded }
         }
     }
 }

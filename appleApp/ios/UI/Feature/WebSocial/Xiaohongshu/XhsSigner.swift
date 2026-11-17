@@ -81,6 +81,7 @@ final class XhsSigner {
     /// 提前把隐藏网页拉起来。冷启动时页面要跑十几秒 JS，
     /// 等用户点开笔记再创建，评论区就要多等十几秒。
     func warmUp() {
+        guard !LaunchGuard.webViewsBlocked else { return }
         DispatchQueue.main.async {
             _ = self.ensureWebView()
         }
@@ -149,6 +150,12 @@ final class XhsSigner {
         timeout: TimeInterval = 12,
         attempts: Int = 2
     ) async throws -> PageResult {
+        guard !LaunchGuard.webViewsBlocked else {
+            throw XhsError(
+                message: "本次启动处于安全模式，已停用小红书后台网页。点「重试」可以强制再试一次",
+                needLogin: false
+            )
+        }
         await MainActor.run {
             _ = self.ensureWebView()
         }

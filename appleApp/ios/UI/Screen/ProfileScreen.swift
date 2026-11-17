@@ -7,6 +7,8 @@ import Perception
 struct ProfileScreen: View {
     @Environment(\.timelineAccountID) private var accountID
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.layoutDirection) private var layoutDirection
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openURL) private var openURL
     @Environment(\.timelineAppearance.aiConfig.agent) private var agentEnabled
     let accountType: AccountType
@@ -31,6 +33,7 @@ struct ProfileScreen: View {
                 compatBody
             }
         }
+        .flareTextBackground(timelineDisplayMode == .plain && horizontalSizeClass == .compact ? .flareSystemBackground : .flareSystemGroupedBackground)
         .background(Color(timelineDisplayMode == .plain && horizontalSizeClass == .compact ? .clear : .systemGroupedBackground))
         .navigationBarTitleDisplayMode(.inline)
         .backportOnChange(of: isBlockedProfile) { _, isBlocked in
@@ -92,7 +95,8 @@ struct ProfileScreen: View {
                             data: presenter.state.actions,
                             useText: false,
                             allowSpacer: false,
-                            applyPostActionLayout: false
+                            applyPostActionLayout: false,
+                            isDetail: true
                         )
                     }
                 }
@@ -101,14 +105,21 @@ struct ProfileScreen: View {
     }
     
     var regularBody: some View {
-        HStack(spacing: nil) {
-            ScrollView {
-                ListCardView {
+        GeometryReader { proxy in
+            let division = profileDivision(in: proxy)
+            let layout = ProfileLayoutPolicy(
+                width: proxy.size.width,
+                division: division,
+                layoutDirection: layoutDirection
+            )
+            HStack(spacing: 0) {
+                ScrollView {
                     ProfileHeader(
                         user: presenter.state.userState,
                         relation: presenter.state.relationState,
                         followButtonState: presenter.state.followButtonState,
                         isMe: presenter.state.isMe,
+                        bannerTopInset: layout.usesCard ? 0 : proxy.safeAreaInsets.top,
                         onFollowClick: { user, followButtonState in
                             handleFollowAction(user: user, followButtonState: followButtonState)
                         },
@@ -116,44 +127,72 @@ struct ProfileScreen: View {
                         onFansClick: onFansClick
                     )
                     .padding(.bottom)
+                    .flareTextBackground(layout.usesCard ? .flareSecondarySystemGroupedBackground : .flareSystemBackground)
+                    .background(layout.usesCard ? Color.flareSecondarySystemGroupedBackground : Color(.systemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: layout.usesCard ? 32 : 0, style: .continuous))
                 }
-            }
-            .padding(.leading)
-            .frame(width: 400)
+                .flareScrollContentTopMarginZero()
+                .padding(.leading, layout.usesCard ? 16 : 0)
+                .frame(width: layout.profileWidth)
+                .background {
+                    if !layout.usesCard {
+                        Color(.systemBackground).ignoresSafeArea(edges: .vertical)
+                    }
+                }
+                .ignoresSafeArea(.container, edges: layout.usesCard ? [] : .top)
 
-            if shouldGateBlockedProfile {
-                BlockedProfileGate {
-                    showBlockedProfileContent = true
-                }
-                .padding(.horizontal)
-                .padding(.top, 24)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            } else {
-                StateView(state: presenter.state.tabs) { tabsArray in
-                    let tabs = tabsArray.cast(ProfileState.Tab.self)
-                    profileTimelineCollection(
-                        tabs: tabs,
-                        showsProfileAccessories: false
-                    )
-                } errorContent: { error in
-                    ListErrorView(error: error) {
-                        presenter.state.retryTabs()
+                Divider()
+                    .frame(width: layout.columnSpacing)
+                    .opacity(layout.usesCard ? 0 : 1)
+                    .background(layout.usesCard ? Color.clear : Color(.systemBackground))
+                    .ignoresSafeArea(.container, edges: .vertical)
+
+                if shouldGateBlockedProfile {
+                    BlockedProfileGate {
+                        showBlockedProfileContent = true
                     }
-                } loadingContent: {
-                    GeometryReader { proxy in
-                        ScrollView {
-                            LazyVStack(spacing: 0) {
-                                ProfileTabsLoadingPlaceholder()
-                                ProfileTimelineUIKitLoadingPlaceholder(
-                                    columnCount: TimelineColumnPolicy.adaptive.columnCount(for: proxy.size.width)
-                                )
-                            }
+                    .padding(.horizontal)
+                    .padding(.top, 24)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                } else {
+                    StateView(state: presenter.state.tabs) { tabsArray in
+                        let tabs = tabsArray.cast(ProfileState.Tab.self)
+                        profileTimelineCollection(
+                            tabs: tabs,
+                            showsProfileAccessories: false
+                        )
+                    } errorContent: { error in
+                        ListErrorView(error: error) {
+                            presenter.state.retryTabs()
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    } loadingContent: {
+                        GeometryReader { proxy in
+                            ScrollView {
+                                LazyVStack(spacing: 0) {
+                                    ProfileTabsLoadingPlaceholder()
+                                    ProfileTimelineUIKitLoadingPlaceholder(
+                                        columnCount: TimelineColumnPolicy.adaptive.columnCount(for: proxy.size.width)
+                                    )
+                                }
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        }
                     }
                 }
             }
+            .modifier(TimelineListBackground(
+                columnPolicy: layout.usesCard ? .adaptive : .single
+            ))
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: division)
         }
+    }
+
+    private func profileDivision(in proxy: GeometryProxy) -> CGRect? {
+        if #available(iOS 27.1, *) {
+            return proxy.reservedRegions(kind: .division)
+                .first { $0.isActive && $0.frame.height > $0.frame.width }?.frame
+        }
+        return nil
     }
     
     @ViewBuilder
@@ -301,6 +340,21 @@ struct ProfileScreen: View {
     }
 }
 
+@available(iOS 27.1, *)
+private struct ProfileNavigationTitle: ToolbarContent {
+    @Environment(\.toolbarVerticalEdge) private var toolbarVerticalEdge
+    let text: UiRichText
+
+    var body: some ToolbarContent {
+        // A custom title would add a horizontal bar alongside Duo's vertical controls.
+        if toolbarVerticalEdge == nil {
+            ToolbarItem(placement: .principal) {
+                RichText(text: text)
+            }
+        }
+    }
+}
+
 private struct BlockedProfileGate: View {
     let onShow: () -> Void
 
@@ -310,7 +364,7 @@ private struct BlockedProfileGate: View {
                 .font(.headline)
             Text(String(localized: "profile_blocked_gate_description", defaultValue: "You blocked this user. Their tabs and timeline are hidden until you choose to show them."))
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .flareSecondaryText()
             Button {
                 onShow()
             } label: {
@@ -919,6 +973,7 @@ private final class ProfileTimelinePagerViewController: UIViewController,
         observePageScrollView()
 
         accessoryScrollView.backgroundColor = .clear
+        accessoryScrollView.clipsToBounds = true
         accessoryScrollView.contentInsetAdjustmentBehavior = .never
         accessoryScrollView.showsHorizontalScrollIndicator = false
         accessoryScrollView.showsVerticalScrollIndicator = false
@@ -1296,12 +1351,13 @@ private final class ProfileTimelinePagerViewController: UIViewController,
         headerView?.transform = .identity
         headerView?.frame = CGRect(x: 0, y: 0, width: width, height: headerHeight)
         collapsedGlassView.transform = .identity
+        // shortcut: 40 pt hides glass corner seams outside the clipped viewport; recheck if system refraction changes.
         collapsedGlassView.frame = CGRect(
             x: 0,
             y: collapseDistance,
             width: width,
             height: max(headerHeight - collapseDistance, 0) + pickerHeight
-        )
+        ).insetBy(dx: -40, dy: 0)
         pickerView?.transform = .identity
         pickerView?.frame = CGRect(x: 0, y: headerHeight, width: width, height: pickerHeight)
 
@@ -1533,7 +1589,7 @@ private struct ProfileHeaderAccessorySignature: Equatable {
                 "success",
                 String(describing: success.data.key),
                 success.data.name.raw,
-                success.data.handle.canonical,
+                success.data.handle.display,
                 success.data.avatar?.url ?? "",
                 success.data.banner?.url ?? "",
                 success.data.description_?.raw ?? "",
@@ -1636,12 +1692,14 @@ private final class ProfileHostedAccessoryView: UIView {
 
     func setBaseBackgroundColor(_ color: UIColor) {
         baseBackgroundColor = color
+        traitOverrides[FlareTextBackgroundTrait.self] = hidesBaseBackground ? nil : color
         backgroundColor = hidesBaseBackground ? .clear : color
     }
 
     func setBaseBackgroundHidden(_ hidden: Bool) {
         guard hidesBaseBackground != hidden else { return }
         hidesBaseBackground = hidden
+        traitOverrides[FlareTextBackgroundTrait.self] = hidden ? nil : baseBackgroundColor
         backgroundColor = hidden ? .clear : baseBackgroundColor
     }
 

@@ -145,7 +145,6 @@ public struct StatusView: View {
         let quoteItems = self.quotes
         let hasQuotes = !quoteItems.isEmpty
         let sourceChannelName = data.sourceChannel?.name
-        let ipLocation: String? = data.ipLocation.flatMap { $0.isEmpty ? nil : $0 }
         let emojiReactions = Array(data.emojiReactions)
         let hasEmojiReactions = showEmojiReactions && !emojiReactions.isEmpty
         let visibility = data.visibility
@@ -155,7 +154,7 @@ public struct StatusView: View {
         let accountType = data.accountType
         let statusKey = data.statusKey
         let effectiveLineLimit = max(maxLine ?? Int(appearanceLineLimit), 1)
-        let contentLineLimit: Int? = isDetail || textExpanded ? nil : effectiveLineLimit
+        let contentLineLimit: Int? = isDetail || textExpanded || effectiveLineLimit == Int(Int32.max) ? nil : effectiveLineLimit
         let collapseThreshold = maxLine == nil ? max(15, effectiveLineLimit) : effectiveLineLimit
         let canExpandLineLimitedContent = contentLineLimit != nil && !isDetail && !textExpanded && showExpandTextButton
         let hasPreMediaBody =
@@ -198,11 +197,11 @@ public struct StatusView: View {
                 spacing: 8,
             ) {
                 if showAsFullWidth, let user {
-                    AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                    AvatarView(data: user.avatar)
                         .frame(width: 44, height: 44)
                         .accessibilityLabel(
                             Text(
-                                verbatim: openProfileAccessibilityLabel(handle: user.handle.canonical)
+                                verbatim: openProfileAccessibilityLabel(handle: user.handle.display)
                             )
                         )
                         .onTapGesture {
@@ -220,13 +219,12 @@ public struct StatusView: View {
                         ) {
                             if let user {
                                 if showAsFullWidth {
-                                    UserOnelineView(data: user, showAvatar: false) {
+                                    UserOnelineView(data: user, showAvatar: false, subtitle: data.authorSubtitle) {
                                         topEndContent(
                                             visibility: visibility,
                                             translationDisplayState: translationDisplayState,
-                                            platformIcon: data.platformIcon,
-                                            platformId: data.platformId,
-                                            ipLocation: ipLocation,
+                                    platformIcon: data.platformIcon,
+                                    platformId: data.platformId,
                                             createdAt: createdAt,
                                             accountType: accountType,
                                             statusKey: statusKey
@@ -235,13 +233,12 @@ public struct StatusView: View {
                                         user.onClicked(ClickContext(launcher: AppleUriLauncher(openUrl: openURL)))
                                     }
                                 } else if isQuote {
-                                    UserOnelineView(data: user, showAvatar: true) {
+                                    UserOnelineView(data: user, showAvatar: true, subtitle: data.authorSubtitle) {
                                         topEndContent(
                                             visibility: visibility,
                                             translationDisplayState: translationDisplayState,
                                             platformIcon: data.platformIcon,
                                             platformId: data.platformId,
-                                            ipLocation: ipLocation,
                                             createdAt: createdAt,
                                             accountType: accountType,
                                             statusKey: statusKey
@@ -250,13 +247,12 @@ public struct StatusView: View {
                                         user.onClicked(ClickContext(launcher: AppleUriLauncher(openUrl: openURL)))
                                     }
                                 } else {
-                                    UserCompatView(data: user) {
+                                    UserCompatView(data: user, subtitle: data.authorSubtitle) {
                                         topEndContent(
                                             visibility: visibility,
                                             translationDisplayState: translationDisplayState,
                                             platformIcon: data.platformIcon,
                                             platformId: data.platformId,
-                                            ipLocation: ipLocation,
                                             createdAt: createdAt,
                                             accountType: accountType,
                                             statusKey: statusKey
@@ -279,8 +275,8 @@ public struct StatusView: View {
                                             Text("Reply to \(replyToHandle)", bundle: FlareAppleUILocalization.bundle)
                                         }
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .padding(.top, 4)
+                                        .flareSecondaryText()
+                                        .padding(.top, showAsFullWidth || isQuote ? 2 : 4)
                                     }
                                     if !contentWarningIsEmpty {
                                         VStack(alignment: .leading, spacing: 4) {
@@ -352,6 +348,11 @@ public struct StatusView: View {
                                                 StatusPollView(data: poll)
                                             }
                                         }
+                                        .padding(
+                                            .top,
+                                            (showAsFullWidth || isQuote) && contentWarningIsEmpty &&
+                                                (user != nil || replyToHandle != nil) && contents.contains { !$0.isEmpty } ? 2 : 0
+                                        )
                                     }
 
                                     if isDetail, showTranslate {
@@ -460,7 +461,7 @@ public struct StatusView: View {
                                             Text(sourceChannelName)
                                         }
                                         .font(.footnote)
-                                        .foregroundStyle(.secondary)
+                                        .flareSecondaryText()
                                     }
                                     if hasEmojiReactions {
                                         StatusReactionView(data: emojiReactions, isDetail: isDetail)
@@ -473,12 +474,12 @@ public struct StatusView: View {
                         if isDetail {
                             DateTimeText(data: createdAt, fullTime: true)
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .flareSecondaryText()
                                 .padding(.top, 8)
                         }
 
                         if (postActionStyle != .hidden || isDetail) && !forceHideActions {
-                            StatusActionsView(data: actions, useText: false, topPadding: 8)
+                            StatusActionsView(data: actions, useText: false, topPadding: 8, isDetail: isDetail, postKey: String(describing: data.statusKey))
                             #if os(macOS)
                                 .font(isDetail ? .body : .callout)
                             #else
@@ -638,9 +639,8 @@ public struct StatusView: View {
     private func topEndContent(
         visibility: UiTimelineV2.PostVisibility?,
         translationDisplayState: TranslationDisplayState,
-        platformIcon: UiIcon,
+        platformIcon: IconType,
         platformId: String,
-        ipLocation: String?,
         createdAt: UiDateTime,
         accountType: AccountType,
         statusKey: MicroBlogKey
@@ -649,42 +649,33 @@ public struct StatusView: View {
             if let visibility {
                 StatusVisibilityView(data: visibility)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .flareSecondaryText()
             }
             if translationDisplayState != .hidden {
                 TranslateStatusComponent(data: translationDisplayState)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .flareSecondaryText()
             }
             if showPlatformLogo {
-                // 平台图标下方放 IP 属地，只显示地名（如「北京」）。
-                VStack(alignment: .trailing, spacing: 0) {
-                    Image(fontAwesome: platformIcon.fontAwesomeIcon)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel(
-                            Text(
-                                verbatim: String(
-                                    format: FlareAppleUILocalization.string(
-                                        "status_platform",
-                                        fallback: "Platform: %@"
-                                    ),
-                                    platformId
-                                )
+                TabIcon(icon: platformIcon, size: 14)
+                    .font(.caption)
+                    .flareSecondaryText()
+                    .accessibilityLabel(
+                        Text(
+                            verbatim: String(
+                                format: FlareAppleUILocalization.string(
+                                    "status_platform",
+                                    fallback: "Platform: %@"
+                                ),
+                                platformId
                             )
                         )
-                    if let ipLocation, !ipLocation.isEmpty {
-                        Text(ipLocation)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
+                    )
             }
             if !isDetail {
                 DateTimeText(data: createdAt)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .flareSecondaryText()
             }
             if isOwnPost(accountType), !isQuote, !isDetail {
                 Button {
@@ -710,7 +701,7 @@ public struct StatusView: View {
                 } label: {
                     Image(fontAwesome: .robot)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .flareSecondaryText()
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(Text("status_insight_title", bundle: FlareAppleUILocalization.bundle))
