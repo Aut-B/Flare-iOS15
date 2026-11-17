@@ -10,6 +10,9 @@ import UIKit
 struct FlareApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var bootPhase: BootPhase = .loading
+    /// 上次崩过就在主界面顶上挂一条横幅。崩一次（安全模式）时用户根本进不到
+    /// 恢复页，如果只在恢复页显示现场，第一次崩溃的记录就白存了。
+    @State private var showCrashBanner = false
 
     private enum BootPhase {
         case loading
@@ -37,7 +40,22 @@ struct FlareApp: App {
                     recoveryScreen
                 case .ready:
                     FlareTheme {
+                        // 上次崩过（掉进安全模式）就在主界面顶上挂一条横幅：
+                        // 崩 1 次时不进恢复页，用户看不到任何现场，等到崩第 2 次
+                        // 才出现恢复页就已经太晚了。
+                        //
+                        // 用 safeAreaInset 而不是 VStack 包一层：TabView 被塞进
+                        // VStack 会改变它的安全区与 tab bar 布局，风险远大于收益。
                         root
+                            .safeAreaInset(edge: .top, spacing: 0) {
+                                // 只依赖 @State：静态变量不参与 SwiftUI 的依赖追踪。
+                                if showCrashBanner {
+                                    LaunchCrashBanner(
+                                        record: LaunchCrashTrace.lastCrash,
+                                        onDismiss: { showCrashBanner = false }
+                                    )
+                                }
+                            }
                     }
                     .modifier(IOSTimelineListEnvironment())
                     .ugoiraExportStatus()
@@ -45,6 +63,9 @@ struct FlareApp: App {
                         MediaCacheMaintenance.handleScenePhase(phase)
                         if phase == .background {
                             LaunchGuard.markStable()
+                            // 进后台即视为本次启动成功，崩溃计数清零，
+                            // 横幅没有意义了；否则用户切回来还看到「上次没完成」。
+                            showCrashBanner = false
                         }
                     }
                     .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
@@ -65,6 +86,10 @@ struct FlareApp: App {
             InstagramStateIsolator.seedCorruptStateForTesting()
         }
         #endif
+        // 只要上次崩过一次（`begin()` 里已把计数 +1），就把现场摆到主界面顶上。
+        // 以前只在恢复页（crashes>=2）显示，第一次崩溃的记录等于白存。
+        // 有记录才显示，没记录不占版面。
+        showCrashBanner = LaunchGuard.lastCrashCount >= 1 && !LaunchCrashTrace.lastCrash.isEmpty
         if LaunchGuard.recoveryMode {
             bootPhase = .recovery
             return
@@ -269,5 +294,60 @@ private struct LaunchCrashRecordView: View {
         }
         .padding(8)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// 主界面顶部的崩溃提示条。
+///
+/// 只在「上次崩过、这次已经成功进到主界面」时出现：安全模式下功能是受限的
+/// （隐藏网页被阻断），用户本来就会觉得「怎么写不了」，顺便把现场摆出来并
+/// 让他一键复制，比只显示「上次启动没有完成」有用得多。
+private struct LaunchCrashBanner: View {
+    let record: String
+    let onDismiss: () -> Void
+    @State private var copied = false
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("上次启动没有完成，已进安全模式")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = record
+                    copied = true
+                } label: {
+                    Text(copied ? "已复制" : "复制现场")
+                        .font(.caption2)
+                }
+                Button {
+                    expanded.toggle()
+                } label: {
+                    Text(expanded ? "收起" : "展开")
+                        .font(.caption2)
+                }
+                Button {
+                    onDismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption2)
+                }
+            }
+            // 默认收起：不挡主界面，用户想看/想复制再展开。
+            if expanded {
+                ScrollView {
+                    Text(record)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 140)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(.secondarySystemGroupedBackground))
     }
 }
