@@ -45,11 +45,13 @@ enum WereadError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notLoggedIn:
-            return "微信读书登录已失效，请在「微信读书」页面重新登录"
+            return "微信读书登录已过期，请在「微信读书」页面重新扫码登录"
         case .http(let code):
             return "请求失败（HTTP \(code)）"
         case .empty:
-            return "内容为空，可能是这本书需要付费或接口已变更"
+            // 正文接口回空/`{}` 的典型原因是会话信标不对，其次是书本身不给读。
+            // 文案要把「可以重试」和「可能要付费」都说清楚，别让用户干等。
+            return "没能取到本章正文。可能是阅读会话已过期（下拉刷新或重试一次），也可能是这本书需要付费"
         case .decodeFailed:
             return "内容解析失败"
         case .server(let message):

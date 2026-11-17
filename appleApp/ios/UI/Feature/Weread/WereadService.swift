@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// 微信读书 Web 接口封装。
 ///
@@ -10,6 +11,25 @@ final class WereadService: @unchecked Sendable {
 
     private let base = "https://weread.qq.com"
     private let session: URLSession
+    private let log = Logger(subsystem: "dev.dimension.flare.weread", category: "service")
+
+    /// 阅读器页面的会话信标缓存。
+    ///
+    /// 抓一次页面几百 KB，每章都抓太浪费，也更容易触发风控。
+    /// 按「书 + 章」缓存，条目里带抓取时间，超过 `sessionTTL` 就当过期重抓。
+    /// 用锁保护：`content()` 在并发 prefetch 里会被同时调用。
+    private let sessionLock = NSLock()
+    private var sessionCache: [String: (value: WereadReaderSession, stamp: Date)] = [:]
+    /// 信标有效期。`psvts` 会随时间失效，太短会反复抓页面，太长会拿到过期的。
+    private static let sessionTTL: TimeInterval = 120
+
+    /// 抓取阅读器页面时用的 UA。
+    ///
+    /// 必须是桌面 UA：手机 UA 下 weread 会把 `/web/reader/...` 换成「打开 App」引导页，
+    /// 里面根本没有 `__INITIAL_STATE__`。`WereadReaderView` 那边也是这么做的。
+    private static let readerUserAgent =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        + "(KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36 Edg/135.0.0.0"
 
     private init() {
         let configuration = URLSessionConfiguration.default
@@ -23,6 +43,164 @@ final class WereadService: @unchecked Sendable {
             "Origin": "https://weread.qq.com",
         ]
         session = URLSession(configuration: configuration)
+    }
+
+    // MARK: - 阅读器会话信标
+
+    /// 抓「这一章」的阅读器会话信标。
+    ///
+    /// 流程：GET `/web/reader/{_e(bookId)}k{_e(chapterUid)}` → 从 HTML 里抠
+    /// `window.__INITIAL_STATE__.reader` 的 `psvts` / `pclts` / `token`。
+    ///
+    /// **失败一律返回 nil，不抛错**：拿不到信标不该阻断阅读，调用方会退回
+    /// Step 1 的老行为（写死 ps/pc、不加 sc）继续试。
+    func readerSession(bookId: String, chapterUid: Int, cookie: String) async -> WereadReaderSession? {
+        let cacheKey = "\(bookId)#\(chapterUid)"
+        if let cached = cachedSession(for: cacheKey) { return cached }
+
+        guard let url = readerURL(bookId: bookId, chapterUid: chapterUid) else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.setValue(Self.readerUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            forHTTPHeaderField: "Accept"
+        )
+        request.setValue(url.absoluteString, forHTTPHeaderField: "Referer")
+
+        do {
+            let (data, response) = try await self.session.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                log.info("weread: reader page HTTP \(http.statusCode, privacy: .public)")
+                return nil
+            }
+            guard let html = String(data: data, encoding: .utf8) else {
+                log.info("weread: reader page not utf8")
+                return nil
+            }
+            guard let parsed = WereadReaderSessionParser.session(from: html) else {
+                log.info("weread: reader page has no session beacon")
+                return nil
+            }
+            storeSession(parsed, for: cacheKey)
+            return parsed
+        } catch {
+            log.info("weread: reader page fetch failed: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
+    private func cachedSession(for key: String) -> WereadReaderSession? {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        guard let entry = sessionCache[key] else { return nil }
+        if Date().timeIntervalSince(entry.stamp) > Self.sessionTTL {
+            sessionCache[key] = nil
+            return nil
+        }
+        return entry.value
+    }
+
+    private func storeSession(_ value: WereadReaderSession, for key: String) {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        // 顺手清掉过期条目，避免这本书读完一章攒一条一直不清。
+        let now = Date()
+        sessionCache = sessionCache.filter { now.timeIntervalSince($0.value.stamp) <= Self.sessionTTL }
+        sessionCache[key] = (value, now)
+    }
+
+    /// 让阅读器页面里的信标失效（比如正文接口回了 `{}`，说明手里的信标不对）。
+    func invalidateSession(bookId: String, chapterUid: Int) {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        sessionCache["\(bookId)#\(chapterUid)"] = nil
+    }
+
+    // MARK: - 会话续期
+
+    /// 续期成功后把新 cookie 交出去（由 `WereadStore` 落盘）。
+    ///
+    /// 不在这里直接写 UserDefaults：Service 不该知道存储键，
+    /// 而且 Store 才是 cookie 的唯一持有者。
+    var onCookieRenewed: (@Sendable (String) -> Void)?
+
+    /// cookie 过期时续一次。
+    ///
+    /// 返回 `Set-Cookie` 里的新 cookie 串；没有新值就返回 nil。
+    /// 服务端成功时回 `{"succ":1}`。
+    func renew(cookie: String) async -> String? {
+        var request = URLRequest(url: URL(string: "\(base)/web/login/renewal")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json;charset=UTF-8", forHTTPHeaderField: "Content-Type")
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["rq": "%2Fweb%2Fbook%2Fread", "ql": false]
+        )
+        do {
+            let (data, response) = try await self.session.data(for: request)
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let success = (json?["succ"] as? NSNumber)?.intValue == 1
+            guard success else {
+                log.info("weread: renewal rejected")
+                return nil
+            }
+            // 从响应头里捞新 cookie，合并进旧的。
+            let merged = Self.mergeCookies(existing: cookie, response: response)
+            log.info("weread: renewal ok, cookie changed=\(merged != nil, privacy: .public)")
+            if let merged {
+                onCookieRenewed?(merged)
+            }
+            return merged
+        } catch {
+            log.info("weread: renewal failed: \(String(describing: error), privacy: .public)")
+            return nil
+        }
+    }
+
+    /// 把 `Set-Cookie` 里的 kv 合并进旧 cookie 串。
+    ///
+    /// 同名 cookie 以服务端新值为准 —— 过期的 `wr_skey` 同时存在会导致
+    /// 「登录超时」反复出现。
+    private static func mergeCookies(existing: String, response: URLResponse) -> String? {
+        guard let http = response as? HTTPURLResponse else { return nil }
+        var pairs: [(String, String)] = []
+        var index: [String: Int] = [:]
+        for part in existing.split(separator: ";") {
+            let pieces = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pieces.count == 2 else { continue }
+            let name = pieces[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = pieces[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            if let at = index[name] {
+                pairs[at].1 = value
+            } else {
+                index[name] = pairs.count
+                pairs.append((name, value))
+            }
+        }
+
+        var changed = false
+        for (key, raw) in http.allHeaderFields {
+            guard String(describing: key).lowercased() == "set-cookie" else { continue }
+            for line in String(describing: raw).components(separatedBy: "\n") {
+                let head = line.split(separator: ";").first.map(String.init) ?? ""
+                let pieces = head.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard pieces.count == 2 else { continue }
+                let name = pieces[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                let value = pieces[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty, !value.isEmpty else { continue }
+                if let at = index[name] {
+                    if pairs[at].1 != value { pairs[at].1 = value; changed = true }
+                } else {
+                    index[name] = pairs.count
+                    pairs.append((name, value))
+                    changed = true
+                }
+            }
+        }
+        guard changed else { return nil }
+        return pairs.map { "\($0.0)=\($0.1)" }.joined(separator: "; ")
     }
 
     // MARK: - 书架
@@ -248,16 +426,56 @@ final class WereadService: @unchecked Sendable {
     // MARK: - 正文
 
     /// 返回一章的 HTML。epub 书要拼 4 个分片，txt 书拼 2 个。
+    ///
+    /// 会话处理分三层，任何一层失败都尽量不让用户看到白屏：
+    /// 1. 先抓阅读器页面拿信标，拿到就用真实 `ps`/`pc` + `sc=1`；
+    /// 2. 正文回 `{}`（信标不对/过期）→ 丢掉缓存信标、重抓、再试一次；
+    /// 3. 回 `-2012`（登录超时）→ 续期 cookie、重抓信标、再试一次。
+    /// 仍然失败就按真实原因报错：登录过期会明确说「请重新扫码」。
     func content(bookId: String, chapterUid: Int, cookie: String) async throws -> String {
+        do {
+            return try await fetchChapter(bookId: bookId, chapterUid: chapterUid, cookie: cookie)
+        } catch WereadError.notLoggedIn {
+            // 登录超时：续期一次，拿到新 cookie 就重试；拿不到就如实报过期。
+            guard let renewed = await renew(cookie: cookie), renewed != cookie else {
+                log.info("weread: content got -2012 and renewal produced nothing")
+                throw WereadError.notLoggedIn
+            }
+            invalidateSession(bookId: bookId, chapterUid: chapterUid)
+            do {
+                return try await fetchChapter(bookId: bookId, chapterUid: chapterUid, cookie: renewed)
+            } catch WereadError.notLoggedIn {
+                throw WereadError.notLoggedIn
+            }
+        } catch WereadError.empty {
+            // `{}` 多半是信标不对。丢掉缓存、重新抓一次页面再试。
+            invalidateSession(bookId: bookId, chapterUid: chapterUid)
+            let beacon = await readerSession(bookId: bookId, chapterUid: chapterUid, cookie: cookie)
+            guard beacon != nil else {
+                // 连信标都抓不到，说明不是「信标过期」能解释的，别白试第二遍。
+                log.info("weread: content empty and no session beacon available")
+                throw WereadError.empty
+            }
+            return try await fetchChapter(bookId: bookId, chapterUid: chapterUid, cookie: cookie)
+        }
+    }
+
+    private func fetchChapter(bookId: String, chapterUid: Int, cookie: String) async throws -> String {
         let uid = String(chapterUid)
+        // 拿不到信标就传 nil，`fragment` 会退回写死 ps、不加 sc。
+        let beacon = await readerSession(bookId: bookId, chapterUid: chapterUid, cookie: cookie)
 
         // 四种分片用 `try?`：txt 书请求 `e_*` 会 404，以前这里 `try await`
         // 一抛错就整章失败，下面的 `t_*` 兜底根本走不到 —— 表现就是
         // 「点开一直白屏 / 一直转圈」。
-        async let epub0 = try? fragment("/web/book/chapter/e_0", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie)
-        async let epub1 = try? fragment("/web/book/chapter/e_1", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie)
-        async let epub2 = try? fragment("/web/book/chapter/e_2", bookId: bookId, chapterUid: uid, st: 1, cookie: cookie)
-        async let epub3 = try? fragment("/web/book/chapter/e_3", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie)
+        //
+        // 显式标 `String?`：`async let x = try? f()` 在 Swift 6.x 下会让编译器
+        // 在「声明处用 try?」和「被延后调用的函数里用 try?」之间有歧义，
+        // 加了类型标注就没有解释空间了。
+        async let epub0: String? = try? fragment("/web/book/chapter/e_0", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie, beacon: beacon)
+        async let epub1: String? = try? fragment("/web/book/chapter/e_1", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie, beacon: beacon)
+        async let epub2: String? = try? fragment("/web/book/chapter/e_2", bookId: bookId, chapterUid: uid, st: 1, cookie: cookie, beacon: beacon)
+        async let epub3: String? = try? fragment("/web/book/chapter/e_3", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie, beacon: beacon)
 
         let (raw0, raw1, raw2, raw3) = await (epub0, epub1, epub2, epub3)
         let part0 = raw0 ?? ""
@@ -271,7 +489,7 @@ final class WereadService: @unchecked Sendable {
         // 解出空串/垃圾后抛 empty —— 用户看到的就是白屏。
         switch try shardFormat(part0, part1, part3) {
         case .txt:
-            return try await textChapter(bookId: bookId, chapterUid: uid, cookie: cookie)
+            return try await textChapter(bookId: bookId, chapterUid: uid, cookie: cookie, beacon: beacon)
         case .epub:
             break
         }
@@ -330,9 +548,14 @@ final class WereadService: @unchecked Sendable {
     }
 
     /// 老 txt 书走 `t_0` / `t_1`。
-    private func textChapter(bookId: String, chapterUid: String, cookie: String) async throws -> String {
-        async let txt0 = try? fragment("/web/book/chapter/t_0", bookId: bookId, chapterUid: chapterUid, st: 0, cookie: cookie)
-        async let txt1 = try? fragment("/web/book/chapter/t_1", bookId: bookId, chapterUid: chapterUid, st: 1, cookie: cookie)
+    private func textChapter(
+        bookId: String,
+        chapterUid: String,
+        cookie: String,
+        beacon: WereadReaderSession?
+    ) async throws -> String {
+        async let txt0: String? = try? fragment("/web/book/chapter/t_0", bookId: bookId, chapterUid: chapterUid, st: 0, cookie: cookie, beacon: beacon)
+        async let txt1: String? = try? fragment("/web/book/chapter/t_1", bookId: bookId, chapterUid: chapterUid, st: 1, cookie: cookie, beacon: beacon)
         let (rawText0, rawText1) = await (txt0, txt1)
         let text = WereadCrypto.decrypt((rawText0 ?? "") + (rawText1 ?? ""))
         guard !text.isEmpty else { throw WereadError.empty }
@@ -421,12 +644,18 @@ final class WereadService: @unchecked Sendable {
 
     // MARK: - 单个正文分片
 
+    /// 发一个正文分片请求。
+    ///
+    /// `beacon` 是这一章阅读器页面的会话信标。有就用真实 `ps`/`pc` 并带上
+    /// `sc = 1`（整章）；没有就退回写死值、不带 `sc`（Step 1 的老行为），
+    /// 并打日志说明走了回退 —— 这条日志就是真机上判断「白屏到底是哪一类」的依据。
     private func fragment(
         _ path: String,
         bookId: String,
         chapterUid: String,
         st: Int,
-        cookie: String
+        cookie: String,
+        beacon: WereadReaderSession?
     ) async throws -> String {
         var request = URLRequest(url: URL(string: base + path)!)
         request.httpMethod = "POST"
@@ -438,36 +667,53 @@ final class WereadService: @unchecked Sendable {
         let timestamp = Int(Date().timeIntervalSince1970)
         let hashedBook = WereadCrypto.calcHash(bookId)
         let hashedChapter = WereadCrypto.calcHash(chapterUid)
-        // ⚠️ 这两个是**占位值，不是正确实现**（见 .fleet/weread-rootcause.md E1）。
-        // 正确来源：
-        //   ps = 这本书这一章 `/web/reader/{_e(bookId)}k{_e(chapterUid)}` 页面里
-        //        `window.__INITIAL_STATE__.reader.psvts`
-        //   pc = `_e(ct)`，也就是 WereadCrypto.calcHash(String(timestamp))
-        // 另外还缺 `sc = 1`（整章）与 `prevChapter = false`。
-        // 在这些补齐之前，epub 书的正文接口仍可能返回 `{}`。
-        let devicePs = "a2b325707a19e580g0186a2"
-        let devicePc = "430321207a19e581g013ab0"
 
-        let signed = WereadCrypto.sign([
+        // ps：优先用阅读器页面给的本章信标；没有就用写死值兜底。
+        // pc：优先用页面给的 pclts，没有就 `_e(ct)` 现算 —— 两者都不是写死的。
+        let uid = Int(chapterUid) ?? 0
+        let livePs = beacon?.ps(for: uid)
+        let ps = livePs ?? Self.placeholderPs
+        let pc = beacon?.pc(for: timestamp) ?? WereadCrypto.calcHash(String(timestamp))
+        let hasBeacon = livePs != nil
+
+        // 只有拿到真实信标才敢要整章：拿不到时加 sc=1 也更可能被拒。
+        let sc = hasBeacon ? 1 : 0
+        let prevChapter = false
+
+        var fields: [(String, String)] = [
             ("b", hashedBook),
             ("c", hashedChapter),
             ("r", String(random)),
             ("st", String(st)),
             ("ct", String(timestamp)),
-            ("ps", devicePs),
-            ("pc", devicePc),
-        ])
+            ("ps", ps),
+            ("pc", pc),
+            ("prevChapter", prevChapter ? "true" : "false"),
+        ]
+        if hasBeacon {
+            fields.append(("sc", String(sc)))
+        }
+        let signed = WereadCrypto.sign(fields)
 
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "b": hashedBook,
             "c": hashedChapter,
             "r": random,
             "st": st,
             "ct": timestamp,
-            "ps": devicePs,
-            "pc": devicePc,
+            "ps": ps,
+            "pc": pc,
+            "prevChapter": prevChapter,
             "s": signed,
         ]
+        if hasBeacon {
+            payload["sc"] = sc
+        }
+        if !hasBeacon {
+            log.info(
+                "weread: \(path, privacy: .public) no session beacon, falling back to placeholder ps and sc=0"
+            )
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
         let data = try await send(request)
@@ -484,6 +730,9 @@ final class WereadService: @unchecked Sendable {
         }
         return WereadCrypto.chk(unwrapped)
     }
+
+    /// 拿不到会话信标时的兜底 ps（沿用历史上能过签的占位串）。
+    private static let placeholderPs = "a2b325707a19e580g0186a2"
 
     // MARK: - 工具
 

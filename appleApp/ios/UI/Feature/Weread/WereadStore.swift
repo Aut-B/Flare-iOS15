@@ -57,6 +57,15 @@ final class WereadStore: ObservableObject {
             readerLinks = [:]
             bookLinks = [:]
         }
+        // 只在这里挂一次：`content()` 会被 prefetch 并发调用，
+        // 每次都赋值等于多线程同时写同一个单例属性，属于数据竞争。
+        WereadService.shared.onCookieRenewed = { [weak self] renewed in
+            guard let self = self else { return }
+            // `isLoggedIn` 是 @Published，必须切主线程。
+            DispatchQueue.main.async {
+                self.persistRenewedCookie(renewed)
+            }
+        }
     }
 
     var cookie: String {
@@ -433,9 +442,21 @@ final class WereadStore: ObservableObject {
                 cookie: cookie
             )
         } catch WereadError.notLoggedIn {
+            // 走到这里说明续期也失败了（Service 内部已经试过一次）。
+            // 这才是「真的过期」，清 cookie 让界面回到重新扫码。
             handleAuthFailure()
             throw WereadError.notLoggedIn
         }
+    }
+
+    /// 续期拿到的 cookie 落盘，并刷新登录态。
+    ///
+    /// 调用方已经切到主线程（`isLoggedIn` 是 @Published）。
+    /// 只在 cookie 真的变了时才写，避免每章都动 UserDefaults。
+    private func persistRenewedCookie(_ renewed: String) {
+        guard !renewed.isEmpty, renewed != cookie else { return }
+        defaults.set(renewed, forKey: cookieKey)
+        self.isLoggedIn = Self.looksLoggedIn(renewed)
     }
 
     func progress(for bookId: String) async -> WereadProgress? {
