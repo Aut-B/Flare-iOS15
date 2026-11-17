@@ -297,17 +297,21 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      # 逻辑测试挂了也开 Issue：这类失败 5 分钟就出结果，不用等人翻 CI
+      # 逻辑测试挂了也开 Issue：这类失败 5 分钟就出结果，不用等人翻 CI。
+      # CI 日志页匿名不可读（只显示 "Sign in to view logs"），所以错误必须落进 Issue 正文。
       - name: Open issue on logic test failure
         if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          # 以前这里读的是 appleApp/logic-tests.log，但本步骤不在 appleApp 目录，
-          # 路径对不上 -> Issue 正文永远是空的。两个位置都试一次。
-          LOG=$( (tail -n 80 appleApp/logic-tests.log 2>/dev/null \
-                  || tail -n 80 logic-tests.log 2>/dev/null) || echo "(no log)")
+          # 本步骤不在 appleApp 目录，两个可能位置都找一次；tail 读不到文件会返回非零，
+          # 所以先判存在再读，别让 $( ... || ... ) 在空输出上短路。
+          LOG=""
+          for f in appleApp/logic-tests.log logic-tests.log; do
+            if [ -s "$f" ]; then LOG=$(tail -n 120 "$f"); break; fi
+          done
+          if [ -z "$LOG" ]; then LOG="(no readable log)"; fi
           {
             echo "- commit: \`${{ github.sha }}\`"
             echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
