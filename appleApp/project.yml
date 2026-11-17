@@ -281,6 +281,7 @@ targets:
     sources:
       - path: iosTestsLogic
       - path: ios/UI/Feature/WebSocial/Instagram/InstagramStateIsolator.swift
+      - path: ios/UI/Feature/WebSocial/Instagram/InstagramModels.swift
       - path: ios/UI/Feature/WebSocial/Xiaohongshu/XhsModels.swift
       - path: ios/UI/Feature/WebSocial/Xiaohongshu/XhsQuery.swift
       - path: ios/UI/Feature/Weread/WereadModels.swift

@@ -132,14 +132,18 @@ struct InstagramPostView: View {
 
     @ViewBuilder
     private func mediaItem(_ item: IGMediaItem, at offset: Int, autoPlay: Bool) -> some View {
+        // 用 item 自己的比例，不要用 `current.aspect`：那条是首图的比例，
+        // 多图轮播里横图和竖图混排时（很常见），后面几张会按首图的比例被
+        // 裁掉一截或者留黑边。
+        let aspect = item.aspect > 0 ? item.aspect : current.aspect
         if let video = item.video {
             IGVideoPlayer(url: video, autoPlay: autoPlay)
-                .aspectRatio(current.aspect, contentMode: .fit)
+                .aspectRatio(aspect, contentMode: .fit)
                 .frame(maxWidth: .infinity)
                 .clipped()
         } else {
             IGImageView(url: item.image)
-                .aspectRatio(current.aspect, contentMode: .fit)
+                .aspectRatio(aspect, contentMode: .fit)
                 .frame(maxWidth: .infinity)
                 .clipped()
                 .contentShape(Rectangle())

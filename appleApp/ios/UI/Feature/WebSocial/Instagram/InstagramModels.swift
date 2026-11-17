@@ -200,15 +200,25 @@ enum IGJSON {
                 )
             )
         }
-        if items.isEmpty, let info = bestImageInfo(object) {
-            items.append(
-                IGMediaItem(
-                    id: pk,
-                    image: info.url,
-                    video: IGJSON.videoURL(object),
-                    aspect: info.aspect
+        if items.isEmpty {
+            // 单帖：图片可能没有（纯视频帖只给 `video_versions` + 封面），
+            // 所以不能拿 `bestImageInfo` 当门槛 —— 以前写成
+            // `if items.isEmpty, let info = bestImageInfo(object)`，
+            // 没有 `image_versions2` 的视频帖会整条被丢进 `guard` 返回 nil，
+            // 表现就是「视频帖在时间线里消失」。
+            let video = IGJSON.videoURL(object)
+            let info = bestImageInfo(object)
+            if info != nil || video != nil {
+                items.append(
+                    IGMediaItem(
+                        id: pk,
+                        image: info?.url,
+                        video: video,
+                        // 没有封面时用 1:1 兜底，`aspectRatio` 才不会算出 0。
+                        aspect: info?.aspect ?? 1
+                    )
                 )
-            )
+            }
         }
         let images = items.compactMap(\.image)
         let videoURL = items.compactMap(\.video).first
