@@ -266,15 +266,20 @@ final class WereadStore: ObservableObject {
     }
 
     /// 网页阅读器地址。书名对不上时返回 nil，调用方退回「网页书架 + 自动点开」。
+    ///
+    /// 地址本来就能自己算：`/web/reader/{_e(bookId)}`，`_e()` 就是
+    /// `WereadCrypto.calcHash`。以前这里判「拼出来大概率 404」并直接返回 nil，
+    /// 是误判 —— 抄 DOM 只是为了拿到无章节后缀的那条链接，不影响可用性。
+    /// 现在顺序是：抄到的真地址 → 自己拼（必要时带 `k{_e(chapterUid)}`）。
     func readerLink(for book: WereadBook) -> String? {
         if !book.id.isEmpty, let url = bookLinks[book.id], !url.isEmpty { return url }
         let key = Self.normalize(book.title)
         if let url = readerLinks[key], !url.isEmpty { return url }
-        // 不再用 `calcHash` 拼地址：那是章节接口里的 `b` 参数，
-        // 跟阅读器地址里的 hash 不是一回事，拼出来大概率 404，
-        // 表现就是「点进去转半天，最后掉回网页书架」。
-        // 没有真地址就交给调用方走「网页书架 + 按 bookId 点开」。
-        return nil
+        guard !book.id.isEmpty else { return nil }
+        if book.id.hasPrefix("MP_WXS_") {
+            return WereadService.shared.mpReaderURL(bookId: book.id)?.absoluteString
+        }
+        return WereadService.shared.readerURLString(bookId: book.id)
     }
 
     /// 阅读器里真正跳成功以后把地址记下来，下次点这本书就是秒开。
@@ -437,7 +442,7 @@ final class WereadStore: ObservableObject {
         try? await WereadService.shared.progress(bookId: bookId, cookie: cookie)
     }
 
-    func report(bookId: String, chapterUid: Int, offset: Int) {
+    func report(bookId: String, chapterUid: Int, offset: Int, chapterIndex: Int) {
         let cookie = cookie
         guard !cookie.isEmpty else { return }
         Task.detached(priority: .utility) {
@@ -445,6 +450,7 @@ final class WereadStore: ObservableObject {
                 bookId: bookId,
                 chapterUid: chapterUid,
                 chapterOffset: offset,
+                chapterIndex: chapterIndex,
                 cookie: cookie
             )
         }

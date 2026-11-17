@@ -1,6 +1,7 @@
 import SwiftUI
 import WebKit
 import UIKit
+import os
 
 /// 原生书架点书后直接打开的目标。
 struct WereadNativeTarget: Identifiable {
@@ -32,9 +33,23 @@ struct WereadNativeReaderView: View {
     @State private var showChapters = false
     @State private var showWeb = false
     @State private var cache: [Int: String] = [:]
+    /// 章节正文缓存的「最近使用顺序」，队尾最新。配合 `cacheCapacity` 做淘汰。
+    /// 以前 cache 只增不减，读一本几百章的书会把整本 HTML 都攒在内存里，
+    /// iPhone 6s 只有 2GB，翻到后面容易被系统杀掉。
+    @State private var cacheOrder: [Int] = []
     @State private var highlights: [Int: [WereadHighlight]] = [:]
     @State private var scrollFraction: Double = 0
+    /// 进章后要跳到的章内比例（0~1）。只在「打开这本书」时用一次，
+    /// 翻章/重载都不该复用 —— 那些场景本来就要从头看。
+    @State private var restoreFraction: Double = 0
+    /// 待执行的滚动请求。非 nil 时 `updateUIView` 会把它发给 JS 的 `__wrScrollTo`，
+    /// 发完立刻清空；用「值变化」驱动而不是闭包，避免 WebView 重建后请求丢失。
+    @State private var scrollRequest: Double?
     @State private var loadToken = 0
+
+    /// 正文缓存最多留几章。一章 HTML 通常几十到几百 KB，留 3 章既能覆盖
+    /// 「来回翻两页」，又不会在 2GB 设备上把内存顶满。
+    private static let cacheCapacity = 3
 
     private var current: WereadChapter? {
         chapters.indices.contains(index) ? chapters[index] : nil
@@ -109,6 +124,11 @@ struct WereadNativeReaderView: View {
             },
             onScroll: { value in
                 scrollFraction = min(max(value, 0), 1)
+            },
+            scrollRequest: scrollRequest,
+            onScrollApplied: {
+                // 请求已经交给 WebView，清掉，避免下次 updateUIView 重复滚。
+                if scrollRequest != nil { scrollRequest = nil }
             },
             onReady: {
                 // 只认当前这一次加载的渲染完成：翻章时旧页面的 ready
@@ -321,15 +341,31 @@ struct WereadNativeReaderView: View {
             async let progressTask = service.progress(bookId: bookId, cookie: cookie)
             let list = try await store.chapters(for: target.book.id)
             guard token == loadToken else { return }
-            guard !list.isEmpty else { throw WereadError.empty }
+            // 目录为空时 store.chapters 已经抛错；这里再兜一次，
+            // 但**必须把 loading 关掉**，否则界面永远停在「正在打开…」，
+            // 既没有正文也没有错误提示 —— 也就是纯白屏。
+            guard !list.isEmpty else {
+                loading = false
+                errorMessage = WereadError.empty.localizedDescription
+                return
+            }
             chapters = list
 
             var start = 0
+            // 续读位置：以前只拿 chapterUid 定位到「章」，chapterOffset 取了
+            // 却从没用过，所以每次重开都停在章首。这里把它换成章内比例，
+            // 等 WebView 渲染完再滚过去（见 restoreFraction）。
+            var resume: Double = 0
             if let progress = try? await progressTask,
                let position = list.firstIndex(where: { $0.uid == progress.chapterUid }) {
                 start = position
+                let words = max(list[position].wordCount, 1)
+                if progress.chapterOffset > 0 {
+                    resume = min(max(Double(progress.chapterOffset) / Double(words), 0), 1)
+                }
             }
             index = start
+            restoreFraction = resume
             await loadChapter(at: start, token: token)
         } catch {
             guard token == loadToken else { return }
@@ -341,7 +377,11 @@ struct WereadNativeReaderView: View {
     @MainActor
     private func reloadChapter() async {
         guard let current else { return }
+        // 清缓存要连 LRU 队列一起清，否则队列里留着一个永远不存在的条目。
         cache[current.uid] = nil
+        cacheOrder.removeAll { $0 == current.uid }
+        // 重新加载本章是用户主动动作，从章首开始，不要复用续读位置。
+        restoreFraction = 0
         loadToken += 1
         await loadChapter(at: index, token: loadToken)
     }
@@ -376,6 +416,7 @@ struct WereadNativeReaderView: View {
         if let cached = cache[chapter.uid] {
             html = cached
             await waitForRender(token: token)
+            restoreScrollIfNeeded(token: token)
             prefetch(after: position)
             return
         }
@@ -384,17 +425,45 @@ struct WereadNativeReaderView: View {
             let raw = try await store.content(bookId: target.book.id, chapterUid: chapter.uid)
             guard token == loadToken else { return }
             let wrapped = WereadReaderHTML.wrap(raw)
-            cache[chapter.uid] = wrapped
+            rememberInCache(chapter.uid, wrapped)
             html = wrapped
             // 不再「赋完 html 就算加载完」：那时候 WebView 还没排版，
             // 用户看到的是白屏。等 `onReady` 或超时兜底。
             await waitForRender(token: token)
+            restoreScrollIfNeeded(token: token)
             prefetch(after: position)
         } catch {
             guard token == loadToken else { return }
             loading = false
             errorMessage = error.localizedDescription
         }
+    }
+
+    /// 写缓存并按 LRU 淘汰。
+    ///
+    /// `cacheOrder` 队尾是最近用过的；超过 `cacheCapacity` 就从队头丢。
+    /// 只丢正文，不碰 `highlights`（划线是用户数据，不是缓存）。
+    private func rememberInCache(_ uid: Int, _ html: String) {
+        cache[uid] = html
+        cacheOrder.removeAll { $0 == uid }
+        cacheOrder.append(uid)
+        while cacheOrder.count > Self.cacheCapacity {
+            let evicted = cacheOrder.removeFirst()
+            cache[evicted] = nil
+        }
+    }
+
+    /// 打开书之后，把 WebView 滚到上次读到的位置。
+    ///
+    /// 只在「这本书第一次进章」时执行一次：`restoreFraction` 用完立刻清零，
+    /// 否则后面手动翻章会被反复拽回原位（用户会觉得页面在抢滚动）。
+    /// 调用点都在 `waitForRender` 之后，确保 DOM 已排版，`scrollTo` 才有意义。
+    private func restoreScrollIfNeeded(token: Int) {
+        let fraction = restoreFraction
+        guard fraction > 0.001, token == loadToken else { return }
+        restoreFraction = 0
+        scrollFraction = fraction
+        scrollRequest = fraction
     }
 
     /// 等 WebView 真正渲染完（`didFinish` / JS `ready`）。
@@ -426,7 +495,9 @@ struct WereadNativeReaderView: View {
             let wrapped = WereadReaderHTML.wrap(raw)
             await MainActor.run {
                 if self.cache[chapter.uid] == nil {
-                    self.cache[chapter.uid] = wrapped
+                    // 预取也走 LRU：否则预取会把缓存撑到无上限，
+                    // A3 那个内存问题就等于没修。
+                    self.rememberInCache(chapter.uid, wrapped)
                 }
             }
         }
@@ -435,7 +506,12 @@ struct WereadNativeReaderView: View {
     private func saveProgress() {
         guard let current else { return }
         let offset = Int(Double(max(current.wordCount, 1)) * scrollFraction)
-        store.report(bookId: target.book.id, chapterUid: current.uid, offset: offset)
+        store.report(
+            bookId: target.book.id,
+            chapterUid: current.uid,
+            offset: offset,
+            chapterIndex: index
+        )
     }
 }
 
@@ -477,6 +553,10 @@ private struct WereadChapterWebView: UIViewRepresentable {
     let highlights: [WereadHighlight]
     let onHighlight: (WereadHighlight) -> Void
     let onScroll: (Double) -> Void
+    /// 待执行的章内滚动比例。非 nil 时在页面 ready 之后滚过去。
+    let scrollRequest: Double?
+    /// 滚动请求已经处理（无论成功失败都要回调，否则会一直重试）。
+    let onScrollApplied: () -> Void
     let onReady: () -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -502,6 +582,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
         context.coordinator.parent = self
         context.coordinator.load(html, in: webView, baseURL: baseURL, cookie: cookie)
         context.coordinator.apply(highlights, in: webView)
+        context.coordinator.requestScroll(scrollRequest, in: webView)
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
@@ -510,10 +591,15 @@ private struct WereadChapterWebView: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+        /// 统一日志：只看失败原因，不打印正文/划线内容。
+        static let log = Logger(subsystem: "dev.dimension.flare.weread", category: "reader")
+
         var parent: WereadChapterWebView
         private var lastHTML = ""
         private var lastHighlights = ""
         private var loaded = false
+        /// 页面还没 ready 时收到的滚动请求，等 `markReady` 再补执行。
+        private var pendingScroll: Double?
 
         init(_ parent: WereadChapterWebView) {
             self.parent = parent
@@ -540,7 +626,73 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 return
             }
             lastHighlights = json
-            webView.evaluateJavaScript("window.__wrRestore(\(json));", completionHandler: nil)
+            // 直接拼 JSON 有两个坑：
+            // 1. `JSONEncoder` 不转义 U+2028/U+2029，而 `evaluateJavaScript`
+            //    是把整段当源码解析 —— 旧引擎语义下这两个字符等同于换行，
+            //    拼出来的脚本会语法错误，划线整批恢复不了。
+            // 2. 以前 `completionHandler: nil`，失败了没有任何痕迹。
+            // 这里转义 + 记录失败原因（只记条数和错误，不记划线正文）。
+            let literal = Self.javaScriptStringLiteral(json)
+            webView.evaluateJavaScript("window.__wrRestore(\(literal));") { _, error in
+                guard let error = error else { return }
+                Self.log.error(
+                    "weread restore highlights failed (count=\(highlights.count, privacy: .public)): \(String(describing: error), privacy: .public)"
+                )
+            }
+        }
+
+        /// 把 JSON 文本包成一个 JS 字符串并安全传给 `JSON.parse`。
+        ///
+        /// 走两个反斜杠转义而不是直接内联，是为了彻底绕开 U+2028/U+2029 和
+        /// 任何引号/反斜杠问题：`JSON.parse` 只认纯 JSON，比内联字面量稳。
+        private static func javaScriptStringLiteral(_ text: String) -> String {
+            var escaped = text
+            escaped = escaped.replacingOccurrences(of: "\\", with: "\\\\")
+            escaped = escaped.replacingOccurrences(of: "\"", with: "\\\"")
+            escaped = escaped.replacingOccurrences(of: "\n", with: "\\n")
+            escaped = escaped.replacingOccurrences(of: "\r", with: "\\r")
+            escaped = escaped.replacingOccurrences(of: "\t", with: "\\t")
+            escaped = escaped.replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+            escaped = escaped.replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+            return "JSON.parse(\"\(escaped)\")"
+        }
+
+        /// 在页面 ready 之后把 WebView 滚到指定比例。
+        ///
+        /// 只在 `loaded == true` 时执行：排版前 `scrollTo` 会落到 0（页面高度还是 0），
+        /// 那就是「每次都回到章首」的老毛病。还没 ready 就先记着，等 `markReady` 再补。
+        func requestScroll(_ fraction: Double?, in webView: WKWebView) {
+            guard let fraction = fraction else { return }
+            guard loaded else {
+                pendingScroll = fraction
+                return
+            }
+            performScroll(fraction, in: webView)
+        }
+
+        private func performScroll(_ fraction: Double, in webView: WKWebView) {
+            pendingScroll = nil
+            let clamped = min(max(fraction, 0), 1)
+            let script = """
+            (function(){
+              var h = document.documentElement;
+              var max = h.scrollHeight - window.innerHeight;
+              if (!(max > 0)) { return false; }
+              window.scrollTo(0, Math.round(max * \(clamped)));
+              return true;
+            })()
+            """
+            webView.evaluateJavaScript(script) { value, error in
+                if let error = error {
+                    Self.log.error(
+                        "weread restore scroll failed: \(String(describing: error), privacy: .public)"
+                    )
+                } else if (value as? Bool) == false {
+                    Self.log.debug("weread restore scroll skipped: page not scrollable yet")
+                }
+                // 无论成败都清掉请求：失败时反复重试只会和用户手动滚动打架。
+                DispatchQueue.main.async { self.parent.onScrollApplied() }
+            }
         }
 
         private func install(cookies header: String, in webView: WKWebView, completion: @escaping () -> Void) {
@@ -568,6 +720,10 @@ private struct WereadChapterWebView: UIViewRepresentable {
             lastHighlights = ""
             if let webView = webView {
                 apply(parent.highlights, in: webView)
+                // 排版完成后再补执行挂起的续读滚动。
+                if let pending = pendingScroll {
+                    performScroll(pending, in: webView)
+                }
             }
             DispatchQueue.main.async {
                 self.parent.onReady()

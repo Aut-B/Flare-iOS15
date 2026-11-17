@@ -114,10 +114,16 @@ enum WereadCrypto {
     // MARK: - 响应校验与解密
 
     /// 响应前 32 位是大写 md5(body)，对不上说明内容被截断或接口变了。
+    ///
+    /// 必须按 **UTF-8 字节** 切，不能按 `String` 的字符/字形簇切：
+    /// md5 十六进制头是 32 个 ASCII，但 body 里一旦有 emoji 或组合字符，
+    /// `String.count` 会小于字节数，切出来的头尾就整体错位，
+    /// 校验永远失败 → 正文被判成空 → 用户看到白屏。
     static func chk(_ data: String) -> String {
-        guard data.count > 32 else { return data }
-        let header = String(data.prefix(32))
-        let body = String(data.dropFirst(32))
+        let bytes = Array(data.utf8)
+        guard bytes.count > 32 else { return data }
+        let header = String(decoding: bytes[0..<32], as: UTF8.self)
+        let body = String(decoding: bytes[32...], as: UTF8.self)
         return header == md5(body).uppercased() ? body : ""
     }
 
@@ -193,8 +199,21 @@ enum WereadCrypto {
         return String(characters)
     }
 
+    /// 微信读书正文是 **base64-url** 变体：`-` / `_` 分别是 `+` / `/`，
+    /// 末尾可能没有 `=`。`Data(base64Encoded:)` 不认这两个字符，
+    /// 以前遇到会整段解码失败并把密文原样返回（用户说的「内容不对」）。
     private static func base64Decode(_ value: String) -> String {
-        guard let data = Data(base64Encoded: value) else { return value }
-        return String(data: data, encoding: .utf8) ?? value
+        var text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        text = text.replacingOccurrences(of: "-", with: "+")
+        text = text.replacingOccurrences(of: "_", with: "/")
+        // 补齐到 4 的倍数；不足时补 `=`。
+        let remainder = text.count % 4
+        if remainder > 0, remainder != 1 {
+            text += String(repeating: "=", count: 4 - remainder)
+        }
+        guard let data = Data(base64Encoded: text, options: .ignoreUnknownCharacters) else {
+            return value
+        }
+        return String(decoding: data, as: UTF8.self)
     }
 }

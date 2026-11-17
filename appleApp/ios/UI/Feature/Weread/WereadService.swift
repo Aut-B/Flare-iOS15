@@ -265,20 +265,74 @@ final class WereadService: @unchecked Sendable {
         let part2 = raw2 ?? ""
         let part3 = raw3 ?? ""
 
-        if !part0.isEmpty, !part1.isEmpty, !part3.isEmpty {
-            let style = WereadCrypto.decrypt(part2)
-            var html = WereadCrypto.decrypt(part0 + part1 + part3)
-            guard !html.isEmpty else { throw WereadError.empty }
-            html = clean(html)
-            if !style.isEmpty {
-                html = "<style>\(style)</style>\(html)"
-            }
-            return html
+        // 先认格式再拼：`{}` 是「参数/会话不对」的失败响应，TXT 书的 `e_*`
+        // 返回的是章节元数据 JSON。这两种都不是正文，以前那句
+        // `!part0.isEmpty` 会把它们当成有效分片送进 decrypt，
+        // 解出空串/垃圾后抛 empty —— 用户看到的就是白屏。
+        switch try shardFormat(part0, part1, part3) {
+        case .txt:
+            return try await textChapter(bookId: bookId, chapterUid: uid, cookie: cookie)
+        case .epub:
+            break
         }
 
-        // 老 txt 书走 t_0 / t_1。
-        async let txt0 = try? fragment("/web/book/chapter/t_0", bookId: bookId, chapterUid: uid, st: 0, cookie: cookie)
-        async let txt1 = try? fragment("/web/book/chapter/t_1", bookId: bookId, chapterUid: uid, st: 1, cookie: cookie)
+        let style = WereadCrypto.decrypt(part2)
+        var html = WereadCrypto.decrypt(part0 + part1 + part3)
+        guard !html.isEmpty else { throw WereadError.empty }
+        html = clean(html)
+        if !style.isEmpty {
+            html = "<style>\(style)</style>\(html)"
+        }
+        return html
+    }
+
+    /// 分片形态判定。
+    ///
+    /// - 都是空 → 接口没给内容
+    /// - `e_0` 以 `{` 开头 → 要么是 `{}`（请求错误），要么是 TXT 书的章节元数据
+    /// - 其余当 epub
+    private enum ShardFormat {
+        case epub
+        case txt
+    }
+
+    private func shardFormat(
+        _ part0: String,
+        _ part1: String,
+        _ part3: String
+    ) throws -> ShardFormat {
+        if part0.isEmpty, part1.isEmpty, part3.isEmpty {
+            throw WereadError.empty
+        }
+        let head = part0.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard head.hasPrefix("{") else { return .epub }
+        // TXT 书：`e_*` 回的是含 bookId 的章节元数据。
+        if head.contains("\"bookId\"") {
+            return .txt
+        }
+        // 其余 JSON 一律是错误响应（`{}`、errCode 等）。
+        if let data = head.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let code = intValue(json["errCode"]), code == -2010 || code == -2012 {
+                throw WereadError.notLoggedIn
+            }
+            if let message = json["errMsg"] as? String, !message.isEmpty {
+                throw WereadError.server(message)
+            }
+            if !json.isEmpty {
+                throw WereadError.server("正文接口返回了 JSON，不是章节内容")
+            }
+            // `{}`：签名/会话/参数不对。参考实现里最常见的原因是
+            // `ps`/`pc` 不是本次阅读器会话的 psvts / _e(ct)，以及缺 `sc=1`。
+            throw WereadError.empty
+        }
+        throw WereadError.empty
+    }
+
+    /// 老 txt 书走 `t_0` / `t_1`。
+    private func textChapter(bookId: String, chapterUid: String, cookie: String) async throws -> String {
+        async let txt0 = try? fragment("/web/book/chapter/t_0", bookId: bookId, chapterUid: chapterUid, st: 0, cookie: cookie)
+        async let txt1 = try? fragment("/web/book/chapter/t_1", bookId: bookId, chapterUid: chapterUid, st: 1, cookie: cookie)
         let (rawText0, rawText1) = await (txt0, txt1)
         let text = WereadCrypto.decrypt((rawText0 ?? "") + (rawText1 ?? ""))
         guard !text.isEmpty else { throw WereadError.empty }
@@ -306,26 +360,63 @@ final class WereadService: @unchecked Sendable {
     }
 
     /// 上报阅读进度。失败不抛错 —— 进度丢一次不影响读书。
+    ///
+    /// 以前这里发 `ci/pc/ps` 三个假值（`pc`/`ps` 是别的设备的固定串），
+    /// 接口能收下但不认，进度等于没同步。现在只发不依赖阅读器会话的字段：
+    /// 章节偏移 + 章节序号 + 起始时间。
+    ///
+    /// 完整上报（`rt` 阅读时长、`sg` 签名、`ps/pc` 会话）要等拿到
+    /// `reader.psvts` / `reader.token` 后才可信，见根因文档 Step 2。
     func reportProgress(
         bookId: String,
         chapterUid: Int,
         chapterOffset: Int,
+        chapterIndex: Int,
         cookie: String
     ) async {
         var request = URLRequest(url: URL(string: "\(base)/web/book/read")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        let now = Int(Date().timeIntervalSince1970)
         let payload: [String: Any] = [
-            "bookId": bookId,
-            "chapterUid": chapterUid,
-            "chapterOffset": chapterOffset,
-            "ci": chapterUid,
-            "pc": "430321207a19e581g013ab0",
-            "ps": "a2b325707a19e580g0186a2",
+            "b": WereadCrypto.calcHash(bookId),
+            "c": WereadCrypto.calcHash(String(chapterUid)),
+            "ci": chapterIndex,
+            "co": chapterOffset,
+            "pr": 0,
+            "ts": now * 1000,
+            "ct": now,
+            "rn": Int.random(in: 0..<1000),
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         _ = try? await send(request)
+    }
+
+    // MARK: - 网页阅读器地址
+
+    /// 网页阅读器地址：`/web/reader/{_e(bookId)}k{_e(chapterUid)}`。
+    ///
+    /// `_e()` 就是 `WereadCrypto.calcHash`，和正文接口的 `b`/`c` 同一个函数，
+    /// 第三方实现（KOReader 插件、weread-exporter）都按这个公式直接拼，
+    /// 不需要去网页书架抄 DOM。以前「自己拼一定 404」的结论是错的。
+    func readerURL(bookId: String, chapterUid: Int? = nil) -> URL? {
+        guard !bookId.isEmpty else { return nil }
+        var path = "/web/reader/" + WereadCrypto.calcHash(bookId)
+        if let chapterUid {
+            path += "k" + WereadCrypto.calcHash(String(chapterUid))
+        }
+        return URL(string: base + path)
+    }
+
+    func readerURLString(bookId: String, chapterUid: Int? = nil) -> String? {
+        readerURL(bookId: bookId, chapterUid: chapterUid)?.absoluteString
+    }
+
+    /// 公众号（`MP_WXS_` 开头的 bookId）走另一个阅读器路径。
+    func mpReaderURL(bookId: String) -> URL? {
+        guard !bookId.isEmpty else { return nil }
+        return URL(string: base + "/web/mp/reader/" + WereadCrypto.calcHash(bookId))
     }
 
     // MARK: - 单个正文分片
@@ -347,6 +438,13 @@ final class WereadService: @unchecked Sendable {
         let timestamp = Int(Date().timeIntervalSince1970)
         let hashedBook = WereadCrypto.calcHash(bookId)
         let hashedChapter = WereadCrypto.calcHash(chapterUid)
+        // ⚠️ 这两个是**占位值，不是正确实现**（见 .fleet/weread-rootcause.md E1）。
+        // 正确来源：
+        //   ps = 这本书这一章 `/web/reader/{_e(bookId)}k{_e(chapterUid)}` 页面里
+        //        `window.__INITIAL_STATE__.reader.psvts`
+        //   pc = `_e(ct)`，也就是 WereadCrypto.calcHash(String(timestamp))
+        // 另外还缺 `sc = 1`（整章）与 `prevChapter = false`。
+        // 在这些补齐之前，epub 书的正文接口仍可能返回 `{}`。
         let devicePs = "a2b325707a19e580g0186a2"
         let devicePc = "430321207a19e581g013ab0"
 
@@ -442,16 +540,24 @@ final class WereadService: @unchecked Sendable {
 
     /// 正文里大量 `<img src="data:...">` 占位图会把 HTML 撑到几 MB，
     /// 真正的图在 `data-src` 上，所以先扔掉占位 src 再把 data-src 提上来。
+    ///
+    /// 两条正则都要**限定在 `<img` 标签内部**：以前第二条是
+    /// `(<img[^>]+?)data-src="`，只有前缀约束、没有右边界，
+    /// 正文里只要出现一次 `data-src="`（代码块、文学引用、页面源码示例），
+    /// 就会一路匹配到下一个 `<img` 并把中间整段正文吞掉 —— 也就是
+    /// 「内容不对 / 少了一大截」。
     private func clean(_ html: String) -> String {
         var result = html
         result = result.replacingOccurrences(
-            of: "(<img[^>]+?)(src=\"data:[^\"]+\")",
+            of: "(<img\\b[^>]*?)\\ssrc=\"data:[^\"]*\"",
             with: "$1",
             options: .regularExpression
         )
+        // 只有**还没有 src** 的 img 才把 data-src 提上来，避免出现两个 src、
+        // 浏览器取到第一个而忽略直链的真实地址。
         result = result.replacingOccurrences(
-            of: "(<img[^>]+?)data-src=\"",
-            with: "$1src=\"",
+            of: "(<img\\b(?:(?!\\ssrc=)[^>])*?)\\sdata-src=\"([^\"]*)\"",
+            with: "$1 src=\"$2\"",
             options: .regularExpression
         )
         return result
