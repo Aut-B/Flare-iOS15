@@ -22,6 +22,8 @@ struct FlareApp: App {
         // 若首屏渲染阶段就崩，onAppear 永远不会执行，崩溃计数也就永远不会累加，
         // 15 Pro Max 上就会表现为「每次冷启动都闪退、兜底界面永远不出现」。
         LaunchGuard.begin()
+        // 紧接着装崩溃现场记录：LaunchGuard 只知道「上次没走完」，不知道崩在哪。
+        LaunchCrashTrace.install()
     }
 
     var body: some Scene {
@@ -57,6 +59,7 @@ struct FlareApp: App {
 
     private func startLaunch() {
         guard case .loading = bootPhase else { return }
+        LaunchCrashTrace.stage(.startLaunch)
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--seed-corrupt-instagram") {
             InstagramStateIsolator.seedCorruptStateForTesting()
@@ -66,6 +69,7 @@ struct FlareApp: App {
             bootPhase = .recovery
             return
         }
+        LaunchCrashTrace.stage(.stateIsolation)
         let quarantined = InstagramStateIsolator.quarantineIfNeeded()
         bootstrap()
         bootPhase = .ready
@@ -77,6 +81,7 @@ struct FlareApp: App {
     }
 
     private func bootstrap() {
+        LaunchCrashTrace.stage(.bootstrapConfig)
         MediaCacheMaintenance.configure()
         configureAudioSessionForMixing()
         configureBarAppearances()
@@ -85,12 +90,16 @@ struct FlareApp: App {
             AppleSharedHelper.shared.setupCrashlytics()
         }
         ProxySessionConfigurator.install()
+        // Kotlin 侧初始化是启动链路上最容易整段挂掉的一步（协程里抛异常就是进程
+        // abort），这里前后各打一个阶段点，崩了能一眼看出是不是它。
+        LaunchCrashTrace.stage(.kotlinInitialize)
         AppleSharedHelper.shared.initialize(
             inAppNotification: SwiftInAppNotification.shared,
             swiftFormatter: Formatter.shared,
             swiftPlatformTextRenderer: PlatformTextRenderer.shared,
             swiftOnDeviceAI: FoundationModelOnDeviceAI.shared
         )
+        LaunchCrashTrace.stage(.rootRendering)
         DispatchQueue.main.async {
             XhsBridgeHolder.shared.bridge = XhsSwiftBridge()
             InstagramBridgeHolder.shared.bridge = InstagramSwiftBridge()
@@ -132,10 +141,16 @@ struct FlareApp: App {
     private var appRoot: some View {
         if #available(iOS 18.0, *) {
             FlareRoot()
-                .onAppear { LaunchGuard.markFullUIShown() }
+                .onAppear {
+                    LaunchGuard.markFullUIShown()
+                    LaunchCrashTrace.stage(.rootShown)
+                }
         } else {
             BackportFlareRoot()
-                .onAppear { LaunchGuard.markFullUIShown() }
+                .onAppear {
+                    LaunchGuard.markFullUIShown()
+                    LaunchCrashTrace.stage(.rootShown)
+                }
         }
     }
 
@@ -213,9 +228,46 @@ private struct LaunchRecoveryView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            // 真机排查用：上一次崩在哪个阶段、异常名。没有记录时不占位置。
+            // 这一块必须可滚动 + 可复制：用户直接把这段贴回来，比等 .ips 快得多。
+            if !LaunchCrashTrace.lastCrash.isEmpty {
+                LaunchCrashRecordView(record: LaunchCrashTrace.lastCrash)
+            }
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemGroupedBackground))
+    }
+}
+
+private struct LaunchCrashRecordView: View {
+    let record: String
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("上次崩溃现场")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = record
+                    copied = true
+                } label: {
+                    Text(copied ? "已复制" : "复制")
+                        .font(.caption2)
+                }
+            }
+            ScrollView {
+                Text(record)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 160)
+        }
+        .padding(8)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
     }
 }
