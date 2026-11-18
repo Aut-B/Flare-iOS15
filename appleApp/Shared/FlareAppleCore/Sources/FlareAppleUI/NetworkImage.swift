@@ -62,7 +62,7 @@ public struct NetworkImage: View {
                     downsamplingEnabled: downsamplingEnabled, shareImageID: shareImageID, keepsCurrentImage: keepsCurrentImage)
                     .id(keepsCurrentImage ? shareImageID.uuidString : prepared.key)
             } else {
-                Rectangle().fill(.placeholder).redacted(reason: .placeholder)
+                Rectangle().fill(Color.secondary.opacity(0.15)).redacted(reason: .placeholder)
             }
         }
         .onAppear { if data != nil { shareImageLoading?.register(shareImageID) } }
@@ -218,7 +218,7 @@ private struct ResolvedNetworkImage: View {
         } else if let mediaPlaceholder {
             NetworkImage(data: mediaPlaceholder, contentMode: contentMode)
         } else {
-            Rectangle().fill(.placeholder).redacted(reason: .placeholder)
+            Rectangle().fill(Color.secondary.opacity(0.15)).redacted(reason: .placeholder)
         }
     }
 
@@ -364,7 +364,7 @@ private struct CrossfadeNetworkImage: View {
             )
         } else {
             Rectangle()
-                .fill(.placeholder)
+                .fill(Color.secondary.opacity(0.15))
                 .redacted(reason: .placeholder)
         }
     }

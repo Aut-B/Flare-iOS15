@@ -29,7 +29,7 @@ public struct PluginManagementView: View {
         self.onCreateWithAI = onCreateWithAI
         let facade = PluginAppleFacadeV1()
         _facade = State(initialValue: facade)
-        _presenter = State(initialValue: KotlinPresenter(presenter: facade))
+        _presenter = StateObject(wrappedValue: KotlinPresenter(presenter: facade))
     }
 
     public var body: some View {
@@ -472,7 +472,7 @@ public struct PluginManagementView: View {
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         PluginDevelopmentDirectoryAccess.retain(url)
-        Task { try? await facade.openDevelopmentDirectory(path: url.path(percentEncoded: false)) }
+        Task { try? await facade.openDevelopmentDirectory(path: url.path) }
     }
     #endif
 
@@ -576,7 +576,7 @@ public struct PluginManagementView: View {
                         url.stopAccessingSecurityScopedResource()
                     }
                 }
-                _ = try? await facade.inspect(path: url.path(percentEncoded: false))
+                _ = try? await facade.inspect(path: url.path)
             }
         }
     }

@@ -21,11 +21,23 @@ open class NetworkImageView: AnimatedImageView {
 
     public override init(frame: CGRect = .zero) {
         super.init(frame: frame)
-        registerForTraitChanges([UITraitDisplayScale.self]) { (view: NetworkImageView, _) in
-            view.setNeedsLayout()
+        if #available(iOS 17.0, *) {
+            registerForTraitChanges([UITraitDisplayScale.self]) { (view: NetworkImageView, _) in
+                view.setNeedsLayout()
+            }
         }
     }
     public required init?(coder: NSCoder) { fatalError("init(coder:) not supported") }
+
+    // iOS 15/16 回退：registerForTraitChanges 是 iOS 17+，低版本用 traitCollectionDidChange。
+    public override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        if #unavailable(iOS 17.0) {
+            if previousTraitCollection?.displayScale != traitCollection.displayScale {
+                setNeedsLayout()
+            }
+        }
+    }
 
     public func setImage(media: (any UiMedia)?,
                          completionHandler: (@MainActor @Sendable (Result<RetrieveImageResult, KingfisherError>) -> Void)? = nil) {
