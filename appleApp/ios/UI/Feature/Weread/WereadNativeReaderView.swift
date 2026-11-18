@@ -106,7 +106,7 @@ struct WereadNativeReaderView: View {
         // 记住生成这个 reader 时的加载代次；`onReady` 是 escaping 闭包，
         // 会晚于翻章触发，代次不一致就说明是上一章的渲染完成。
         let token = loadToken
-        WereadChapterWebView(
+        return WereadChapterWebView(
             html: html,
             baseURL: URL(string: "https://weread.qq.com/"),
             cookie: store.cookie,

@@ -266,7 +266,7 @@ final class WereadService: @unchecked Sendable {
             "bookGroups": groups,
             "bookProgress": progress,
         ]
-        return books(fromShelfJSON: merged)
+        return self.books(fromShelfJSON: merged)
     }
 
     /// 把 `shelf/sync` 的响应翻成书单。
