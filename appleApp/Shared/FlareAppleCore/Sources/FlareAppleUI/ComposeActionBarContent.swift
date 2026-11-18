@@ -306,8 +306,6 @@ private extension UiTimelineV2.PostVisibility {
             "visibility_self"
         case .channel:
             "status_visibility_public"
-        case .private:
-            "status_visibility_private"
         case .mutual:
             "status_visibility_mutual"
         }
@@ -340,8 +338,6 @@ private extension UiTimelineV2.PostVisibility {
             "visibility_self_description"
         case .channel:
             "status_visibility_public_description"
-        case .private:
-            "status_visibility_private_description"
         case .mutual:
             "status_visibility_mutual_description"
         }

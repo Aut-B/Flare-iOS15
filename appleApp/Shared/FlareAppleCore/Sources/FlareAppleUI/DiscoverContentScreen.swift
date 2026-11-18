@@ -12,7 +12,7 @@ public struct DiscoverContentScreen<AskAiOverlay: View>: View {
     @StateObject private var presenter: KotlinPresenter<DiscoverState>
     // iOS 15 回退：@StateObject 的 wrappedValue 只读，无法整体替换 presenter（换查询时要换实例），
     // 所以用 @State 存，再把 objectWillChange 手动转成一次视图失效。
-    @StateObject private var searchPresenter: KotlinPresenter<SearchState>
+    @State private var searchPresenter: KotlinPresenter<SearchState>
     @State private var searchPresenterTick = 0
     @StateObject private var searchHistoryPresenter = KotlinPresenter(presenter: SearchHistoryPresenter())
     @State private var searchText = ""

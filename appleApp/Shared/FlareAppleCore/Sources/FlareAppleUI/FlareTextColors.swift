@@ -53,30 +53,13 @@ extension EnvironmentValues {
 }
 #endif
 
-public nonisolated struct FlarePrimaryTextStyle: ShapeStyle {
-    public init() {}
-
-    public func resolve(in environment: EnvironmentValues) -> some ShapeStyle {
-        #if os(iOS)
-        switch environment.flareTextRole {
-        case .secondary: return AnyShapeStyle(Color.secondary)
-        case .tertiary: return AnyShapeStyle(Color(uiColor: .tertiaryLabel))
-        case .primary: break
-        }
-        if let background = environment.flareTextBackground,
-           Color(uiColor: .flareLabel(on: background)).resolve(in: environment)
-            != Color(uiColor: .label).resolve(in: environment) {
-            return AnyShapeStyle(Color(uiColor: .flareLabel(on: background)))
-        }
-        #endif
-        return AnyShapeStyle(.primary)
-    }
-}
-
 public extension Text {
+    /// iOS 15 回退：`Text.foregroundStyle` 与自定义 `ShapeStyle.resolve(in:)` 都是 iOS 17 API。
+    /// 这里用 iOS 13 起就有的 `Text.foregroundColor`，主文字统一用系统 label 色；
+    /// 背景色自适应的柔化在 SwiftUI 路径上退化为普通 label 色（UIKit trait 路径本就已经退化）。
     func flarePrimaryText() -> Text {
         #if os(iOS)
-        foregroundStyle(FlarePrimaryTextStyle())
+        foregroundColor(Color(uiColor: .flareLabel))
         #else
         self
         #endif
