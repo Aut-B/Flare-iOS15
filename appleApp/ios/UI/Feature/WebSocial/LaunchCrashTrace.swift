@@ -372,7 +372,7 @@ private struct StaticBytes: @unchecked Sendable {
     nonisolated(unsafe) let pointer: UnsafeMutablePointer<UInt8>
     nonisolated let length: Int
 
-    init(_ text: String) {
+    nonisolated init(_ text: String) {
         let bytes = Array(text.utf8)
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: max(1, bytes.count))
         buffer.initialize(repeating: 0, count: max(1, bytes.count))
