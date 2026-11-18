@@ -144,7 +144,7 @@ private nonisolated(unsafe) var fatalTable: FatalTable?
 /// 信号处理只认这 6 个信号，下标即查表位置。
 /// 放成文件级 `let`：表在 install 阶段就构造好，签名里再复用它，
 /// 信号处理里不做任何查找。
-private let fatalSignals: [Int32] = [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE]
+private nonisolated let fatalSignals: [Int32] = [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGFPE]
 
 /// 信号处理器本体。
 ///
@@ -185,32 +185,32 @@ private nonisolated func flareSignalHandlerImpl(_ received: Int32) {
 private let flareSignalHandler: @convention(c) (Int32) -> Void = flareSignalHandlerImpl
 
 /// 栈最多取多少帧。`backtrace` 本身是固定开销，只需要一块足够大的指针数组。
-private let backtraceDepth: Int32 = 64
+private nonisolated let backtraceDepth: Int32 = 64
 /// 崩溃日志读取上限（字节），防止无限读。
 private let LOG_READ_LIMIT: Int = 64 * 1024
 
 private struct FatalTable {
     /// 同上，但挂在实例上：信号处理里不触发 `static let` 的懒初始化检查。
-    let signalCount: Int
+    nonisolated let signalCount: Int
 
     /// `strdup` 出来的阶段文件路径，信号上下文里可直接 `open`。
     /// 可选：`strdup` 只有内存耗尽才返回 nil，那时信号路径直接跳过读阶段（无害）。
-    private let stagePath: UnsafeMutablePointer<CChar>?
+    private nonisolated(unsafe) let stagePath: UnsafeMutablePointer<CChar>?
     /// 崩溃文件路径：信号处理里只用来「兜底 open 一次」，正常走 crashFd。
-    private let crashPath: UnsafeMutablePointer<CChar>?
-    private let crashFd: Int32
+    private nonisolated(unsafe) let crashPath: UnsafeMutablePointer<CChar>?
+    private nonisolated let crashFd: Int32
 
     /// 所有 `信号 × stage` 的整行，平铺在**一块**连续内存里，install 阶段一次分配。
     ///
     /// 不用嵌套 `[[[UInt8]]]`：数组在信号上下文里做下标访问会走 retain/release 和
     /// COW 检查，`withUnsafeBytes` 还可能触发桥接。这里只留下裸指针 + 固定步长，
     /// 信号处理里就是「指针 + 下标 * 步长」，没有任何 Swift 运行时参与。
-    private let rowBuffer: UnsafeMutablePointer<UInt8>
-    private let rowBytes: Int
-    private let stageCount: Int
+    private nonisolated(unsafe) let rowBuffer: UnsafeMutablePointer<UInt8>
+    private nonisolated let rowBytes: Int
+    private nonisolated let stageCount: Int
     /// `rawValue → 行内 stage 下标` 的定长映射表（大小 256，直接按字节索引）。
     /// 这样信号处理里不做任何「rawValue 是否连续」的假设，也不做查找；坏字节映射到 0。
-    private let stageIndexByRaw: UnsafeMutablePointer<UInt8>
+    private nonisolated(unsafe) let stageIndexByRaw: UnsafeMutablePointer<UInt8>
 
     init(stagePath: String, crashPath: String, crashFd: Int32) {
         self.stagePath = strdup(stagePath)
@@ -369,8 +369,8 @@ private struct FatalTable {
 /// 一块常驻的字节串：install 阶段分配一次，信号处理里只读。
 /// 用它替代 `[UInt8]`，是因为数组在信号上下文里做 `withUnsafeBytes` 会走桥接。
 private struct StaticBytes: @unchecked Sendable {
-    let pointer: UnsafeMutablePointer<UInt8>
-    let length: Int
+    nonisolated(unsafe) let pointer: UnsafeMutablePointer<UInt8>
+    nonisolated let length: Int
 
     init(_ text: String) {
         let bytes = Array(text.utf8)
@@ -383,10 +383,10 @@ private struct StaticBytes: @unchecked Sendable {
 }
 
 /// 栈的标题行与结尾行。文件级 `let`：`install()` 一进来就会预热它们，先于任何信号。
-private let lineHeader = StaticBytes("stack:\n")
-private let lineFooter = StaticBytes("\n")
+private nonisolated let lineHeader = StaticBytes("stack:\n")
+private nonisolated let lineFooter = StaticBytes("\n")
 /// 十六进制字符表。裸指针常量，信号处理里下标访问不碰 Swift 数组。
-private let hexDigits = StaticBytes("0123456789abcdef")
+private nonisolated let hexDigits = StaticBytes("0123456789abcdef")
 
 /// 算出主二进制的运行时装载基址，写进崩溃日志开头。
 /// 普通线程上下文（install 阶段）调用，可以用 Foundation 和字符串。

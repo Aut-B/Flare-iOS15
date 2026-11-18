@@ -5,6 +5,7 @@ import FlareAppleUI
 import Kingfisher
 import KotlinSharedUI
 import LazyPager
+import NavigationBackport
 import SwiftUI
 
 /// Offline fixtures exercise the real viewer and translation settings.
@@ -56,7 +57,7 @@ struct MediaViewerTestFixture: View {
                 }
             }
             .background(ClearFullScreenBackground())
-            .colorScheme(.dark)
+            .preferredColorScheme(.dark)
         }
     }
 
@@ -72,12 +73,12 @@ struct MediaViewerTestFixture: View {
                 if basic.state.openAIModel == "prefill-fixture-image"
                     && basic.state.openAIApiKey == "prefill-fixture-key"
                     && basic.state.openAIServerUrl == "http://127.0.0.1:18473/v1" { break }
-                try? await Task.sleep(for: .milliseconds(20))
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
             settings.state.selectProvider(provider: .openAiimages)
             for _ in 0..<250 {
                 if settings.state.config.provider == .openAiimages { break }
-                try? await Task.sleep(for: .milliseconds(20))
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
             let state = settings.state
             state.setUseSharedConfig(value: true)
@@ -90,7 +91,7 @@ struct MediaViewerTestFixture: View {
                 if settings.state.useSharedConfig
                     && settings.state.config.value(id: "model") == "prefill-fixture-image"
                     && settings.state.config.value(id: "prompt") == prompt { return }
-                try? await Task.sleep(for: .milliseconds(20))
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
             assertionFailure("Could not prepare persisted empty fields with shared AI configuration")
             return
@@ -99,19 +100,19 @@ struct MediaViewerTestFixture: View {
             settings.state.selectProvider(provider: .gemini)
             for _ in 0..<250 {
                 if settings.state.config.provider == .gemini { break }
-                try? await Task.sleep(for: .milliseconds(20))
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
             settings.state.setField(id: "baseUrl", value: "http://127.0.0.1:18473/v1beta")
             for _ in 0..<250 {
                 if settings.state.config.value(id: "baseUrl") == "http://127.0.0.1:18473/v1beta" { break }
-                try? await Task.sleep(for: .milliseconds(20))
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
         }
         if !ProcessInfo.processInfo.arguments.contains("--image-translation-fixture") {
             settings.state.selectProvider(provider: .disabled)
             for _ in 0..<250 {
                 if settings.state.config.provider == .disabled { return }
-                try? await Task.sleep(for: .milliseconds(20))
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
             assertionFailure("Could not disable providers for the offline fixture")
             return
@@ -119,7 +120,7 @@ struct MediaViewerTestFixture: View {
         settings.state.selectProvider(provider: .openAiimages)
         for _ in 0..<250 {
             if settings.state.config.provider == .openAiimages { break }
-            try? await Task.sleep(for: .milliseconds(20))
+            try? await Task.sleep(nanoseconds: 20_000_000)
         }
         let state = settings.state
         state.setUseSharedConfig(value: false)
@@ -131,7 +132,7 @@ struct MediaViewerTestFixture: View {
         state.setField(id: "model", value: model)
         for _ in 0..<250 {
             if settings.state.config.configured && settings.state.config.value(id: "baseUrl") == "http://127.0.0.1:18473/v1" && settings.state.config.value(id: "prompt") == prompt && settings.state.config.value(id: "model") == model { return }
-            try? await Task.sleep(for: .milliseconds(20))
+            try? await Task.sleep(nanoseconds: 20_000_000)
         }
         assertionFailure("Could not configure the local image translation fixture")
     }
@@ -157,7 +158,7 @@ struct MediaViewerTestFixture: View {
             writer.startWriting()
             writer.startSession(atSourceTime: .zero)
             for frame in 0..<4 {
-                while !input.isReadyForMoreMediaData { try await Task.sleep(for: .milliseconds(10)) }
+                while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 10_000_000) }
                 var buffer: CVPixelBuffer?
                 CVPixelBufferCreate(nil, 32, 32, kCVPixelFormatType_32ARGB, nil, &buffer)
                 if let buffer {

@@ -70,7 +70,7 @@ struct MediaViewerScreen: View {
         self.previewIsImage = previewIsImage
         self.shareContext = shareContext
         self.post = post
-        self._imageTranslation = State(initialValue: KotlinPresenter(presenter: ImageTranslationPresenter(accountType: post?.accountType)))
+        self._imageTranslation = StateObject(wrappedValue: KotlinPresenter(presenter: ImageTranslationPresenter(accountType: post?.accountType)))
         self.quotes = quotes
         self.selectedIndex = max(0, initialIndex)
         self.protectInitialPagerSelection = initialIndex > 0
