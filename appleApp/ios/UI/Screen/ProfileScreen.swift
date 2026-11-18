@@ -340,21 +340,6 @@ struct ProfileScreen: View {
     }
 }
 
-@available(iOS 27.1, *)
-private struct ProfileNavigationTitle: ToolbarContent {
-    @Environment(\.toolbarVerticalEdge) private var toolbarVerticalEdge
-    let text: UiRichText
-
-    var body: some ToolbarContent {
-        // A custom title would add a horizontal bar alongside Duo's vertical controls.
-        if toolbarVerticalEdge == nil {
-            ToolbarItem(placement: .principal) {
-                RichText(text: text)
-            }
-        }
-    }
-}
-
 private struct BlockedProfileGate: View {
     let onShow: () -> Void
 
