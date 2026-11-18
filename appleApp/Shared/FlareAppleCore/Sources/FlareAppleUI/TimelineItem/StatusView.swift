@@ -568,7 +568,7 @@ public struct StatusView: View {
                     StatusManageActions.shared.updateVisibility(
                         accountType: data.accountType,
                         statusKey: data.statusKey,
-                        visibility: .mutual,
+                        visibility: .friends,
                         onResult: { _ in }
                     )
                 } label: {
@@ -588,7 +588,7 @@ public struct StatusView: View {
                     StatusManageActions.shared.updateVisibility(
                         accountType: data.accountType,
                         statusKey: data.statusKey,
-                        visibility: .`private`,
+                        visibility: .selfOnly,
                         onResult: { _ in }
                     )
                 } label: {

@@ -846,7 +846,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                     StatusManageActions.shared.updateVisibility(
                         accountType: accountType,
                         statusKey: statusKey,
-                        visibility: .mutual
+                        visibility: .friends
                     ) { error in
                         Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
                     }
@@ -868,7 +868,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                     StatusManageActions.shared.updateVisibility(
                         accountType: accountType,
                         statusKey: statusKey,
-                        visibility: .`private`
+                        visibility: .selfOnly
                     ) { error in
                         Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
                     }
