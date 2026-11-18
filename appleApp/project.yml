@@ -190,7 +190,6 @@ targets:
         destinationFilters: [iOS]
       - package: Perception
       - package: NavigationBackport
-      - package: Textual
       - target: OpenInFlare
     settings:
       groups:
@@ -521,8 +520,6 @@ targets:
       - package: Perception
         link: false
       - package: NavigationBackport
-        link: false
-      - package: Textual
         link: false
       - target: FlareAppleCore
     settings:
