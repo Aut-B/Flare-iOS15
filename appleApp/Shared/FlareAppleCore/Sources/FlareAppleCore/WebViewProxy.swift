@@ -10,8 +10,9 @@ public final class WebViewProxyRoute: ObservableObject {
     private let snapshot: ProxySnapshot
     public var key: String { snapshot.key }
     public var isValid: Bool { snapshot.isValid && !closed }
-    @available(iOS 17.0, *)
-    private var directProxy: WebViewDirectProxy?
+    // 存储属性不能用 '@available' 标注（Swift 报 "stored properties cannot be marked
+    // potentially unavailable with '@available'"）。用 Any? 存，实际用到时在 #available 分支里强转。
+    private var directProxy: Any?
     private var unsubscribe: (() -> Void)?
     private var stopLoading: [() -> Void] = []
     private var closed = false
@@ -81,7 +82,7 @@ public final class WebViewProxyRoute: ObservableObject {
         stopLoading.forEach { $0() }
         stopLoading.removeAll()
         if #available(iOS 17.0, *) {
-            directProxy?.stop()
+            (directProxy as? WebViewDirectProxy)?.stop()
             directProxy = nil
         }
     }

@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import MachO
 
 /// 启动期崩溃现场记录。
 ///
@@ -54,20 +55,7 @@ enum LaunchCrashTrace {
             crashFd: crashFd
         )
 
-        NSSetUncaughtExceptionHandler { exception in
-            // 普通线程上下文：可以用 String。
-            let stack = exception.callStackSymbols.prefix(20).joined(separator: "\n    ")
-            let stage = Stage.lastLoggedFromDisk()?.name ?? "before-init"
-            writeLog(
-                header: "NSException \(exception.name.rawValue)",
-                reason: exception.reason ?? "",
-                stage: stage,
-                stack: stack
-            )
-            // 交还默认处理，让进程照常崩掉；带着坏状态继续跑只会更难查。
-            signal(SIGABRT, SIG_DFL)
-            raise(SIGABRT)
-        }
+        NSSetUncaughtExceptionHandler(flareUncaughtExceptionHandler)
 
         // 信号处理必须是无捕获的顶层 C 函数：`sigaction` 的 `__sa_handler` 是
         // `@convention(c)` 指针，捕获了上下文的闭包根本转换不过去（编译期报错）。
@@ -123,7 +111,7 @@ enum LaunchCrashTrace {
     // MARK: - 日志读写（普通线程上下文）
 
     /// `NSException` 路径用：可以随便分配 String。
-    private static func writeLog(header: String, reason: String, stage: String, stack: String) {
+    nonisolated fileprivate static func writeLog(header: String, reason: String, stage: String, stack: String) {
         guard crashFd >= 0 else { return }
         let text = "\(header)\n  reason: \(reason)\n  stage: \(stage)\n  stack:\n    \(stack)\n\n"
         text.withCString { _ = Darwin.write(crashFd, $0, strlen($0)) }
@@ -166,7 +154,26 @@ private let fatalSignals: [Int32] = [SIGABRT, SIGSEGV, SIGBUS, SIGILL, SIGTRAP, 
 ///
 /// 函数体内只做整数比较、数组下标与 `write`/`raise`，不构造 String、
 /// 不做新分配、不触发 Swift 静态懒初始化 —— 这些都是 async-signal-safe 的要求。
-private let flareSignalHandler: @convention(c) (Int32) -> Void = { received in
+/// 未捕获 NSException 的处理器。
+///
+/// 同样是 `@convention(c)` 指针，必须是**无捕获的顶层 nonisolated 函数**——
+/// 写成捕获上下文的内联闭包在 `-default-isolation=MainActor` 下会转换失败。
+private nonisolated func flareUncaughtExceptionHandler(_ exception: NSException) {
+    // 普通线程上下文：可以用 String。
+    let stack = exception.callStackSymbols.prefix(20).joined(separator: "\n    ")
+    let stage = LaunchCrashTrace.Stage.lastLoggedFromDisk()?.name ?? "before-init"
+    LaunchCrashTrace.writeLog(
+        header: "NSException \(exception.name.rawValue)",
+        reason: exception.reason ?? "",
+        stage: stage,
+        stack: stack
+    )
+    // 交还默认处理，让进程照常崩掉；带着坏状态继续跑只会更难查。
+    signal(SIGABRT, SIG_DFL)
+    raise(SIGABRT)
+}
+
+private nonisolated func flareSignalHandlerImpl(_ received: Int32) {
     for (position, known) in fatalSignals.enumerated() where known == received {
         fatalTable?.write(position)
         break
@@ -174,6 +181,8 @@ private let flareSignalHandler: @convention(c) (Int32) -> Void = { received in
     signal(received, SIG_DFL)
     raise(received)
 }
+
+private let flareSignalHandler: @convention(c) (Int32) -> Void = flareSignalHandlerImpl
 
 /// 栈最多取多少帧。`backtrace` 本身是固定开销，只需要一块足够大的指针数组。
 private let backtraceDepth: Int32 = 64
@@ -247,10 +256,10 @@ private struct FatalTable {
 
     /// 信号上下文专用：读标记文件最后一字节 → 定位行 → 写整行 → 写调用栈。
     /// 不做新分配、不碰 String、不查字典、不触发静态懒初始化、不做 Swift 数组下标。
-    func write(_ signalIndex: Int) {
+    nonisolated func write(_ signalIndex: Int) {
         guard signalIndex >= 0, signalIndex < signalCount else { return }
 
-        var code = LaunchCrashTrace.Stage.none.rawValue
+        var code: UInt8 = 0
         var lastByte: UInt8 = 0
         if let stagePath {
             let stageFd = open(stagePath, O_RDONLY)
@@ -297,7 +306,7 @@ private struct FatalTable {
     ///
     /// 还原方法：崩溃日志第一行有 `image-base 0x...`（本次启动时算出来的装载基址）。
     /// 用 `atos -o Flare.app/Flare -arch arm64 -l <image-base> 0x<addr>` 还原符号。
-    private func writeBacktrace(to fd: Int32) {
+    nonisolated private func writeBacktrace(to fd: Int32) {
         // `withUnsafeTemporaryAllocation` 给的是临时缓冲，不经过数组的堆分配
         // 和 COW 检查，正好适合信号上下文。
         withUnsafeTemporaryAllocation(of: UnsafeMutableRawPointer?.self, capacity: Int(backtraceDepth)) { frames in
@@ -316,7 +325,7 @@ private struct FatalTable {
     }
 
     /// 写一帧：`# NN 0x<绝对地址>\n`。缓冲区固定 32 字节，最长用到 25 字节。
-    private func writeFrame(_ frame: UnsafeMutableRawPointer, index: Int, to fd: Int32) {
+    nonisolated private func writeFrame(_ frame: UnsafeMutableRawPointer, index: Int, to fd: Int32) {
         withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 32) { out in
             guard let base = out.baseAddress else { return }
             base[0] = 0x23  // '#'
@@ -350,7 +359,7 @@ private struct FatalTable {
     }
 
     /// 写常量字节串（预先烘好的 `lineHeader` / `lineFooter` 缓冲区）。
-    private func writeLiteral(_ literal: StaticBytes, to fd: Int32) {
+    nonisolated private func writeLiteral(_ literal: StaticBytes, to fd: Int32) {
         guard literal.length > 0 else { return }
         if fd >= 0 { _ = Darwin.write(fd, literal.pointer, literal.length) }
         _ = Darwin.write(STDERR_FILENO, literal.pointer, literal.length)
@@ -359,7 +368,7 @@ private struct FatalTable {
 
 /// 一块常驻的字节串：install 阶段分配一次，信号处理里只读。
 /// 用它替代 `[UInt8]`，是因为数组在信号上下文里做 `withUnsafeBytes` 会走桥接。
-private struct StaticBytes {
+private struct StaticBytes: @unchecked Sendable {
     let pointer: UnsafeMutablePointer<UInt8>
     let length: Int
 
@@ -415,7 +424,7 @@ extension LaunchCrashTrace {
         /// 主界面已出现。
         case rootShown = 0x47
 
-        var name: String {
+        nonisolated var name: String {
             switch self {
             case .none: "before-init"
             case .initEntered: "app-init"
@@ -432,7 +441,7 @@ extension LaunchCrashTrace {
         var durable: Bool { self == .kotlinInitialize || self == .rootRendering }
 
         /// 从标记文件读最后一个字节（普通线程上下文用）。
-        static func lastLoggedFromDisk() -> Stage? {
+        nonisolated static func lastLoggedFromDisk() -> Stage? {
             let fd = open(NSHomeDirectory().appending("/Documents/flare-launch/stage.log"), O_RDONLY)
             guard fd >= 0 else { return nil }
             defer { close(fd) }
