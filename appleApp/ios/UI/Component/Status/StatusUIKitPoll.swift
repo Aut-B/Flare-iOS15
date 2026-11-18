@@ -227,7 +227,7 @@ private final class PollOptionButton: UIControl, ManualLayoutMeasurable, Timelin
         bg.backgroundColor = selected
             ? UIColor.tintColor.withAlphaComponent(0.2)
             : .systemGroupedBackground
-        traitOverrides[FlareTextBackgroundTrait.self] = bg.backgroundColor
+        self.flareSetTextBackground(bg.backgroundColor)
         invalidateIntrinsicContentSize()
         setNeedsLayout()
     }

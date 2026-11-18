@@ -1692,14 +1692,14 @@ private final class ProfileHostedAccessoryView: UIView {
 
     func setBaseBackgroundColor(_ color: UIColor) {
         baseBackgroundColor = color
-        traitOverrides[FlareTextBackgroundTrait.self] = hidesBaseBackground ? nil : color
+        self.flareSetTextBackground(hidesBaseBackground ? nil : color)
         backgroundColor = hidesBaseBackground ? .clear : color
     }
 
     func setBaseBackgroundHidden(_ hidden: Bool) {
         guard hidesBaseBackground != hidden else { return }
         hidesBaseBackground = hidden
-        traitOverrides[FlareTextBackgroundTrait.self] = hidden ? nil : baseBackgroundColor
+        self.flareSetTextBackground(hidden ? nil : baseBackgroundColor)
         backgroundColor = hidden ? .clear : baseBackgroundColor
     }
 

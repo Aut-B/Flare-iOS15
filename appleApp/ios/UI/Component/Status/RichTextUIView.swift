@@ -1663,7 +1663,7 @@ private final class RichTextQuoteBlockView: UIView, RichTextFittingPreparing {
         self.contentView = contentView
         super.init(frame: .zero)
         backgroundColor = UIColor.secondaryLabel.withAlphaComponent(0.08)
-        traitOverrides[FlareTextBackgroundTrait.self] = backgroundColor
+        self.flareSetTextBackground(backgroundColor)
         layer.cornerRadius = 8
         layer.masksToBounds = true
 

@@ -1,12 +1,37 @@
 import KotlinSharedUI
 import SwiftUI
 
+/// iOS 15 兼容的弹簧参数容器（SwiftUI 的 `Spring` 结构体是 iOS 17 才有）。
+/// 只保留 CASpringAnimation 需要读取的 mass / stiffness / damping / settlingDuration。
+public struct FlareSpring {
+    public let mass: Double
+    public let stiffness: Double
+    public let damping: Double
+
+    public init(mass: Double, stiffness: Double, damping: Double) {
+        self.mass = mass
+        self.stiffness = stiffness
+        self.damping = damping
+    }
+
+    /// CASpringAnimation 的 duration 只需一个大致时长；实际曲线由 mass/stiffness/damping 决定。
+    public var settlingDuration: Double {
+        let omega0 = (stiffness / mass).squareRoot()
+        guard omega0 > 0 else { return 0.6 }
+        let zeta = damping / (2 * (stiffness * mass).squareRoot())
+        if zeta >= 1 { return 4 / omega0 }
+        let omegaD = omega0 * (1 - zeta * zeta).squareRoot()
+        guard omegaD > 0 else { return 4 / omega0 }
+        return min(1.0, max(0.2, Double.pi / omegaD))
+    }
+}
+
 public enum StatusActionAnimationTiming {
     // Android uses stiffness 400 and damping ratio 0.5 for scale-in, and critical damping for fade/scale-out.
-    public static let iconSpring = Spring(mass: 1, stiffness: 400, damping: 20)
+    public static let iconSpring = FlareSpring(mass: 1, stiffness: 400, damping: 20)
     public static let iconStartScale = 0.0
     public static let numberSpring = iconSpring
-    public static let fadeSpring = Spring(mass: 1, stiffness: 400, damping: 40)
+    public static let fadeSpring = FlareSpring(mass: 1, stiffness: 400, damping: 40)
 }
 
 public struct StatusActionAnimationState: Equatable {

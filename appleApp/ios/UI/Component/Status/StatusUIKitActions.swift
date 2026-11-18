@@ -706,7 +706,7 @@ private final class ActionItemControl: UIButton, ManualLayoutMeasurable, Timelin
         return view
     }
 
-    private func addSpring(to layer: CALayer, keyPath: String, from: Double, to: Double, spring: Spring, key: String) {
+    private func addSpring(to layer: CALayer, keyPath: String, from: Double, to: Double, spring: FlareSpring, key: String) {
         let animation = CASpringAnimation(keyPath: keyPath)
         animation.fromValue = from
         animation.toValue = to

@@ -222,7 +222,7 @@ final class UIGalleryTimelineController: UIViewController, UICollectionViewDeleg
         NotificationCenter.default.addObserver(self, selector: #selector(saveReadingBookmark),
             name: UIApplication.willResignActiveNotification, object: nil)
         view.backgroundColor = .systemGroupedBackground
-        view.traitOverrides[FlareTextBackgroundTrait.self] = .systemGroupedBackground
+        view.flareSetTextBackground(.systemGroupedBackground)
         setupCollectionView()
         setupDataSource()
         setupRefreshControl()
@@ -1088,7 +1088,7 @@ private final class GalleryPostTileUIView: UIView, UIGestureRecognizerDelegate {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .secondarySystemGroupedBackground
-        traitOverrides[FlareTextBackgroundTrait.self] = .secondarySystemGroupedBackground
+        self.flareSetTextBackground(.secondarySystemGroupedBackground)
         layer.cornerRadius = 12
         clipsToBounds = true
 
@@ -1318,7 +1318,7 @@ private final class GalleryFeedTileUIView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .secondarySystemGroupedBackground
-        traitOverrides[FlareTextBackgroundTrait.self] = .secondarySystemGroupedBackground
+        self.flareSetTextBackground(.secondarySystemGroupedBackground)
         layer.cornerRadius = 12
         clipsToBounds = true
 
@@ -1445,7 +1445,7 @@ private final class GalleryPlaceholderTileUIView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .secondarySystemGroupedBackground
-        traitOverrides[FlareTextBackgroundTrait.self] = .secondarySystemGroupedBackground
+        self.flareSetTextBackground(.secondarySystemGroupedBackground)
         layer.cornerRadius = 12
         clipsToBounds = true
 

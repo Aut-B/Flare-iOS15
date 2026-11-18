@@ -45,7 +45,7 @@ public struct ProxySettingsView: View {
                 }
             }
         }
-        .formStyle(.grouped)
+        .groupedFormCompat()
         .disabled(presenter.state.operation is UiStateLoading<KotlinUnit>)
         .navigationTitle(Text("proxy_title", bundle: FlareAppleUILocalization.bundle))
         #if os(macOS)
@@ -280,7 +280,7 @@ private struct ProxyEditor: View {
                 Text("proxy_test_hint", bundle: FlareAppleUILocalization.bundle)
             }
         }
-        .formStyle(.grouped)
+        .groupedFormCompat()
         .backportOnChange(of: state.saveState) { _, operation in
             if operation is UiStateSuccess<KotlinUnit> { onClose() }
         }

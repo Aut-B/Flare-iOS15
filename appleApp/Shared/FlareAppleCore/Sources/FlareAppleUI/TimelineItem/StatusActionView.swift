@@ -564,14 +564,6 @@ private extension View {
 }
 
 public extension ActionMenu.ItemColor {
-    var swiftColor: Color? {
-        switch self {
-        case .red: return .red
-        case .contentColor: return .primary
-        case .primaryColor: return .accentColor
-        }
-    }
-
     var role: ButtonRole? {
         switch self {
         case .red:

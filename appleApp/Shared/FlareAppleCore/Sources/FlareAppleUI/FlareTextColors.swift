@@ -3,21 +3,10 @@ import SwiftUI
 #if os(iOS)
 import UIKit
 
-public nonisolated struct FlareTextBackgroundTrait: UITraitDefinition {
-    public static let defaultValue: UIColor? = nil
-    public static let affectsColorAppearance = true
-}
-
-private nonisolated struct FlareTextBackgroundKey: UITraitBridgedEnvironmentKey {
+// iOS 15 没有 UITraitDefinition / UITraitBridgedEnvironmentKey / UIMutableTraits（均为 iOS 17 才引入）。
+// 这里退化成普通 EnvironmentKey：环境里只存 UIColor? 背景，供主文字色在纯黑背景下微调。
+private nonisolated struct FlareTextBackgroundKey: EnvironmentKey {
     static let defaultValue: UIColor? = nil
-
-    static func read(from traitCollection: UITraitCollection) -> UIColor? {
-        traitCollection[FlareTextBackgroundTrait.self]
-    }
-
-    static func write(to mutableTraits: inout any UIMutableTraits, value: UIColor?) {
-        mutableTraits[FlareTextBackgroundTrait.self] = value
-    }
 }
 
 public extension EnvironmentValues {
@@ -28,8 +17,11 @@ public extension EnvironmentValues {
 }
 
 public extension UIColor {
-    nonisolated static let flareLabel = UIColor { traits in
-        flareLabel(on: traits[FlareTextBackgroundTrait.self], traits: traits)
+    /// iOS 15 回退：直接返回系统 label 色（不再做纯黑背景下的 trait 桥接调暗）。
+    nonisolated static var flareLabel: UIColor { .label }
+
+    nonisolated fileprivate static func flareLabel(on background: UIColor) -> UIColor {
+        UIColor { traits in flareLabel(on: background, traits: traits) }
     }
 
     nonisolated private static func flareLabel(on background: UIColor?, traits: UITraitCollection) -> UIColor {
@@ -42,10 +34,6 @@ public extension UIColor {
             return .label.resolvedColor(with: traits)
         }
         return UIColor(white: 224.0 / 255, alpha: 1)
-    }
-
-    nonisolated fileprivate static func flareLabel(on background: UIColor) -> UIColor {
-        UIColor { traits in flareLabel(on: background, traits: traits) }
     }
 }
 #endif

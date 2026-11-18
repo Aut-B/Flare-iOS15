@@ -432,7 +432,7 @@ private final class ReactionChipView: UIControl, ManualLayoutMeasurable, Timelin
         backgroundColor = isMyReaction
             ? tintColor.withAlphaComponent(0.18)
             : .tertiarySystemGroupedBackground
-        traitOverrides[FlareTextBackgroundTrait.self] = backgroundColor
+        self.flareSetTextBackground(backgroundColor)
         layer.borderWidth = isMyReaction ? Self.borderWidth : 0
         layer.borderColor = isMyReaction ? tintColor.cgColor : UIColor.clear.cgColor
     }

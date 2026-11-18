@@ -427,7 +427,7 @@ private extension View {
     @ViewBuilder
     func rssFormStyle() -> some View {
         #if os(macOS)
-            self.formStyle(.grouped)
+            self.groupedFormCompat()
         #else
             self
         #endif
