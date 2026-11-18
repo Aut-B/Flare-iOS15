@@ -4,6 +4,7 @@ import KotlinSharedUI
 import SwiftUI
 import FlareAppleUI
 import FlareAppleCore
+import Kingfisher
 
 struct TimelineVideoAutoplayCandidate {
     let id: String

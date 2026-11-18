@@ -188,10 +188,8 @@ struct ProfileScreen: View {
     }
 
     private func profileDivision(in proxy: GeometryProxy) -> CGRect? {
-        if #available(iOS 27.1, *) {
-            return proxy.reservedRegions(kind: .division)
-                .first { $0.isActive && $0.frame.height > $0.frame.width }?.frame
-        }
+        // iOS 15 回退：reservedRegions(kind:) 是 iOS 27.1 API，当前 SDK 无此符号。
+        // 拿不到分栏信息时返回 nil，按单列布局，不影响既有折叠逻辑。
         return nil
     }
     
