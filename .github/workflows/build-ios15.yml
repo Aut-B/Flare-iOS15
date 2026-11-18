@@ -218,12 +218,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          LOG=$(tail -n 80 appleApp/build-sim.log 2>/dev/null || echo "(no build log)")
+          ERR=$(grep -n -E '(error:|fatal error:|Undefined symbol|unable to resolve)' appleApp/build-sim.log 2>/dev/null | head -n 80 || true)
+          LOG=$(tail -n 40 appleApp/build-sim.log 2>/dev/null || echo "(no build log)")
           {
             echo "- commit: \`${{ github.sha }}\`"
             echo "- run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo "- artifacts: smoke-build${{ github.run_number }}"
             echo ""
+            echo "## errors"
+            echo '```'
+            echo "$ERR"
+            echo '```'
+            echo "## tail"
             echo '```'
             echo "$LOG"
             echo '```'

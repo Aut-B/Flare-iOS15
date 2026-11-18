@@ -26,10 +26,10 @@ public final class ShareImageLoading {
     }
 
     public func awaitReady() async throws {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        let deadline = Date().addingTimeInterval(15)
         while images.values.contains(.loading) {
-            guard ContinuousClock.now < deadline else { throw StatusShareRenderError.mediaUnavailable }
-            try await Task.sleep(for: .milliseconds(50))
+            guard Date() < deadline else { throw StatusShareRenderError.mediaUnavailable }
+            try await Task.sleep(nanoseconds: 50_000_000)
         }
         try Task.checkCancellation()
         guard !images.values.contains(.failed) else { throw StatusShareRenderError.mediaUnavailable }

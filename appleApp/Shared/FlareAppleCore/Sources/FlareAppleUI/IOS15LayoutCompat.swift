@@ -13,6 +13,7 @@ import SwiftUI
 public struct AdaptiveGridCompat<Content: View>: View {
     public let singleFollowsImageAspect: Bool
     public let singleViewAspectRatio: CGFloat?
+    public let singleMediaMaxHeight: CGFloat?
     public let spacing: CGFloat
     public let maxColumns: Int
     private let content: () -> Content
@@ -20,12 +21,14 @@ public struct AdaptiveGridCompat<Content: View>: View {
     public init(
         singleFollowsImageAspect: Bool = true,
         singleViewAspectRatio: CGFloat? = nil,
+        singleMediaMaxHeight: CGFloat? = nil,
         spacing: CGFloat = 4,
         maxColumns: Int = 3,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.singleFollowsImageAspect = singleFollowsImageAspect
         self.singleViewAspectRatio = singleViewAspectRatio
+        self.singleMediaMaxHeight = singleMediaMaxHeight
         self.spacing = spacing
         self.maxColumns = max(1, maxColumns)
         self.content = content
@@ -36,6 +39,7 @@ public struct AdaptiveGridCompat<Content: View>: View {
             AdaptiveGrid(
                 singleFollowsImageAspect: singleFollowsImageAspect,
                 singleViewAspectRatio: singleViewAspectRatio,
+                singleMediaMaxHeight: singleMediaMaxHeight,
                 spacing: spacing,
                 maxColumns: maxColumns
             ) {
