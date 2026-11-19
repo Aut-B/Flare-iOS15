@@ -158,6 +158,11 @@ struct FlareApp: App {
                 LaunchGuard.purgeInstagramAndExitRecovery()
                 LaunchGuard.prepareRelaunch()
                 LaunchGuard.relaunch()
+            },
+            onPurgeWeread: {
+                LaunchGuard.purgeWereadAndExitRecovery()
+                LaunchGuard.prepareRelaunch()
+                LaunchGuard.relaunch()
             }
         )
     }
@@ -219,6 +224,7 @@ private struct LaunchLoadingView: View {
 private struct LaunchRecoveryView: View {
     let onRetry: () -> Void
     let onPurgeInstagram: () -> Void
+    let onPurgeWeread: () -> Void
 
     var body: some View {
         VStack(spacing: 16) {
@@ -241,6 +247,15 @@ private struct LaunchRecoveryView: View {
             }
             .buttonStyle(.borderedProminent)
             Button {
+                onPurgeWeread()
+            } label: {
+                Text("清掉微信读书登录并重试")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(maxWidth: 240)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.bordered)
+            Button {
                 onRetry()
             } label: {
                 Text("只重新加载主界面")
@@ -249,7 +264,7 @@ private struct LaunchRecoveryView: View {
                     .padding(.vertical, 10)
             }
             .buttonStyle(.bordered)
-            Text("小红书、微信读书等其它账号不受影响。")
+            Text("小红书、微博等其它账号不受影响；微信读书若最近登录过，可单独清掉它的登录。")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

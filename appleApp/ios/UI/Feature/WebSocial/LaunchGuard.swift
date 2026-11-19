@@ -45,6 +45,9 @@ enum LaunchGuard {
             if crashes >= 2 {
                 // 连着两次：连主界面都别画了，先停到安全模式界面。
                 defaults.set(true, forKey: recoveryKey)
+                // 微信读书登录后落盘的 cookie / 书架缓存也可能把启动带崩，
+                // 恢复模式里一并清掉，避免「重新加载」又回到同一个坑。
+                clearWereadLocalState()
                 // 15PM 上「登录 Instagram 后每次冷启动都崩」的坏状态在
                 // DbAccount / WKWebsiteDataStore 里。恢复界面出现时先隔离
                 // Instagram，否则点「重新加载」还是会在 HomeTabsPresenter
@@ -134,6 +137,24 @@ enum LaunchGuard {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
             exit(0)
         }
+    }
+
+    /// 清掉微信读书的本地登录态与缓存，让书架回到「重新扫码」，不触发隐藏网页。
+    static func clearWereadLocalState() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: "weread.cookie")
+        defaults.removeObject(forKey: "weread.nickname")
+        defaults.removeObject(forKey: "weread.readerLinks")
+        defaults.removeObject(forKey: "weread.readerLinksById")
+        defaults.synchronize()
+    }
+
+    /// 恢复界面上点「清掉微信读书登录」：清本地态后走一次干净启动。
+    static func purgeWereadAndExitRecovery() {
+        clearWereadLocalState()
+        UserDefaults.standard.set(0, forKey: crashKey)
+        UserDefaults.standard.synchronize()
+        exitRecovery()
     }
 
     /// 连主界面都画不出来时：清掉 Instagram 凭证再试一次。

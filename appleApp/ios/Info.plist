@@ -51,6 +51,8 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>UIFileSharingEnabled</key>
+	<true/>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Flare requesting the ability to add to the photo library</string>
 	<key>CFBundleDocumentTypes</key>
