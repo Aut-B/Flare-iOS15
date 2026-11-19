@@ -370,11 +370,13 @@ struct MediaViewerScreen: View {
         action: @escaping () -> Void,
         @ViewBuilder label: () -> Label
     ) -> some View {
-        Button(action: action, label: label)
-            .frame(width: width, height: 44)
-            .font(.body)
-            .imageScale(.large)
-            .contentShape(Rectangle())
+        Button(action: action) {
+            label()
+                .frame(width: width, height: 44)
+                .contentShape(Rectangle())
+        }
+        .font(.body)
+        .imageScale(.large)
     }
 
     @ViewBuilder
