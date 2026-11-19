@@ -26,7 +26,7 @@ final class XhsSigner: HiddenWebViewOwner {
     private var appliedCookieHeader: String = ""
     /// 空闲回收：签名页用完还常驻就是 6S 上那 500MB 的 WebContent。
     private var idleWorkItem: DispatchWorkItem?
-    private var memoryObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var memoryObserver: NSObjectProtocol?
     /// 正在跑的签名 / 页面请求数；非 0 时不能拆页面。
     private var activeRequests = 0
 

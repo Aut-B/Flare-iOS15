@@ -79,7 +79,7 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate, HiddenWebViewOwner
     private var host: UIView?
     private var handler: Handler?
     private var idleWorkItem: DispatchWorkItem?
-    private var memoryObserver: NSObjectProtocol?
+    nonisolated(unsafe) private var memoryObserver: NSObjectProtocol?
     private var onMessage: ((Message) -> Void)?
     private var onFinish: (() -> Void)?
     private var onFail: ((String) -> Void)?
