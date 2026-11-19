@@ -165,6 +165,10 @@ final class XhsStore: ObservableObject {
             // 这里**不清空** notes：刷新失败时旧内容还在，用户不会对着一片空白。
             // 成功时 `merge(replace: true)` 会整批换掉。
         }
+        // 冷启动时签名页的 `cookieHeader` 还是空的：先 warmUp 的话，隐藏页会
+        // 以匿名会话加载，homefeed 返回 -100 后 logout() 连 xhs.cookie 一起删掉。
+        // 先把已保存的会话灌给签名页；cookie 没变时 `applyCookies` 不会重载。
+        XhsSigner.shared.applyCookies(cookie)
         // 签名页早点拉起来：等用户点开笔记再创建，评论区要多等十几秒。
         XhsSigner.shared.warmUp()
         startHarvester(reload: true)

@@ -45,9 +45,9 @@ enum LaunchGuard {
             if crashes >= 2 {
                 // 连着两次：连主界面都别画了，先停到安全模式界面。
                 defaults.set(true, forKey: recoveryKey)
-                // 微信读书登录后落盘的 cookie / 书架缓存也可能把启动带崩，
-                // 恢复模式里一并清掉，避免「重新加载」又回到同一个坑。
-                clearWereadLocalState()
+                // 不再自动清微信读书：连续两次没走完启动不等于 WeRead 登录态
+                // 有问题，直接清掉只会让用户白白重新扫码。恢复界面仍保留手动
+                // 「清掉微信读书登录」，真怀疑它把启动带崩时再点。
                 // 15PM 上「登录 Instagram 后每次冷启动都崩」的坏状态在
                 // DbAccount / WKWebsiteDataStore 里。恢复界面出现时先隔离
                 // Instagram，否则点「重新加载」还是会在 HomeTabsPresenter
