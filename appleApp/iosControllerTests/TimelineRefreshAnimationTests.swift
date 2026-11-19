@@ -171,7 +171,7 @@ final class TimelineRefreshAnimationTests: XCTestCase {
             poll: nil, statusKey: original.statusKey, card: nil, createdAt: original.createdAt,
             emojiReactions: [], sourceChannel: nil, visibility: nil, replyToHandle: nil, references: [],
             clickEvent: ClickEventNoop.shared, mediaClickPolicy: .openStatusMedia, accountType: AccountType.Guest.shared,
-            itemKey: original.itemKey, pluginId: nil, authorSubtitleInternal: nil)
+            itemKey: original.itemKey, pluginId: nil, authorSubtitleInternal: nil, ipLocation: nil)
         return UiTimelineV2.TimelinePostItem(post: post,
             presentation: UiTimelineV2.PostPresentation(message: nil, inlineParents: [], quotes: [], repost: nil, notificationKey: nil),
             itemKey: post.itemKey)

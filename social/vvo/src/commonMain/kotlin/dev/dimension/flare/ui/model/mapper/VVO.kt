@@ -320,6 +320,14 @@ private fun Status.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
                     ),
                 ),
             accountType = AccountType.Specific(accountKey),
+            visibility =
+                when (visible?.type) {
+                    1L -> UiTimelineV2.Post.Visibility.SelfOnly
+                    6L -> UiTimelineV2.Post.Visibility.Friends
+                    10L -> UiTimelineV2.Post.Visibility.Followers
+                    else -> null
+                },
+            ipLocation = regionName?.let(::formatVvoIpLocation),
         ).bindMediaProxy()
     return if (message != null || quote != null) {
         TimelinePostItem(
@@ -495,6 +503,7 @@ private fun Comment.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
                     },
                 ),
             accountType = AccountType.Specific(accountKey),
+            ipLocation = source?.let(::formatVvoCommentIpLocation),
         ).bindMediaProxy()
     return if (quote.isNotEmpty()) {
         TimelinePostItem(
@@ -565,6 +574,30 @@ internal fun User.render(accountKey: MicroBlogKey): UiProfile {
                 ),
             ),
     ).withProxy(ProxyRef.forAccount(accountKey))
+}
+
+/**
+ * 微博的 IP 属地：帖子在 region_name（形如「发布于 北京」），评论在 source（形如「来自 北京」）。
+ * 界面上只展示地名本身（如「北京」），前缀一律去掉。
+ */
+private fun formatVvoIpLocation(raw: String): String? = raw.toBareIpRegion()
+
+private fun formatVvoCommentIpLocation(raw: String): String? {
+    val region = raw.toBareIpRegion() ?: return null
+    if (region.contains("客户端") || region.contains("微博") || region.contains("网页")) return null
+    return region
+}
+
+private fun String.toBareIpRegion(): String? {
+    var value = trim()
+    if (value.isEmpty()) return null
+    for (prefix in listOf("发布于", "来自", "IP属地：", "IP属地:", "IP 属地：", "IP 属地:")) {
+        if (value.startsWith(prefix)) {
+            value = value.removePrefix(prefix).trim()
+            break
+        }
+    }
+    return value.ifEmpty { null }
 }
 
 internal fun renderVVOText(

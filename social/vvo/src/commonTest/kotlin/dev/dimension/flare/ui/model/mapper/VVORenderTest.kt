@@ -58,60 +58,69 @@ class VVORenderTest {
     }
 
     @Test
-    fun statusSubtitlePrefersRegionThenSourceWithoutChangingTheAuthor() {
+    fun statusIpLocationComesFromRegionWhileKeepingTheExistingSubtitle() {
         val user = createUser(1L, "author")
         val status = createStatus("status-region", user, "content")
         val expectedUser = user.render(accountKey)
         val cases =
             listOf(
-                Triple("发布于 北京", "微博网页版", "发布于 北京"),
-                Triple(null, "微博网页版", "微博网页版"),
-                Triple(null, null, expectedUser.handle.canonical),
-                Triple("", "微博网页版", ""),
+                Triple("发布于 北京", "微博网页版", "北京"),
+                Triple(null, "微博网页版", null),
+                Triple(null, null, null),
+                Triple("", "微博网页版", null),
             )
 
         cases.forEach { (region, source, expected) ->
             val post = assertIs<UiTimelineV2.Post>(status.copy(regionName = region, source = source).render(accountKey))
-            assertEquals(expected, post.authorSubtitle)
+            assertEquals(region ?: source ?: expectedUser.handle.canonical, post.authorSubtitle)
+            assertEquals(expected, post.ipLocation)
             assertEquals(expectedUser, post.user)
         }
     }
 
     @Test
-    fun commentSubtitleDecodesRegionAndFallsBackToSource() {
+    fun commentIpLocationComesFromSourceAndDropsClientNamesWhileKeepingTheExistingSubtitle() {
         val user = createUser(1L, "commenter")
         val expectedUser = user.render(accountKey)
         val cases =
             listOf(
-                """{"id":"comment","region_name":"发布于 北京","source":"来自广东"}""" to "发布于 北京",
-                """{"id":"comment","region_name":null,"source":"来自广东"}""" to "来自广东",
-                """{"id":"comment","source":"来自广东"}""" to "来自广东",
-                """{"id":"comment"}""" to expectedUser.handle.canonical,
-                """{"id":"comment","region_name":"","source":"来自广东"}""" to "",
+                Triple(
+                    """{"id":"comment","region_name":"发布于 北京","source":"来自广东"}""",
+                    "广东",
+                    "发布于 北京",
+                ),
+                Triple("""{"id":"comment","region_name":null,"source":"来自广东"}""", "广东", "来自广东"),
+                Triple("""{"id":"comment","source":"来自广东"}""", "广东", "来自广东"),
+                Triple("""{"id":"comment"}""", null, expectedUser.handle.canonical),
+                Triple("""{"id":"comment","region_name":"","source":"来自广东"}""", "广东", ""),
+                Triple("""{"id":"comment","source":"来自iPhone客户端"}""", null, "来自iPhone客户端"),
             )
 
-        cases.forEach { (json, expected) ->
+        cases.forEach { (json, expectedIp, expectedSubtitle) ->
             val comment = JSON.decodeFromString<Comment>(json).copy(user = user)
             val post = assertIs<UiTimelineV2.Post>(comment.render(accountKey))
-            assertEquals(expected, post.authorSubtitle)
+            assertEquals(expectedSubtitle, post.authorSubtitle)
+            assertEquals(expectedIp, post.ipLocation)
             assertEquals(expectedUser, post.user)
         }
     }
 
     @Test
-    fun quotesAndChildCommentsKeepTheirOwnSubtitle() {
+    fun quotesAndChildCommentsKeepTheirOwnSubtitleAndIpLocation() {
         val user = createUser(1L, "author")
         val quoted = createStatus("quoted", user, "quoted").copy(regionName = "发布于 上海")
         val status = createStatus("root", user, "root", retweetedStatus = quoted).copy(regionName = "发布于 北京")
         val rendered = assertIs<UiTimelineV2.TimelinePostItem>(status.render(accountKey))
 
         assertEquals("发布于 北京", rendered.post.authorSubtitle)
+        assertEquals("北京", rendered.post.ipLocation)
         assertEquals(
             "发布于 上海",
             rendered.presentation.quotes
                 .single()
                 .authorSubtitle,
         )
+        assertEquals("上海", rendered.presentation.quotes.single().ipLocation)
 
         val comment =
             JSON.decodeFromString<Comment>(
@@ -119,12 +128,14 @@ class VVORenderTest {
             )
         val renderedComment = assertIs<UiTimelineV2.TimelinePostItem>(comment.render(accountKey))
         assertEquals("发布于 北京", renderedComment.contentPostOrNull()?.authorSubtitle)
+        assertNull(renderedComment.contentPostOrNull()?.ipLocation)
         assertEquals(
             "发布于 上海",
             renderedComment.presentation.quotes
                 .single()
                 .authorSubtitle,
         )
+        assertEquals("广东", renderedComment.presentation.quotes.single().ipLocation)
     }
 
     @Test

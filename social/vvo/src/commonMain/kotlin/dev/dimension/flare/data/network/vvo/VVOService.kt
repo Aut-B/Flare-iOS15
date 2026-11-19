@@ -348,25 +348,32 @@ internal class VVOService private constructor(
     ): String {
         var cookieHeader = initialCookieHeader
         var url = startUrl
-        repeat(REFRESH_REDIRECT_LIMIT + 1) {
-            val response =
-                httpClientFactory {
-                    followRedirects = false
-                    install(VVOHeaderPlugin) {
-                        chocolateProvider = { cookieHeader }
-                    }
-                }.get(url)
-            mergeVvoCookieHeader(
-                currentCookieHeader = cookieHeader,
-                setCookieHeaders = response.headers.getAll(HttpHeaders.SetCookie).orEmpty(),
-            )?.let { cookieHeader = it }
-            val location = response.headers[HttpHeaders.Location]
-            if (!isRefreshRedirect(response.status.value, location)) {
-                return cookieHeader
+        // 整条链共用一个 client，chocolateProvider 每跳读取最新的 cookieHeader；
+        // 用完即关，避免每次续签都泄漏 HttpClient。
+        val client =
+            httpClientFactory {
+                followRedirects = false
+                install(VVOHeaderPlugin) {
+                    chocolateProvider = { cookieHeader }
+                }
             }
-            url = resolveRefreshRedirectUrl(current = url, location = location!!) ?: return cookieHeader
+        try {
+            repeat(REFRESH_REDIRECT_LIMIT + 1) {
+                val response = client.get(url)
+                mergeVvoCookieHeader(
+                    currentCookieHeader = cookieHeader,
+                    setCookieHeaders = response.headers.getAll(HttpHeaders.SetCookie).orEmpty(),
+                )?.let { cookieHeader = it }
+                val location = response.headers[HttpHeaders.Location]
+                if (!isRefreshRedirect(response.status.value, location)) {
+                    return cookieHeader
+                }
+                url = resolveRefreshRedirectUrl(current = url, location = location!!) ?: return cookieHeader
+            }
+            return cookieHeader
+        } finally {
+            client.close()
         }
-        return cookieHeader
     }
 
     private suspend fun currentCredential(): VVoCredential? = credentialFlow.firstOrNull()

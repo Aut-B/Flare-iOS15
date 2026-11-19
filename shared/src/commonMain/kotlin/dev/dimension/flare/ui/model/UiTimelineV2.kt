@@ -334,6 +334,7 @@ public sealed class UiTimelineV2 {
         override val itemKey: String? = null,
         val pluginId: String? = null,
         internal val authorSubtitleInternal: String? = null,
+        val ipLocation: String? = null,
     ) : UiTimelineV2() {
         @WebExport
         val authorSubtitle: String
@@ -389,6 +390,7 @@ public sealed class UiTimelineV2 {
                 .add(clickEvent)
                 .add(mediaClickPolicy)
                 .add(accountType)
+                .add(ipLocation)
                 .build()
         }
 
@@ -585,6 +587,7 @@ private fun UiTimelineV2.Post.renderSummaryHash(): Int =
         .add(replyToHandle)
         .add(sourceChannel?.id)
         .add(sourceChannel?.name)
+        .add(ipLocation)
         .add(visibility)
         .add(translationDisplayState)
         .add(actions.renderSummaryHash { it.renderSummaryHash() })

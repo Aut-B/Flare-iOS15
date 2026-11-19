@@ -81,6 +81,7 @@ internal fun ComposeType.vvoVisibility(): ComposeConfig.Visibility? =
                     UiTimelineV2.Post.Visibility.Public,
                     UiTimelineV2.Post.Visibility.Friends,
                     UiTimelineV2.Post.Visibility.SelfOnly,
+                    UiTimelineV2.Post.Visibility.Followers,
                 ),
         )
     } else {

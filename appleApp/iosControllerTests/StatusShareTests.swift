@@ -366,7 +366,7 @@ final class StatusShareTests: XCTestCase {
                                 createdAt: KotlinInstant.companion.fromEpochMilliseconds(epochMilliseconds: 0).toUi(),
                                 emojiReactions: [], sourceChannel: nil, visibility: nil, replyToHandle: nil,
                                 references: [], clickEvent: ClickEventNoop.shared, mediaClickPolicy: .openStatusMedia,
-                                accountType: AccountType.Guest.shared, itemKey: id, pluginId: nil, authorSubtitleInternal: nil)
+                                accountType: AccountType.Guest.shared, itemKey: id, pluginId: nil, authorSubtitleInternal: nil, ipLocation: nil)
     }
 
     private final class ReplyPickerState: NSObject, StatusSharePresenterState {
