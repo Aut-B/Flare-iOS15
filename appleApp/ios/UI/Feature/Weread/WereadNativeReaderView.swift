@@ -841,25 +841,24 @@ enum WereadReaderHTML {
             word-wrap: break-word;
             overflow-wrap: break-word;
         }
-        html, body {
-            -webkit-user-select: none !important;
-            user-select: none !important;
-            -webkit-touch-callout: none !important;
-        }
-        /* 只给真正承载文字的节点开选择。以前把 `#wr-content *` 整个打开，
-           长按会命中外层容器，一拖就把整章当成一个选区（用户说的
-           「一选择就是全页」）。容器保持 none，文字节点单独开 text。 */
-        #wr-content p, #wr-content h1, #wr-content h2, #wr-content h3,
+        /* 不要给 html/body 设 user-select:none：iOS 15 的 WKWebView 里，
+           祖先一旦是 none，子节点的 user-select:text 经常盖不回来，直接表现
+           为「怎么长按都选不了字」。正文整块放开选择，只对图片和工具条禁止。 */
+        #wr-content,
+        #wr-content p, #wr-content div, #wr-content section, #wr-content article,
+        #wr-content h1, #wr-content h2, #wr-content h3,
         #wr-content h4, #wr-content h5, #wr-content h6, #wr-content li,
         #wr-content blockquote, #wr-content pre, #wr-content code,
-        #wr-content td, #wr-content th, #wr-content em, #wr-content strong,
+        #wr-content td, #wr-content th, #wr-content tr, #wr-content tbody,
+        #wr-content em, #wr-content strong, #wr-content mark,
         #wr-content span, #wr-content a, #wr-content i, #wr-content b,
-        #wr-content u, #wr-content font {
+        #wr-content u, #wr-content font, #wr-content cite, #wr-content small,
+        #wr-content sup, #wr-content sub {
             -webkit-user-select: text !important;
             user-select: text !important;
             -webkit-touch-callout: default !important;
         }
-        #wr-content img {
+        #wr-content img, #wr-content svg, #wr-content video, #wr-content button {
             -webkit-user-select: none !important;
             user-select: none !important;
             -webkit-touch-callout: none !important;
@@ -916,6 +915,30 @@ enum WereadReaderHTML {
         (function () {
             var tools = document.getElementById('wr-tools');
             var savedRange = null;
+
+            // iOS 15 的 WKWebView 对 user-select 的继承很挑：只要祖先里有 none，
+            // 长按就可能根本起不了选区。微信读书的正文层级不固定（p / div / 更深
+            // 的嵌套都有），所以不靠一张静态选择器表，而是在手指按下时把命中的
+            // 元素往上 4 层临时放开选择。这样任何结构都能选中，同时不放开 body，
+            // 避免「一拖就整章全选」。
+            function enableSelectionAt(target) {
+                var el = target;
+                var depth = 0;
+                while (el && el !== document.body && depth < 4) {
+                    try {
+                        el.style.setProperty('-webkit-user-select', 'text', 'important');
+                        el.style.setProperty('user-select', 'text', 'important');
+                        el.style.setProperty('-webkit-touch-callout', 'default', 'important');
+                    } catch (e) {}
+                    el = el.parentElement;
+                    depth += 1;
+                }
+            }
+            ['touchstart', 'pointerdown', 'mousedown'].forEach(function (name) {
+                document.addEventListener(name, function (event) {
+                    if (event.target) { enableSelectionAt(event.target); }
+                }, { passive: true, capture: true });
+            });
 
             function hideTools() {
                 tools.style.display = 'none';
