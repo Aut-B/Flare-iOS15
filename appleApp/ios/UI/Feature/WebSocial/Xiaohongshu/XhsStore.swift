@@ -473,7 +473,7 @@ final class XhsStore: ObservableObject {
         // `pc_feed`。先把笔记自己带的来源排在最前 —— 从用户主页 / 搜索点进来的
         // token 是 `pc_user` / `pc_search` 发的，只试这两个固定来源永远对不上。
         var sources: [String] = []
-        for candidate in [note.xsecSource, "pc_note", "pc_feed"] where !candidate.isEmpty {
+        for candidate in [note.xsecSource, "pc_note", "pc_feed", "pc_user", "pc_search"] where !candidate.isEmpty {
             if !sources.contains(candidate) { sources.append(candidate) }
         }
 

@@ -555,6 +555,10 @@ struct XhsNoteView: View {
             (note.xsecToken, note.xsecSource),
             (note.xsecToken, "pc_note"),
             (note.xsecToken, "pc_feed"),
+            // 从用户主页、搜索、关注流进来的笔记，来源可能落在这些值上。
+            // 多试两种来源比重试同一个固定来源更容易拿到完整多图与评论。
+            (note.xsecToken, "pc_user"),
+            (note.xsecToken, "pc_search"),
         ]
         if !note.xsecToken.isEmpty {
             // 令牌过期时，不带令牌再试一次：公开笔记有时仍然能拿到。
