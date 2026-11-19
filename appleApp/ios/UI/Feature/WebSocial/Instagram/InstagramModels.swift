@@ -137,13 +137,17 @@ enum IGJSON {
     /// 顺手把宽高比也带出来，版式高度要用。
     static func bestImageInfo(_ media: [String: Any]) -> (url: String, aspect: CGFloat)? {
         let candidates = array(object(media["image_versions2"])?["candidates"])
-        let widest =
-            candidates.max { lhs, rhs in
-                int(lhs["width"]) < int(rhs["width"])
-            }
-        if let url = string(widest?["url"]) {
-            let width = CGFloat(int(widest?["width"]))
-            let height = CGFloat(int(widest?["height"]))
+        // 以前取「最宽」的那张，等于永远拿原图（往往 1440~2160 宽）。6S 解码
+        // 一张就几百毫秒，首页十几张图叠起来就是「照片要很久很久才出来」。
+        // 改成在宽度 <= 1080 的候选里取最大的一张，清晰度够用、解码量砍一半以上；
+        // 全都比 1080 大时才退回最窄的一张。
+        let byWidth = candidates.sorted { int($0["width"]) < int($1["width"]) }
+        let preferred =
+            byWidth.last(where: { int($0["width"]) <= 1080 })
+                ?? byWidth.first
+        if let url = string(preferred?["url"]) {
+            let width = CGFloat(int(preferred?["width"]))
+            let height = CGFloat(int(preferred?["height"]))
             let aspect = (width > 0 && height > 0) ? width / height : 1
             return (url, min(max(aspect, 0.5), 2.0))
         }

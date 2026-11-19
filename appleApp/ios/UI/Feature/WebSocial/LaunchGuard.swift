@@ -39,9 +39,9 @@ enum LaunchGuard {
             // 只要上次是「带着 Instagram 登录态」崩的，第一次重试就把 Instagram 隔离掉。
             // 其他账号（微博 / 小红书 / 微信读书）都不动，用户顶多重登一次 Instagram，
             // 总比每次冷启动都崩、只能重装强。
-            if let cookie = defaults.string(forKey: "instagram.cookie"), !cookie.isEmpty {
-                InstagramStateIsolator.requestQuarantineOnNextLaunch()
-            }
+            // 以前只要上次带着 Instagram 登录态崩过一次，第一次重试就把它隔离掉，
+            // 结果「登录一次后只要崩过一次就要重登」。改成连续两次没走完才隔离，
+            // 单次崩溃只进安全模式，不动任何账号。
             if crashes >= 2 {
                 // 连着两次：连主界面都别画了，先停到安全模式界面。
                 defaults.set(true, forKey: recoveryKey)
