@@ -167,16 +167,19 @@ enum XhsJSON {
             return nil
         }
         var candidates: [String] = []
-        for key in ["url_default", "urlDefault", "url_pre", "urlPre", "url"] {
+        // 顺序就是清晰度优先级：`url` 是原图，`url_pre` 是中等预览，`url_default`
+        // 是最小的缩略图。以前把 `url_default` 放最前面，首页卡片和详情页拿到的
+        // 全是缩略图，用户看到的就是「图片好糊」。info_list 里的地址通常是原图，
+        // 作为补充放在最后，避免它抢在 url 前面挑了低分辨率那条。
+        for key in ["url", "urlRaw", "url_raw", "url_pre", "urlPre", "url_default", "urlDefault"] {
             if let value = string(object[key]), !value.isEmpty { candidates.append(value) }
         }
         for info in array(object["info_list"]) {
             if let value = string(info["url"]), !value.isEmpty { candidates.append(value) }
         }
-        // iOS 15 的 UIImage 解不了 avif。服务端偶尔还是会先给 avif，
-        // 这里优先挑 jpg / 非 avif 的地址，实在没有才用第一个。
-        let url = candidates.first(where: { $0.lowercased().contains(".jpg") || $0.lowercased().contains(".jpeg") })
-            ?? candidates.first(where: { !$0.lowercased().contains("avif") })
+        // iOS 15 的 UIImage 解不了 avif（webp 能解）。按上面的清晰度顺序，取第一条
+        // 非 avif 的地址；只有全都 avif 时才退回第一条。
+        let url = candidates.first(where: { !$0.lowercased().contains("avif") })
             ?? candidates.first
         var aspect: CGFloat = 0
         let width = CGFloat(int(object["width"]))
