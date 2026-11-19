@@ -13,7 +13,7 @@ struct BackportWebLoginScreen: View {
     @State private var isLoading = true
     /// 诊断日志面板开关。
     @State private var showDebugLog = false
-    private let onCookie: (String) -> Void
+    private let onCookie: ([HTTPCookie]) -> Void
     let url: String
     init(
         onCookie: @escaping ([HTTPCookie]) -> Void,
@@ -189,18 +189,6 @@ struct BackportWebLoginScreen: View {
                         Image(systemName: "xmark")
                     }
                 }
-                .task(id: route.key) {
-                    guard viewModel?.route !== route else { return }
-                    viewModel = BackportWebLoginViewModel(onCookie: onCookie, url: url, route: route)
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    WebLoginOriginLabel(current: viewModel?.currentOrigin ?? webLoginHTTPSOrigin(URL(string: url)) ?? "", initial: webLoginHTTPSOrigin(URL(string: url)))
-                }
-                ToolbarItem(placement: .cancellationAction) {
-                    Button { dismiss() } label: { Label("Cancel", systemImage: "xmark") }
-                }
             }
         }
     }
@@ -281,7 +269,6 @@ class WKDelegate: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
 
     init(decidePolicy: @escaping () -> Void
     ) {
-        self.route = route
         self.decidePolicy = decidePolicy
     }
 
@@ -437,7 +424,7 @@ final class BackportWebLoginViewModel {
     /// 登录页内部事件流水（诊断用），最多保留 80 条。
     var debugLog: [String] = []
     let url: String
-    let onCookie: (String) -> Void
+    let onCookie: ([HTTPCookie]) -> Void
     let delegate: WKDelegate
     /// 登录页使用的数据仓库，cookie 的写入与读取必须走同一个实例。
     let dataStore = WKWebsiteDataStore.default()
@@ -450,26 +437,20 @@ final class BackportWebLoginViewModel {
     @PerceptionIgnored weak var hostController: UIViewController?
     @PerceptionIgnored private var observers = [NSKeyValueObservation]()
     init(
-        onCookie: @escaping (String) -> Void,
+        onCookie: @escaping ([HTTPCookie]) -> Void,
         url: String
     ) {
         self.onCookie = onCookie
         self.url = url
         self.delegate = WKDelegate {
-            // cookie 必须从登录页实际使用的仓库里取。configuration 用默认（持久化）
-            // 仓库，而 WKWebsiteDataStore.default() 是进程内单例，网页写入的就是它。
-            // 注意：这里不能捕获 self——delegate 还在初始化中，转义闭包捕获 self 会触发
-            // "used before being initialized"。
             WKWebsiteDataStore.default().httpCookieStore.getAllCookies { (cookies) in
-                let cookieString = BackportWebLoginViewModel.cookieHeaderString(from: cookies, for: .init(string: url))
-                onCookie(cookieString)
+                onCookie(cookies)
             }
         }
         // 用默认（持久化）仓库：X/微博的登录流程依赖 sessionStorage 与带凭证的
         // XHR，非持久化仓库在部分 iOS 15 上会让登录 POST 静默失败，表现为
         // 「点了下一步一直卡住」。
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = route.dataStore
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         // iOS 15 回退：WKPreferences.javaScriptCanOpenWindowsAutomatically 默认 false，
         // window.open 会被静默拦掉（页面像卡住）。打开后 window.open 会走
