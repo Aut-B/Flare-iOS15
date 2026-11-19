@@ -137,6 +137,28 @@ private struct WereadReaderWebView: UIViewRepresentable {
         '.app_content p, .app_content p *' +
         ' { -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default !important; }';
       var pending = false;
+      // iOS 15 的 WKWebView 里，祖先一旦 user-select:none，子节点常常盖不回来，
+      // 表现就是「已划线的字能点，自己拖选新文段不行」。微信读书的正文层级不固定，
+      // 所以不靠一张选择器表：手指按下时把命中的元素向上 4 层临时放开选择，
+      // 同时不放开 body，避免一拖整页。
+      function enableSelectionAt(target) {
+        var el = target;
+        var depth = 0;
+        while (el && el !== document.body && depth < 4) {
+          try {
+            el.style.setProperty('-webkit-user-select', 'text', 'important');
+            el.style.setProperty('user-select', 'text', 'important');
+            el.style.setProperty('-webkit-touch-callout', 'default', 'important');
+          } catch (e) {}
+          el = el.parentElement;
+          depth += 1;
+        }
+      }
+      ['touchstart', 'pointerdown', 'mousedown'].forEach(function (name) {
+        document.addEventListener(name, function (event) {
+          if (event.target) { enableSelectionAt(event.target); }
+        }, { passive: true, capture: true });
+      });
       function apply(){
         pending = false;
         try {
