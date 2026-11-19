@@ -10,7 +10,7 @@ struct IGProfileTarget: Identifiable {
 /// Instagram 首页。
 ///
 /// 版式照 Instagram 自己的来：头像 + 用户名一行，下面是图（轮播可以左右滑），
-/// 再下面是互动数和正文。没有做点赞/评论，只做「看」——这版的目标是能刷。
+/// 再下面是互动数和正文。点赞走 `InstagramStore` 的乐观更新，评论在详情页里发。
 struct InstagramFeedView: View {
     @ObservedObject private var store = InstagramStore.shared
     @State private var showLogin = false

@@ -161,12 +161,21 @@ final class InstagramService {
 
     // MARK: - 互动
 
-    /// 点赞 / 取消点赞。
-    ///
-    /// 网页版走的就是这两个接口，只要 `X-CSRFToken`（cookie 里的 `csrftoken`）
-    /// 和 `X-Instagram-AJAX`，不需要额外的签名。
-    func setLiked(_ liked: Bool, mediaId: String) async throws {
-        let action = liked ? "like" : "unlike"
+    /// 点赞。网页版实际请求的是
+    /// `POST /api/v1/web/likes/{media_id}/like/`（复数 `likes` + media id）。
+    func like(mediaId: String) async throws {
+        try await setLiked(mediaId, action: "like")
+    }
+
+    /// 取消点赞。网页版实际请求的是
+    /// `POST /api/v1/web/likes/{media_id}/unlike/`。
+    func unlike(mediaId: String) async throws {
+        try await setLiked(mediaId, action: "unlike")
+    }
+
+    /// 点赞 / 取消点赞共用一套请求：cookie、`X-CSRFToken`（cookie 里的
+    /// `csrftoken`）、桌面 UA、`X-IG-App-ID` 都跟读接口完全一致，不需要额外签名。
+    private func setLiked(_ mediaId: String, action: String) async throws {
         _ = try await request(
             "\(base)/api/v1/web/likes/\(mediaId)/\(action)/",
             method: "POST",
@@ -245,7 +254,13 @@ final class InstagramService {
         if !safeCookie.isEmpty {
             urlRequest.setValue(safeCookie, forHTTPHeaderField: "Cookie")
         }
-        let safeCSRF = Self.sanitizeHeader(csrfToken)
+        // csrf 以 Store 灌进来的值为准；没灌时直接回退到 cookie 里的
+        // `csrftoken`，避免写操作因为漏了一次 `pushCredentials()` 就 403。
+        let rawCSRF =
+            csrfToken.isEmpty
+                ? (CookieJar.value(inHeader: cookie, named: "csrftoken") ?? "")
+                : csrfToken
+        let safeCSRF = Self.sanitizeHeader(rawCSRF)
         if !safeCSRF.isEmpty {
             urlRequest.setValue(safeCSRF, forHTTPHeaderField: "X-CSRFToken")
         }

@@ -7,6 +7,7 @@ struct InstagramPostView: View {
     let media: IGMedia
 
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var store = InstagramStore.shared
     @State private var detail: IGMedia?
     @State private var comments: [IGComment] = []
     @State private var isLoadingComments = false
@@ -20,6 +21,7 @@ struct InstagramPostView: View {
     @FocusState private var commentFocused: Bool
 
     private var current: IGMedia { detail ?? media }
+    private var likeState: IGLikeState { store.likeState(for: current) }
 
     var body: some View {
         ScrollView {
@@ -156,7 +158,7 @@ struct InstagramPostView: View {
 
     private var statsRow: some View {
         HStack(spacing: 16) {
-            Text("\(current.likeCount) 次赞")
+            Text("\(likeState.count) 次赞")
             Text("\(current.commentCount) 条评论")
             Spacer(minLength: 0)
             if current.isVideo {

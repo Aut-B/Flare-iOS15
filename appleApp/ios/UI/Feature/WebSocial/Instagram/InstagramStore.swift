@@ -1,6 +1,13 @@
 import Foundation
 import Combine
 import WebKit
+import os
+
+/// 点赞按钮要显示的状态：原始 `IGMedia` 字段 + Store 里的乐观覆盖。
+struct IGLikeState: Equatable {
+    var liked: Bool
+    var count: Int
+}
 
 /// Instagram 的登录态与首页时间线。
 ///
@@ -8,12 +15,16 @@ import WebKit
 /// 掉线时接口返回 401，这里清掉登录态让界面回到「重新登录」。
 final class InstagramStore: ObservableObject {
     static let shared = InstagramStore()
+    private static let log = Logger(subsystem: "dev.dimension.flare.instagram", category: "like")
 
     @Published private(set) var isLoggedIn: Bool
     @Published private(set) var userName: String
     @Published private(set) var feed: [IGMedia] = []
     @Published private(set) var isLoading = false
     @Published private(set) var isLoadingMore = false
+    /// `IGMedia` 是不可变结构体，点赞后没法原地改。这里按帖子 id 存一份
+    /// 当前显示值，时间线和详情都从这里读；乐观更新与失败回滚只动这一处。
+    @Published private(set) var likeOverrides: [String: IGLikeState] = [:]
     @Published var errorMessage: String?
 
     private let defaults = UserDefaults.standard
@@ -27,6 +38,10 @@ final class InstagramStore: ObservableObject {
     /// 上一次已经请求过的翻页游标。接口把 `next_max_id` 原样返回时，
     /// 列表底部会反复触发 `onAppear` → 无限请求 → 永远在「刷新」。
     private var lastLoadMoreCursor: String?
+    /// 同一篇帖子只允许一个点赞请求在飞，避免连点 / 时间线与详情两个
+    /// 按钮同时触发时请求乱序，最后把状态翻回去。
+    private let likeLock = NSLock()
+    private var likeInFlight: Set<String> = []
 
     private init() {
         let stored = defaults.string(forKey: cookieKey) ?? ""
@@ -95,6 +110,7 @@ final class InstagramStore: ObservableObject {
             self.isLoggedIn = true
             self.errorMessage = nil
             self.loaded = false
+            self.likeOverrides = [:]
         }
         refreshUserName()
         return true
@@ -122,6 +138,7 @@ final class InstagramStore: ObservableObject {
             self.feed = []
             self.nextCursor = nil
             self.loaded = false
+            self.likeOverrides = [:]
         }
     }
 
@@ -143,6 +160,81 @@ final class InstagramStore: ObservableObject {
         }
         let message = error.localizedDescription
         DispatchQueue.main.async { self.errorMessage = message }
+    }
+
+    // MARK: - 点赞
+
+    /// 按钮显示用的状态：没有本地覆盖时就用接口返回的 `has_liked` / `like_count`。
+    func likeState(for media: IGMedia) -> IGLikeState {
+        let mediaId = Self.requestMediaId(media.id)
+        return likeOverrides[mediaId] ?? IGLikeState(liked: media.hasLiked, count: media.likeCount)
+    }
+
+    func likePost(_ media: IGMedia) async throws {
+        try await setLiked(media, liked: true)
+    }
+
+    func unlikePost(_ media: IGMedia) async throws {
+        try await setLiked(media, liked: false)
+    }
+
+    private func setLiked(_ media: IGMedia, liked: Bool) async throws {
+        let mediaId = Self.requestMediaId(media.id)
+        guard beginLike(mediaId) else { return }
+        defer { endLike(mediaId) }
+
+        // 网页版的写接口只认 cookie 里的 `csrftoken`；每次写之前重新灌一遍，
+        // 避免 Store 刚换过 cookie、Service 还拿着旧 token。
+        pushCredentials()
+        let previous = likeState(for: media)
+        guard previous.liked != liked else { return }
+        let next = IGLikeState(
+            liked: liked,
+            count: max(0, previous.count + (liked ? 1 : -1))
+        )
+
+        // 乐观更新：先翻 UI，请求失败再翻回来。
+        DispatchQueue.main.async {
+            self.likeOverrides[mediaId] = next
+        }
+
+        do {
+            if liked {
+                try await InstagramService.shared.like(mediaId: mediaId)
+            } else {
+                try await InstagramService.shared.unlike(mediaId: mediaId)
+            }
+        } catch {
+            let action = liked ? "like" : "unlike"
+            Self.log.error(
+                "\(action, privacy: .public) failed media=\(mediaId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            DispatchQueue.main.async {
+                self.likeOverrides[mediaId] = previous
+            }
+            throw error
+        }
+    }
+
+    /// 时间线返回的 `id` 常是 `<pk>_<user pk>`，但点赞路径和表单只认数字 `pk`。
+    /// 同时用它做覆盖键，确保时间线与详情页指向同一篇帖子。
+    private static func requestMediaId(_ id: String) -> String {
+        guard let separator = id.firstIndex(of: "_") else { return id }
+        let prefix = id[..<separator]
+        guard !prefix.isEmpty, prefix.allSatisfy({ $0.isNumber }) else { return id }
+        return String(prefix)
+    }
+
+    private func beginLike(_ mediaId: String) -> Bool {
+        likeLock.lock()
+        defer { likeLock.unlock() }
+        return likeInFlight.insert(mediaId).inserted
+    }
+
+    private func endLike(_ mediaId: String) {
+        likeLock.lock()
+        likeInFlight.remove(mediaId)
+        likeLock.unlock()
     }
 
     // MARK: - 时间线
@@ -176,6 +268,8 @@ final class InstagramStore: ObservableObject {
                 self.loaded = true
                 self.errorMessage = nil
                 self.lastLoadMoreCursor = nil
+                // 刷新拿到的是服务端权威状态，清掉上一轮的本地覆盖。
+                self.likeOverrides = [:]
             }
         } catch {
             handle(error)

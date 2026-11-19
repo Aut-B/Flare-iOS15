@@ -441,52 +441,52 @@ struct IGShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
-/// 点赞按钮。先改本地状态再发请求，失败回滚 —— 点赞必须立刻有反馈。
+/// 点赞按钮。状态统一从 `InstagramStore` 读：Store 先乐观更新，失败再回滚，
+/// 时间线和详情里的同一篇帖子不会各翻各的。
 struct IGLikeButton: View {
     let media: IGMedia
     var showsCount: Bool = true
 
-    @State private var liked: Bool
-    @State private var count: Int
+    @ObservedObject private var store = InstagramStore.shared
     @State private var busy = false
 
     init(media: IGMedia, showsCount: Bool = true) {
         self.media = media
         self.showsCount = showsCount
-        _liked = State(initialValue: media.hasLiked)
-        _count = State(initialValue: media.likeCount)
     }
+
+    private var state: IGLikeState { store.likeState(for: media) }
 
     var body: some View {
         Button {
             toggle()
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: liked ? "heart.fill" : "heart")
-                    .foregroundStyle(liked ? Color.red : Color.primary)
+                Image(systemName: state.liked ? "heart.fill" : "heart")
+                    .foregroundStyle(state.liked ? Color.red : Color.primary)
                 if showsCount {
-                    Text("\(count)")
+                    Text("\(state.count)")
                         .foregroundStyle(.secondary)
                 }
             }
         }
         .buttonStyle(.plain)
         .disabled(busy)
-        .accessibilityLabel(liked ? "取消点赞" : "点赞")
+        .accessibilityLabel(state.liked ? "取消点赞" : "点赞")
     }
 
     private func toggle() {
         guard !busy else { return }
-        let target = !liked
+        let target = !state.liked
         busy = true
-        liked = target
-        count = max(0, count + (target ? 1 : -1))
         Task {
             do {
-                try await InstagramService.shared.setLiked(target, mediaId: media.id)
+                if target {
+                    try await store.likePost(media)
+                } else {
+                    try await store.unlikePost(media)
+                }
             } catch {
-                liked = !target
-                count = max(0, count + (target ? -1 : 1))
                 IGToast.error(error.localizedDescription)
             }
             busy = false
