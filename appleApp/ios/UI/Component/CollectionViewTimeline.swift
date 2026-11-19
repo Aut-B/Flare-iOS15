@@ -892,6 +892,7 @@ final class UITimelineCollectionViewController: UIViewController, UICollectionVi
 
     @discardableResult
     private func flushPendingHeightCorrections() -> Bool {
+        isHeightCorrectionFlushScheduled = false
         guard isViewLoaded, itemHeightCache.hasPendingMeasurements else { return false }
         let paths = itemHeightCache.pendingItemIDs.compactMap { dataSource.indexPath(for: $0) }
         var changed = false
