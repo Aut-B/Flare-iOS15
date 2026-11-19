@@ -37,6 +37,10 @@ enum LaunchCrashTrace {
 
     /// 在 `FlareApp.init()` 里、`LaunchGuard.begin()` 之后立刻调用，只调一次。
     static func install() {
+        // 必须赶在打开 crash.log（O_TRUNC）之前读上次现场：O_TRUNC 会立刻把文件清零，
+        // 之后再 readLog() 只能读到空文件，横幅和恢复页拿到的 lastCrash 永远是空串。
+        previous = readLog()
+
         try? FileManager.default.createDirectory(
             atPath: directory,
             withIntermediateDirectories: true,
@@ -55,6 +59,22 @@ enum LaunchCrashTrace {
             crashFd: crashFd
         )
 
+        stage(.initEntered)
+        // 开头已经把上次的现场读进内存了，这里再确保文件从 0 开始写本次的。
+        // 第一行写本次启动的装载基址：信号崩溃栈里是绝对地址，没这行就还原不出符号。
+        if crashFd >= 0 {
+            _ = ftruncate(crashFd, 0)
+            _ = lseek(crashFd, 0, SEEK_SET)
+        }
+        writeImageBase(to: crashFd, stage: Stage.initEntered.name)
+
+        // 预热信号路径会读到的所有文件级常量。Swift 的 `let` 全局是懒初始化的，
+        // 第一次访问会走一次运行时检查；提前在这里读一遍，信号处理里就不会有第一次。
+        prewarmSignalPath()
+
+        // 等日志首行和信号路径用到的常量全部就绪后，最后才安装处理器。
+        // 反过来的话，handler 已生效但 image-base 还没写、常量还没预热，
+        // 这个窗口内收到信号就会在信号上下文里首次初始化全局量。
         NSSetUncaughtExceptionHandler(flareUncaughtExceptionHandler)
 
         // 信号处理必须是无捕获的顶层 C 函数：`sigaction` 的 `__sa_handler` 是
@@ -69,20 +89,6 @@ enum LaunchCrashTrace {
             action.sa_flags = SA_RESETHAND
             sigaction(sig, &action, nil)
         }
-
-        previous = readLog()
-        stage(.initEntered)
-        // 上面 readLog() 已经把上次的现场读进内存了，这里清空文件准备记本次的。
-        // 第一行写本次启动的装载基址：信号崩溃栈里是绝对地址，没这行就还原不出符号。
-        if crashFd >= 0 {
-            _ = ftruncate(crashFd, 0)
-            _ = lseek(crashFd, 0, SEEK_SET)
-        }
-        writeImageBase(to: crashFd, stage: Stage.initEntered.name)
-
-        // 预热信号路径会读到的所有文件级常量。Swift 的 `let` 全局是懒初始化的，
-        // 第一次访问会走一次运行时检查；提前在这里读一遍，信号处理里就不会有第一次。
-        prewarmSignalPath()
     }
 
     /// 触碰一遍信号路径上的全局量，让它们完成惰性初始化。
@@ -94,6 +100,11 @@ enum LaunchCrashTrace {
         _ = lineFooter.length
         _ = backtraceDepth
         _ = fatalTable != nil
+        _ = SIG_DFL
+        _ = STDERR_FILENO
+        _ = F_GETFL
+        _ = O_APPEND
+        _ = SEEK_END
     }
 
     /// 标记进入某个启动阶段。单字节写 + 必要时 fsync，信号安全。
@@ -152,7 +163,7 @@ private nonisolated let fatalSignals: [Int32] = [SIGABRT, SIGSEGV, SIGBUS, SIGIL
 /// 就是 C 函数指针，捕获了上下文的闭包在编译期就转换失败。这里只能通过
 /// 文件级变量 `fatalTable` 取预烘好的常量表。
 ///
-/// 函数体内只做整数比较、数组下标与 `write`/`raise`，不构造 String、
+/// 函数体内只做整数分支与 `write`/`raise`，不构造 String、
 /// 不做新分配、不触发 Swift 静态懒初始化 —— 这些都是 async-signal-safe 的要求。
 /// 未捕获 NSException 的处理器。
 ///
@@ -174,8 +185,21 @@ private nonisolated func flareUncaughtExceptionHandler(_ exception: NSException)
 }
 
 private nonisolated func flareSignalHandlerImpl(_ received: Int32) {
-    for (position, known) in fatalSignals.enumerated() where known == received {
-        fatalTable?.write(position)
+    // 固定 switch 直接映射到预烘表的行号，不遍历 Swift 数组、不调用集合方法。
+    switch received {
+    case SIGABRT:
+        fatalTable?.write(0)
+    case SIGSEGV:
+        fatalTable?.write(1)
+    case SIGBUS:
+        fatalTable?.write(2)
+    case SIGILL:
+        fatalTable?.write(3)
+    case SIGTRAP:
+        fatalTable?.write(4)
+    case SIGFPE:
+        fatalTable?.write(5)
+    default:
         break
     }
     signal(received, SIG_DFL)
