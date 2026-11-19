@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import WebKit
+import os
 
 /// 在一个「真的」网页里跑请求，把接口返回的 JSON 偷出来。
 ///
@@ -21,6 +22,12 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
         let url: String
         let body: String
     }
+
+    /// 只留一个隐藏页在跑：6S 上同时开两个 1280×1600 的 WKWebView 会把内存和
+    /// 唤醒次数顶爆（实测 65 秒 4.5 万次唤醒、内存 +187MB）。新页面启动前先把
+    /// 旧的停掉，既省资源也避免两个页面抢同一个 cookie 仓库。
+    private static weak var current: WebPageHarvester?
+    private static let log = Logger(subsystem: "dev.dimension.flare.harvest", category: "lifecycle")
 
     private static let handlerName = "flareharvest"
     /// 桌面版布局尺寸（CSS px）。小红书 / 微信读书的 web 端都是按这个宽度做的。
@@ -117,6 +124,15 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
     // MARK: - 建页面
 
     private func build(patterns: [String]) {
+        // 同一时刻只允许一个隐藏页。旧的先停，避免 6S 上两个页面同时渲染把
+        // 内存/唤醒顶爆。stop() 是异步的，所以这里不等它，直接替换 current。
+        if let previous = Self.current, previous !== self {
+            previous.stop()
+        }
+        Self.current = self
+        if let host = URL(string: startURL)?.host {
+            Self.log.info("harvester start host=\(host, privacy: .public)")
+        }
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.allowsInlineMediaPlayback = true
@@ -164,6 +180,10 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
     }
 
     private func teardown() {
+        if Self.current === self {
+            Self.current = nil
+            Self.log.info("harvester stop")
+        }
         handler?.owner = nil
         if let view = webView {
             view.configuration.userContentController

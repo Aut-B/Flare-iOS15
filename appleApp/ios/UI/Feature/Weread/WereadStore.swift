@@ -216,11 +216,14 @@ final class WereadStore: ObservableObject {
                     self?.ingestShelf(message)
                 }
             )
-            // 网页书架也是滚动加载，往下拉几次把书捞全。
+            // 页面书架也是滚动加载，往下拉几次把书捞全。
             let steps = max(scrolls, 1)
             for index in 1...steps {
                 DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 1.8) { [weak self] in
-                    self?.harvester?.scroll()
+                    // 身份校验：harvester 已被换掉/停掉时这些旧定时器必须变成空操作，
+                    // 否则它们会去滚动新的页面，6S 上会叠出一堆无意义的渲染与唤醒。
+                    guard let self = self, self.harvester === harvester else { return }
+                    harvester.scroll()
                 }
             }
             // 只抄一次 DOM 是不够的：网页书架是分批渲染的，后面几屏的书
@@ -228,11 +231,13 @@ final class WereadStore: ObservableObject {
             // 点进去只能退回网页书架再点一次。这里每隔一段时间抄一遍。
             for delay in [2.6, 4.4, 6.2, 8.0, 9.8, 11.6] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                    self?.extractReaderLinks()
+                    guard let self = self, self.harvester === harvester else { return }
+                    self.extractReaderLinks(from: harvester)
                 }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + Double(steps) * 1.8 + 4.2) { [weak self] in
-                self?.finishHarvest()
+                guard let self = self, self.harvester === harvester else { return }
+                self.finishHarvest(from: harvester)
             }
         }
         if Thread.isMainThread {
@@ -338,7 +343,8 @@ final class WereadStore: ObservableObject {
         harvested.append(contentsOf: list.filter { !known.contains($0.id) })
     }
 
-    private func extractReaderLinks() {
+    private func extractReaderLinks(from harvester: WebPageHarvester? = nil) {
+        let target = harvester ?? self.harvester
         let script = """
         (function(){
           var out = [];
@@ -369,7 +375,7 @@ final class WereadStore: ObservableObject {
           return JSON.stringify(out);
         })()
         """
-        harvester?.evaluate(script) { [weak self] text in
+        target?.evaluate(script) { [weak self] text in
             guard let self = self else { return }
             guard
                 let data = text.data(using: .utf8),
@@ -397,13 +403,13 @@ final class WereadStore: ObservableObject {
         }
     }
 
-    private func finishHarvest() {
+    private func finishHarvest(from harvester: WebPageHarvester) {
         // 停页面之前再抄最后一遍，把最后一屏滚出来的书也算上。
-        extractReaderLinks()
+        extractReaderLinks(from: harvester)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.harvester === harvester else { return }
             self.harvesting = false
-            self.harvester?.stop()
+            harvester.stop()
             self.harvester = nil
             if !self.harvested.isEmpty {
                 var merged = self.books
