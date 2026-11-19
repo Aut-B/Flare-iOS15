@@ -39,6 +39,7 @@ import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.model.tab.ShortcutSpec
 import dev.dimension.flare.data.model.tab.TimelineSpec
 import dev.dimension.flare.data.network.vvo.VVOService
+import dev.dimension.flare.data.network.vvo.model.VVOResponse
 import dev.dimension.flare.data.network.vvo.model.StatusDetailItem
 import dev.dimension.flare.data.platform.CommonTimelineSpecs
 import dev.dimension.flare.data.platform.VVO_PLATFORM_ID
@@ -478,39 +479,44 @@ internal class VVODataSource(
         val mediaId = mediaIds.joinToString(",")
         val referenceStatus = data.referenceStatus
         val composeStatus = referenceStatus?.composeStatus
-        if (composeStatus is ComposeStatus.VVOComment) {
-            service.replyComment(
-                cid = composeStatus.statusKey.id,
-                reply = composeStatus.statusKey.id,
-                id = composeStatus.rootId,
-                mid = composeStatus.rootId,
-                content = data.content,
-                st = st,
-                picId = mediaId,
-            )
-        } else if (composeStatus is ComposeStatus.Reply) {
-            service.commentStatus(
-                id = composeStatus.statusKey.id,
-                content = data.content,
-                st = st,
-                picId = mediaId,
-            )
-        } else if (composeStatus is ComposeStatus.Quote) {
-            service.repostStatus(
-                id = composeStatus.statusKey.id,
-                content = data.content,
-                st = st,
-                visible = visible,
-                picId = mediaId,
-            )
-        } else {
-            service.updateStatus(
-                content = data.content,
-                st = st,
-                visible = visible,
-                picId = mediaId,
-            )
-        }
+        // 微博很多失败是 HTTP 200 + `{"ok":0,"msg":"转发频繁/操作频繁/非法请求"}`。
+        // 以前完全不看返回体，服务端拒绝也被当成成功，用户看到「已转发」其实没发出去。
+        // 这里统一检查 ok/http_code/msg，把真实原因抛出去。
+        val response: VVOResponse<*> =
+            if (composeStatus is ComposeStatus.VVOComment) {
+                service.replyComment(
+                    cid = composeStatus.statusKey.id,
+                    reply = composeStatus.statusKey.id,
+                    id = composeStatus.rootId,
+                    mid = composeStatus.rootId,
+                    content = data.content,
+                    st = st,
+                    picId = mediaId,
+                )
+            } else if (composeStatus is ComposeStatus.Reply) {
+                service.commentStatus(
+                    id = composeStatus.statusKey.id,
+                    content = data.content,
+                    st = st,
+                    picId = mediaId,
+                )
+            } else if (composeStatus is ComposeStatus.Quote) {
+                service.repostStatus(
+                    id = composeStatus.statusKey.id,
+                    content = data.content,
+                    st = st,
+                    visible = visible,
+                    picId = mediaId,
+                )
+            } else {
+                service.updateStatus(
+                    content = data.content,
+                    st = st,
+                    visible = visible,
+                    picId = mediaId,
+                )
+            }
+        response.requireOk()
     }
 
     override fun composeConfig(type: ComposeType): ComposeConfig =
@@ -691,5 +697,25 @@ internal class VVODataSource(
                 ?: throw Exception("status not found")
 
         return json.firstOrNull()?.status?.render(accountKey) ?: throw Exception("status not found")
+    }
+}
+
+/**
+ * 微博写接口的成功判定。
+ *
+ * 微博不会用 HTTP 状态码表达业务失败：转发/评论被风控挡下时仍是 200，
+ * 返回体是 `{"ok":0,"msg":"转发频繁"}`。以前调用方完全不检查返回体，
+ * 失败被当成成功——用户看到「已转发」，实际一条都没发出去。
+ * 这里把 `http_code != 200` 与 `ok == 0` 都当作失败，并把 `msg` 带给用户。
+ */
+internal fun VVOResponse<*>.requireOk() {
+    val http = httpCode
+    if (http != null && http != 200L) {
+        val reason = msg?.takeIf { it.isNotBlank() }?.let { "：$it" } ?: ""
+        throw Exception("微博接口返回 HTTP $http$reason")
+    }
+    if (ok != null && ok == 0L) {
+        val reason = msg?.takeIf { it.isNotBlank() } ?: "请求被微博拒绝（ok=0）"
+        throw Exception("微博接口失败：$reason")
     }
 }
