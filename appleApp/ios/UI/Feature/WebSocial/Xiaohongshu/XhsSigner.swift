@@ -11,7 +11,7 @@ import WebKit
 ///
 /// body 必须和参与签名的字符串逐字节一致，所以 JSON 也交给页面 `JSON.stringify`
 /// 生成，原样发出去 —— 自己再序列化一次，key 顺序一变签名就白搭。
-final class XhsSigner {
+final class XhsSigner: HiddenWebViewOwner {
     static let shared = XhsSigner()
 
     private var webView: WKWebView?
@@ -24,6 +24,13 @@ final class XhsSigner {
     private var cookieHeader: String = ""
     /// 已经灌进签名页的 cookie，避免每次取数都 reload。
     private var appliedCookieHeader: String = ""
+    /// 空闲回收：签名页用完还常驻就是 6S 上那 500MB 的 WebContent。
+    private var idleWorkItem: DispatchWorkItem?
+    private var memoryObserver: NSObjectProtocol?
+    /// 正在跑的签名 / 页面请求数；非 0 时不能拆页面。
+    private var activeRequests = 0
+
+    private static let idleLifetime: TimeInterval = 60
 
     static let desktopUserAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
@@ -33,6 +40,25 @@ final class XhsSigner {
         let xs: String
         let xt: String
         let body: String
+    }
+
+    private init() {
+        memoryObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            // 请求还在等签名时先别拆；结束后 idle 计时会回收。
+            guard self.activeRequests == 0 else { return }
+            self.stop(reason: "memory warning")
+        }
+    }
+
+    deinit {
+        if let memoryObserver {
+            NotificationCenter.default.removeObserver(memoryObserver)
+        }
     }
 
     /// 内部失败原因，最后统一翻译成 `XhsError`。
@@ -48,6 +74,8 @@ final class XhsSigner {
     // MARK: - 对外
 
     func sign(path: String, payload: [String: Any]) async throws -> Signature {
+        beginRequest()
+        defer { endRequest() }
         let payloadJSON = try Self.jsonLiteral(payload)
         var lastFailure: Failure = .notReady
 
@@ -84,6 +112,7 @@ final class XhsSigner {
         guard !LaunchGuard.webViewsBlocked else { return }
         DispatchQueue.main.async {
             _ = self.ensureWebView()
+            self.touch()
         }
     }
 
@@ -123,6 +152,35 @@ final class XhsSigner {
         }
     }
 
+    /// 拆掉隐藏页，把 WebContent 占的几百 MB 还给系统。
+    ///
+    /// 只清页面和容器，不清 `cookieHeader`：下次需要签名时 `ensureWebView`
+    /// 会拿最新 cookie 重新灌进去，登录态不丢。
+    func stop(reason: String) {
+        let work: () -> Void = {
+            self.idleWorkItem?.cancel()
+            self.idleWorkItem = nil
+            HiddenWebViewSlot.release(self)
+            guard self.webView != nil || self.host != nil else { return }
+            self.webView?.stopLoading()
+            self.webView?.removeFromSuperview()
+            self.host?.removeFromSuperview()
+            self.webView = nil
+            self.host = nil
+            // 下次重建时要重新写一遍 cookie，否则 applyCookies 会以为已写过。
+            self.appliedCookieHeader = ""
+        }
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    func releaseHiddenWebView(reason: String) {
+        stop(reason: reason)
+    }
+
     // MARK: - 页面内请求
 
     /// 页面里跑出来的响应。
@@ -156,6 +214,8 @@ final class XhsSigner {
                 needLogin: false
             )
         }
+        beginRequest()
+        defer { endRequest() }
         await MainActor.run {
             _ = self.ensureWebView()
         }
@@ -427,11 +487,13 @@ final class XhsSigner {
 
     /// 必须在主线程调用。
     private func ensureWebView() -> WKWebView {
+        HiddenWebViewSlot.take(self)
         if let webView = webView {
             // 上次创建时窗口还没就绪（`attachToWindow` 会直接返回），
             // 页面就一直在窗口外面，rAF 被冻住，签名永远算不出来。
             // 每次拿到已有的页面都补挂一次。
             if host == nil { attachToWindow(webView) }
+            touch()
             return webView
         }
         let configuration = WKWebViewConfiguration()
@@ -447,6 +509,7 @@ final class XhsSigner {
         attachToWindow(view)
         // `load` 会作为 `() -> Void` 传出去；不写类型会被推断成 `() -> WKNavigation?`。
         let load: () -> Void = {
+            guard self.webView === view else { return }
             guard let url = URL(string: "https://www.xiaohongshu.com/explore") else { return }
             _ = view.load(URLRequest(url: url))
         }
@@ -456,7 +519,40 @@ final class XhsSigner {
         } else {
             write(cookies, completion: load)
         }
+        touch()
         return view
+    }
+
+    private func beginRequest() {
+        DispatchQueue.main.async {
+            self.activeRequests += 1
+            self.idleWorkItem?.cancel()
+            self.idleWorkItem = nil
+        }
+    }
+
+    private func endRequest() {
+        DispatchQueue.main.async {
+            self.activeRequests = max(self.activeRequests - 1, 0)
+            self.touch()
+        }
+    }
+
+    private func touch() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.touch()
+            }
+            return
+        }
+        guard webView != nil, activeRequests == 0 else { return }
+        idleWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.activeRequests == 0 else { return }
+            self.stop(reason: "idle")
+        }
+        idleWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.idleLifetime, execute: work)
     }
 
     /// 把隐藏页面塞进当前窗口的最底层。

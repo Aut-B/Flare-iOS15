@@ -212,6 +212,12 @@ final class WereadStore: ObservableObject {
                         self?.extractReaderLinks()
                     }
                 },
+                onFail: { [weak self, weak harvester] _ in
+                    // 页面打不开就别继续养着 1280×1600 的 WebContent，
+                    // 立刻收尾（仍会先抄一遍 DOM，拿不到就返回空）。
+                    guard let self = self, let harvester = harvester else { return }
+                    self.finishHarvest(from: harvester)
+                },
                 onMessage: { [weak self] message in
                     self?.ingestShelf(message)
                 }

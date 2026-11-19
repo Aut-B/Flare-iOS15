@@ -3,6 +3,46 @@ import UIKit
 import WebKit
 import os
 
+/// 后台 WKWebView 的互斥槽。
+///
+/// Flare 有两个隐藏页面：小红书签名页（`XhsSigner`）和抓取页
+/// （`WebPageHarvester`）。6S 的 JetsamEvent 里两个 WebContent 分别占
+/// 519MB / 404MB、主进程 289MB，free 只剩 48MB —— 只要两个 1280×1600
+/// 的页面同时活着就足以被系统按 highwater 强杀。
+///
+/// 所有隐藏页创建前都必须 `take` 这个槽：旧的会被同步拆掉，保证任一
+/// 时刻只有一个 WebContent 在跑。
+protocol HiddenWebViewOwner: AnyObject {
+    func releaseHiddenWebView(reason: String)
+}
+
+enum HiddenWebViewSlot {
+    private static weak var owner: AnyObject?
+    private static let log = Logger(subsystem: "dev.dimension.flare.harvest", category: "slot")
+
+    static func take(_ next: HiddenWebViewOwner) {
+        let work: () -> Void = {
+            let previous = owner
+            owner = next
+            guard let previous, previous !== (next as AnyObject) else { return }
+            log.info("hidden web view slot: stopping previous")
+            (previous as? HiddenWebViewOwner)?.releaseHiddenWebView(
+                reason: "another hidden page started"
+            )
+        }
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    static func release(_ current: HiddenWebViewOwner) {
+        guard let owner, owner === (current as AnyObject) else { return }
+        self.owner = nil
+    }
+}
+
 /// 在一个「真的」网页里跑请求，把接口返回的 JSON 偷出来。
 ///
 /// 小红书和微信读书的 web 接口都要签名 + 浏览器指纹。用 `URLSession` 从原生
@@ -17,7 +57,7 @@ import os
 /// 尺寸也很关键：页面按 1280 宽（桌面版）布局，再整体缩到窗口最底层。
 /// 之前直接给 390 宽，小红书会判定成窄屏 / 手机版，压根不请求 `homefeed`，
 /// 表现就是「加载半天没抓到首页数据」。
-final class WebPageHarvester: NSObject, WKNavigationDelegate {
+final class WebPageHarvester: NSObject, WKNavigationDelegate, HiddenWebViewOwner {
     struct Message {
         let url: String
         let body: String
@@ -38,9 +78,15 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
     private var webView: WKWebView?
     private var host: UIView?
     private var handler: Handler?
+    private var idleWorkItem: DispatchWorkItem?
+    private var memoryObserver: NSObjectProtocol?
     private var onMessage: ((Message) -> Void)?
     private var onFinish: (() -> Void)?
     private var onFail: ((String) -> Void)?
+
+    /// 页面空闲这么久就回收。6S 上一个 1280×1600 的 WebContent 常驻
+    /// 400MB 以上，抓完数据后没有理由一直养着。
+    private static let idleLifetime: TimeInterval = 60
 
     private var startURL = ""
     private var userAgent = ""
@@ -55,6 +101,25 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
     var isRunning: Bool { webView != nil }
 
     // MARK: - 对外
+
+    override init() {
+        super.init()
+        // 内存警告时先保命：已经 ingest 过的数据不受影响，拆掉页面
+        // 能立刻把 WebContent 占的几百 MB 还给系统。
+        memoryObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.stop()
+        }
+    }
+
+    deinit {
+        if let memoryObserver {
+            NotificationCenter.default.removeObserver(memoryObserver)
+        }
+    }
 
     func start(
         url: String,
@@ -88,6 +153,7 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
     /// 在页面上下文里跑一段 JS，拿字符串结果。
     func evaluate(_ script: String, completion: ((String) -> Void)? = nil) {
         DispatchQueue.main.async {
+            self.touch()
             guard let view = self.webView else {
                 completion?("")
                 return
@@ -111,6 +177,7 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
 
     func reload() {
         DispatchQueue.main.async {
+            self.touch()
             self.webView?.reload()
         }
     }
@@ -124,12 +191,14 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
     // MARK: - 建页面
 
     private func build(patterns: [String]) {
-        // 同一时刻只允许一个隐藏页。旧的先停，避免 6S 上两个页面同时渲染把
-        // 内存/唤醒顶爆。stop() 是异步的，所以这里不等它，直接替换 current。
+        // 同一时刻只允许一个隐藏页。这里必须**同步**拆掉旧的：stop() 走异步
+        // 队列时，新页面已经开始加载、旧页面还活着一两拍，6S 上就足以让内存
+        // 峰值多出几百 MB。build 本身在主线程，直接 teardown 是安全的。
         if let previous = Self.current, previous !== self {
-            previous.stop()
+            previous.teardownNow()
         }
         Self.current = self
+        HiddenWebViewSlot.take(self)
         if let host = URL(string: startURL)?.host {
             Self.log.info("harvester start host=\(host, privacy: .public)")
         }
@@ -166,7 +235,7 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
         attach(view)
 
         let load: () -> Void = { [weak self] in
-            guard let self = self, let view = self.webView else { return }
+            guard let self = self, self.webView === view else { return }
             guard let target = URL(string: self.startURL) else { return }
             view.load(URLRequest(url: target))
         }
@@ -177,9 +246,13 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
             // 就不写了，页面会带着旧 session 被踢去登录页，首页流一条都抓不到。
             CookieJar.write(cookieHeader, domainSuffix: cookieDomain, completion: load)
         }
+        touch()
     }
 
     private func teardown() {
+        idleWorkItem?.cancel()
+        idleWorkItem = nil
+        HiddenWebViewSlot.release(self)
         if Self.current === self {
             Self.current = nil
             Self.log.info("harvester stop")
@@ -197,6 +270,39 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
         webView = nil
         handler = nil
         currentURL = ""
+    }
+
+    /// 主线程上立即拆页面；不在主线程时转主线程。
+    private func teardownNow() {
+        if Thread.isMainThread {
+            teardown()
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.teardown()
+            }
+        }
+    }
+
+    func releaseHiddenWebView(reason: String) {
+        Self.log.info("harvester released: \(reason, privacy: .public)")
+        teardownNow()
+    }
+
+    /// 每次页面活动都重置空闲计时；空闲到点自动 stop，避免页面无限常驻。
+    private func touch() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.touch()
+            }
+            return
+        }
+        guard webView != nil else { return }
+        idleWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.stop()
+        }
+        idleWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.idleLifetime, execute: work)
     }
 
     private func attach(_ view: WKWebView) {
@@ -233,6 +339,7 @@ final class WebPageHarvester: NSObject, WKNavigationDelegate {
     // MARK: - 回调
 
     private func handle(_ message: Message) {
+        touch()
         onMessage?(message)
     }
 

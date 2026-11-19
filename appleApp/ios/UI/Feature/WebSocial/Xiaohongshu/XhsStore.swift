@@ -162,6 +162,11 @@ final class XhsStore: ObservableObject {
             self.errorMessage = nil
             self.hasMore = true
             self.receivedAnything = false
+            // 本轮优先用签名页打接口：先把上一轮的抓取页拆掉，避免
+            // 6S 上签名页 + 抓取页两个 WebContent 同时活着（519MB + 404MB）。
+            self.harvester?.stop()
+            self.harvester = nil
+            self.harvesterFollow = nil
             // 这里**不清空** notes：刷新失败时旧内容还在，用户不会对着一片空白。
             // 成功时 `merge(replace: true)` 会整批换掉。
         }
@@ -169,17 +174,14 @@ final class XhsStore: ObservableObject {
         // 以匿名会话加载，homefeed 返回 -100 后 logout() 连 xhs.cookie 一起删掉。
         // 先把已保存的会话灌给签名页；cookie 没变时 `applyCookies` 不会重载。
         XhsSigner.shared.applyCookies(cookie)
-        // 签名页早点拉起来：等用户点开笔记再创建，评论区要多等十几秒。
-        XhsSigner.shared.warmUp()
-        startHarvester(reload: true)
-        // 网页首屏要跑一会儿 JS，DOM / `__INITIAL_STATE__` 是兜底。
-        scheduleDOMHarvest(delays: [2.5, 5.0])
 
         // 超时要在发请求**之前**挂上：接口自己最多耗 12 秒，
         // 挂晚了用户就得对着转圈等两倍时间。
         DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in
             guard let self = self else { return }
             guard token == self.generation, self.isLoading else { return }
+            // 已经切到抓取页兜底时交给它自己的 8 秒超时，别在这里提前报错。
+            guard self.harvester == nil else { return }
             self.isLoading = false
             if self.notes.isEmpty {
                 self.errorMessage = self.failureMessage()
@@ -188,7 +190,26 @@ final class XhsStore: ObservableObject {
 
         // 首页流优先走 `homefeed` 接口：它带 `cursor_score`，能一直往下翻，
         // 也比网页首屏那份服务端渲染的通用列表更接近 App 里的推荐流。
-        _ = await loadFeedPage(reset: true, token: token)
+        let gotPages = await loadFeedPage(reset: true, token: token)
+        guard token == generation, !gotPages, notes.isEmpty else { return }
+
+        // 接口没给数据才启用抓取页兜底。这时签名页那一轮请求已经结束，
+        // 互斥槽会把签名页拆掉再建抓取页，任一时刻仍只有一个隐藏页。
+        startHarvester(reload: true)
+        // 网页首屏要跑一会儿 JS，DOM / `__INITIAL_STATE__` 是兜底。
+        scheduleDOMHarvest(delays: [2.5, 5.0])
+        DispatchQueue.main.async {
+            self.isLoading = true
+            self.errorMessage = nil
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self = self else { return }
+            guard token == self.generation, self.isLoading else { return }
+            self.isLoading = false
+            if self.notes.isEmpty {
+                self.errorMessage = self.failureMessage()
+            }
+        }
     }
 
     /// 用户点「重试」：安全模式也放行一次，别让人卡在「什么都点不动」。
