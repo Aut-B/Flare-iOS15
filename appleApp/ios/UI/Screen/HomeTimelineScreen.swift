@@ -329,6 +329,10 @@ struct HomeTimelineScreen: View {
                 } loadingContent: {
                     Image(fontAwesome: .gear)
                 }
+                // 头像/齿轮本身不参与命中测试，整块交给外层 Button。
+                // 之前即使包了 Button，AvatarView 内部的异步图片仍可能吞掉点击，
+                // 左上角看起来有按钮却点不动；这里彻底让内容不接收触摸。
+                .allowsHitTesting(false)
                 .frame(width: 30, height: 30)
                 .contentShape(Rectangle())
             }
