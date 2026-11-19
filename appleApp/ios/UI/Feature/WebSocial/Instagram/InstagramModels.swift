@@ -158,12 +158,27 @@ enum IGJSON {
         return nil
     }
 
+    /// 6S 等老机型拉 1080p/更高码率容易一直转圈或只播开头。
+    /// 按短边取 720p 以内最大的一档，全都更大时才退回最小的一档；
+    /// 只要存在渐进式 mp4 就不用 HLS 分片，避免老机型分片缓冲不动。
     static func videoURL(_ media: [String: Any]) -> String? {
-        let versions = array(media["video_versions"])
-        let best = versions.max { lhs, rhs in
-            int(lhs["width"]) < int(rhs["width"])
+        let versions = array(media["video_versions"]).compactMap { version -> (url: String, shortEdge: Int, isStreaming: Bool)? in
+            guard let url = string(version["url"]) else { return nil }
+            let width = int(version["width"])
+            let height = int(version["height"])
+            let shortEdge = width > 0 && height > 0 ? min(width, height) : 0
+            let lowercased = url.lowercased()
+            let isStreaming = lowercased.contains(".m3u8") || lowercased.contains(".mpd")
+            return (url, shortEdge, isStreaming)
         }
-        return string(best?["url"])
+        guard !versions.isEmpty else { return nil }
+        let progressive = versions.filter { !$0.isStreaming }
+        let pool = progressive.isEmpty ? versions : progressive
+        let sized = pool.filter { $0.shortEdge > 0 }
+        let preferred =
+            sized.filter { $0.shortEdge <= 720 }.max { $0.shortEdge < $1.shortEdge }
+                ?? sized.min { $0.shortEdge < $1.shortEdge }
+        return preferred?.url ?? pool[0].url
     }
 
     static func user(_ value: Any?) -> IGUser? {

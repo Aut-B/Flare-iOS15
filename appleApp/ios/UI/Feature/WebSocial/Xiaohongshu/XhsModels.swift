@@ -192,19 +192,33 @@ enum XhsJSON {
     }
 
     /// 视频直链。`video.media.stream` 里按编码分了 h264 / h265 / av1 三档，
-    /// 挑第一个有 `master_url` 的；老设备上 h264 最稳，所以放最前面。
+    /// 老设备上 h264 最稳，所以编码顺序不变。
+    /// 同一编码可能有多档清晰度：优先短边 <= 720 的最大一档，避免 6S 先拉 1080p/4K
+    /// 后缓冲不动；只要存在渐进式 mp4 就不用 HLS 分片，全都没有时才退回分片。
     static func videoURL(_ value: Any?) -> String? {
         guard let video = object(value), let media = object(video["media"]) else { return nil }
         guard let stream = object(media["stream"]) else { return nil }
         for codec in ["h264", "h265", "av1"] {
-            let list = array(stream[codec])
-            guard let first = list.first else { continue }
-            if let url = string(first["master_url"]) {
-                return url
+            let candidates = array(stream[codec]).compactMap { item -> (url: String, shortEdge: Int, isStreaming: Bool)? in
+                let url =
+                    string(item["master_url"])
+                        ?? (item["backup_urls"] as? [String])?.first(where: { !$0.isEmpty })
+                guard let url else { return nil }
+                let width = int(item["width"])
+                let height = int(item["height"])
+                let shortEdge = width > 0 && height > 0 ? min(width, height) : 0
+                let lowercased = url.lowercased()
+                let isStreaming = lowercased.contains(".m3u8") || lowercased.contains(".mpd")
+                return (url, shortEdge, isStreaming)
             }
-            if let backups = first["backup_urls"] as? [String], let url = backups.first {
-                return url
-            }
+            guard !candidates.isEmpty else { continue }
+            let progressive = candidates.filter { !$0.isStreaming }
+            let pool = progressive.isEmpty ? candidates : progressive
+            let sized = pool.filter { $0.shortEdge > 0 }
+            let preferred =
+                sized.filter { $0.shortEdge <= 720 }.max { $0.shortEdge < $1.shortEdge }
+                    ?? sized.min { $0.shortEdge < $1.shortEdge }
+            return preferred?.url ?? pool[0].url
         }
         return nil
     }

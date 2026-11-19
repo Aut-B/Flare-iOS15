@@ -117,12 +117,14 @@ private fun Status.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
                     val height = it.pagePic?.height?.toFloatOrNull() ?: 0f
                     val width = it.pagePic?.width?.toFloatOrNull() ?: 0f
                     val previewUrl = it.pagePic?.url
+                    // 6S 等老机型优先吃标清 mp4，避免 720p/HD 高码率先把老机型拖死；
+                    // mp4 全缺时才退回 stream（流式分片在老机型上更容易卡住或只播开头）。
                     val videoUrl =
-                        it.urls?.mp4720PMp4
+                        it.urls?.mp4LdMp4
+                            ?: it.urls?.mp4720PMp4
                             ?: it.urls?.mp4HDMp4
-                            ?: it.urls?.mp4LdMp4
-                            ?: it.mediaInfo?.streamURLHD
                             ?: it.mediaInfo?.streamURL
+                            ?: it.mediaInfo?.streamURLHD
                     if (videoUrl != null && previewUrl != null) {
                         UiMedia.Video(
                             url = videoUrl,
