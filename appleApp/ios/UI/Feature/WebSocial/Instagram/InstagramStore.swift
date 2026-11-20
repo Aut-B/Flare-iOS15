@@ -166,7 +166,7 @@ final class InstagramStore: ObservableObject {
 
     /// 按钮显示用的状态：没有本地覆盖时就用接口返回的 `has_liked` / `like_count`。
     func likeState(for media: IGMedia) -> IGLikeState {
-        let mediaId = Self.requestMediaId(media.id)
+        let mediaId = InstagramService.mediaID(media.id)
         return likeOverrides[mediaId] ?? IGLikeState(liked: media.hasLiked, count: media.likeCount)
     }
 
@@ -179,7 +179,7 @@ final class InstagramStore: ObservableObject {
     }
 
     private func setLiked(_ media: IGMedia, liked: Bool) async throws {
-        let mediaId = Self.requestMediaId(media.id)
+        let mediaId = InstagramService.mediaID(media.id)
         guard beginLike(mediaId) else { return }
         defer { endLike(mediaId) }
 
@@ -214,15 +214,6 @@ final class InstagramStore: ObservableObject {
             }
             throw error
         }
-    }
-
-    /// 时间线返回的 `id` 常是 `<pk>_<user pk>`，但点赞路径和表单只认数字 `pk`。
-    /// 同时用它做覆盖键，确保时间线与详情页指向同一篇帖子。
-    private static func requestMediaId(_ id: String) -> String {
-        guard let separator = id.firstIndex(of: "_") else { return id }
-        let prefix = id[..<separator]
-        guard !prefix.isEmpty, prefix.allSatisfy({ $0.isNumber }) else { return id }
-        return String(prefix)
     }
 
     private func beginLike(_ mediaId: String) -> Bool {
@@ -270,6 +261,8 @@ final class InstagramStore: ObservableObject {
                 self.lastLoadMoreCursor = nil
                 // 刷新拿到的是服务端权威状态，清掉上一轮的本地覆盖。
                 self.likeOverrides = [:]
+                // 首屏先并发预取前几张封面，不用等卡片全部布局完才逐个 onAppear。
+                IGImageCache.shared.prefetch(result.items.prefix(4).compactMap(\.cover))
             }
         } catch {
             handle(error)
@@ -286,8 +279,10 @@ final class InstagramStore: ObservableObject {
             let result = try await InstagramService.shared.homeFeed(cursor: cursor)
             DispatchQueue.main.async {
                 let known = Set(self.feed.map { $0.id })
-                self.feed.append(contentsOf: result.items.filter { !known.contains($0.id) })
+                let added = result.items.filter { !known.contains($0.id) }
+                self.feed.append(contentsOf: added)
                 self.nextCursor = result.next
+                IGImageCache.shared.prefetch(added.prefix(4).compactMap(\.cover))
             }
         } catch {
             handle(error)

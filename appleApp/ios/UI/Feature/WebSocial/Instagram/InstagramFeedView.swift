@@ -291,12 +291,12 @@ struct IGMediaCard: View {
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
             if !media.caption.isEmpty {
-                Text(media.caption)
-                    .font(.system(size: 13))
-                    .lineLimit(4)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .contentShape(Rectangle())
-                    .onTapGesture(perform: onOpen)
+                IGCaptionView(
+                    text: media.caption,
+                    fontSize: 13,
+                    lineLimit: 4,
+                    onOpen: onOpen
+                )
             }
         }
         .padding(.horizontal, 12)

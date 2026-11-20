@@ -31,9 +31,7 @@ struct InstagramPostView: View {
                 IGActionBar(media: current, onComment: { commentFocused = true })
                 statsRow
                 if !current.caption.isEmpty {
-                    Text(current.caption)
-                        .font(.system(size: 14))
-                        .fixedSize(horizontal: false, vertical: true)
+                    IGCaptionView(text: current.caption)
                         .padding(.horizontal, 14)
                         .padding(.top, 4)
                 }
@@ -52,11 +50,15 @@ struct InstagramPostView: View {
             }
         }
         .task {
-            // 时间线里的字段是精简过的，进详情再拉一次拿全量（含视频地址）。
+            // 详情和评论互不依赖：详情拿全量媒体字段，评论同时开始请求，
+            // 不让 20s 级的详情超时把评论区一起拖住。
             if detail == nil {
-                detail = try? await InstagramService.shared.media(pk: media.id)
+                async let detailRequest = InstagramService.shared.media(pk: media.id)
+                await loadComments()
+                detail = try? await detailRequest
+            } else {
+                await loadComments()
             }
-            await loadComments()
         }
         .sheet(isPresented: $showWeb) {
             NavigationView {
@@ -264,6 +266,10 @@ struct InstagramPostView: View {
                 showWeb = true
             }
             .font(.system(size: 12, weight: .semibold))
+            Button("重试") {
+                Task { await loadComments() }
+            }
+            .font(.system(size: 12, weight: .semibold))
         }
         .padding(10)
         .background(Color.orange.opacity(0.1))
@@ -275,7 +281,7 @@ struct InstagramPostView: View {
         commentError = nil
         defer { isLoadingComments = false }
         do {
-            comments = try await InstagramService.shared.comments(mediaId: current.id)
+            comments = try await InstagramService.shared.comments(mediaId: media.id)
         } catch {
             commentError = error.localizedDescription
         }
@@ -288,13 +294,15 @@ struct InstagramPostView: View {
         Task {
             do {
                 let created = try await InstagramService.shared.addComment(
-                    mediaId: current.id,
+                    mediaId: media.id,
                     text: text
                 )
                 commentText = ""
                 commentFocused = false
                 if let created = created {
                     comments.append(created)
+                } else {
+                    await loadComments()
                 }
                 IGToast.success("评论已发送")
             } catch {
@@ -487,6 +495,10 @@ struct InstagramProfileView: View {
             let result = try await InstagramService.shared.profile(userName: userName)
             user = result.user
             media = result.media
+            // 九宫格首屏同样先并发取前几张缩略图，避免逐张 onAppear 才发请求。
+            DispatchQueue.main.async {
+                IGImageCache.shared.prefetch(result.media.prefix(6).compactMap(\.cover), limit: 6)
+            }
         } catch {
             errorText = error.localizedDescription
         }

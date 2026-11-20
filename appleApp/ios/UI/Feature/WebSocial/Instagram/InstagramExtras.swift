@@ -5,6 +5,7 @@ import UIKit
 import Drops
 import FlareAppleCore
 import FlareAppleUI
+import KotlinSharedUI
 
 /// Instagram 的 CDN 视频同样会校验 Referer / UA / 登录 cookie。
 /// 直接 `AVPlayer(url:)` 在 6s 上就是一直转圈，所以统一从这里造播放器。
@@ -37,6 +38,137 @@ enum IGToast {
 
     static func success(_ text: String) {
         Drops.show(.init(title: text, icon: UIImage(fontAwesome: .circleCheck)))
+    }
+}
+
+/// Instagram 正文和项目里的时间线共用同一套翻译 Presenter。
+///
+/// 设置里开了「自动翻译」就直接显示译文；没开时保留「翻译 / 显示原文」按钮，
+/// 不需要用户离开 App 去复制文本。
+struct IGCaptionView: View {
+    let text: String
+    var fontSize: CGFloat = 14
+    var lineLimit: Int? = nil
+    var onOpen: (() -> Void)? = nil
+
+    @Environment(\.translateConfig) private var translateConfig
+    @State private var showTranslation = false
+
+    private var shouldTranslate: Bool {
+        translateConfig.preTranslate || showTranslation
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if shouldTranslate {
+                IGTranslatedText(text: text, fontSize: fontSize, lineLimit: lineLimit)
+                    .id(text)
+                if translateConfig.showOriginalWithTranslation {
+                    originalText
+                }
+            } else {
+                originalText
+            }
+            if !translateConfig.preTranslate {
+                Button(showTranslation ? "显示原文" : "翻译") {
+                    showTranslation.toggle()
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var originalText: some View {
+        Text(text)
+            .font(.system(size: fontSize))
+            .lineLimit(lineLimit)
+            .fixedSize(horizontal: false, vertical: true)
+            .contentShape(Rectangle())
+            .onTapGesture { onOpen?() }
+    }
+}
+
+private struct IGTranslatedText: View {
+    let text: String
+    let fontSize: CGFloat
+    let lineLimit: Int?
+
+    @StateObject private var presenter: KotlinPresenter<UiState<UiRichText>>
+
+    init(text: String, fontSize: CGFloat, lineLimit: Int?) {
+        self.text = text
+        self.fontSize = fontSize
+        self.lineLimit = lineLimit
+        _presenter = StateObject(
+            wrappedValue: KotlinPresenter(
+                presenter: TranslatePresenter(
+                    source: Self.richText(text),
+                    targetLanguage: flareCurrentLanguageCode
+                )
+            )
+        )
+    }
+
+    var body: some View {
+        StateView(state: presenter.state) { translated in
+            RichText(text: translated)
+                .font(.system(size: fontSize))
+                .lineLimit(lineLimit)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        } errorContent: { error in
+            VStack(alignment: .leading, spacing: 3) {
+                Text(text)
+                    .font(.system(size: fontSize))
+                    .lineLimit(lineLimit)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("翻译失败：\(error.message ?? "未知错误")")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        } loadingContent: {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .scaleEffect(0.7)
+                Text("翻译中…")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private static func richText(_ text: String) -> UiRichText {
+        UiRichText(
+            renderRuns: [
+                RenderContent.Text(
+                    runs: [
+                        RenderRun.Text(
+                            text: text,
+                            style: RenderTextStyle(
+                                link: nil,
+                                bold: false,
+                                italic: false,
+                                strikethrough: false,
+                                monospace: false,
+                                code: false,
+                                underline: false,
+                                small: false,
+                                time: false,
+                                imageLink: nil
+                            )
+                        ),
+                    ],
+                    block: RenderBlockStyle()
+                ),
+            ],
+            isRtl: false,
+            raw: text,
+            innerText: text,
+            imageUrls: []
+        )
     }
 }
 
@@ -162,6 +294,7 @@ final class IGImageCache {
         let configuration = URLSessionConfiguration.default
         configuration.requestCachePolicy = .returnCacheDataElseLoad
         configuration.timeoutIntervalForRequest = 20
+        configuration.httpMaximumConnectionsPerHost = 6
         configuration.urlCache = URLCache(
             memoryCapacity: 24 * 1024 * 1024,
             diskCapacity: 160 * 1024 * 1024,
@@ -184,11 +317,22 @@ final class IGImageCache {
             return
         }
         waiters[url] = [completion]
-        load(url, original: url, withCookie: true)
+        load(url, original: url, withCookie: false)
     }
 
-    /// 先带 cookie 请求；失败后去掉 cookie 再试一次（图床是签名直链，
-    /// 有时带着网页 cookie 反而被拒）。
+    /// 首屏先并发拉前几张封面。只预取封面、不预取轮播里的全部子图，
+    /// 免得登录后刚拿到时间线就把 6S 的网络和图片解码占满。
+    func prefetch(_ urls: [String], limit: Int = 4) {
+        for url in urls.prefix(limit) where !url.isEmpty {
+            if cache.object(forKey: url as NSString) == nil {
+                image(for: url) { _ in }
+            }
+        }
+    }
+
+    /// 图床是带签名的 CDN 直链，通常不需要网页 cookie。以前先带整段
+    /// Instagram cookie，6S 上经常会卡到超时才回落；现在先无 cookie 取，
+    /// 失败再带 cookie 重试，私密账号的图仍然能显示。
     private func load(_ raw: String, original: String, withCookie: Bool) {
         var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.hasPrefix("//") { value = "https:" + value }
@@ -215,8 +359,8 @@ final class IGImageCache {
             let image = data.flatMap { UIImage(data: $0) }
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                if image == nil, withCookie {
-                    self.load(raw, original: original, withCookie: false)
+                if image == nil, !withCookie, !InstagramStore.shared.cookie.isEmpty {
+                    self.load(raw, original: original, withCookie: true)
                     return
                 }
                 self.finish(original, image: image)

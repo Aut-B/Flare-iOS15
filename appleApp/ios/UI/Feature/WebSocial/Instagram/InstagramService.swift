@@ -151,7 +151,7 @@ final class InstagramService {
     // MARK: - 单条帖子
 
     func media(pk: String) async throws -> IGMedia {
-        let json = try await request("\(base)/api/v1/media/\(pk)/info/")
+        let json = try await request("\(base)/api/v1/media/\(Self.mediaID(pk))/info/")
         let items = IGJSON.array(json["items"])
         guard let media = items.compactMap({ IGJSON.media($0) }).first else {
             throw IGError(message: "帖子已删除或不可见", needLogin: false)
@@ -176,30 +176,42 @@ final class InstagramService {
     /// 点赞 / 取消点赞共用一套请求：cookie、`X-CSRFToken`（cookie 里的
     /// `csrftoken`）、桌面 UA、`X-IG-App-ID` 都跟读接口完全一致，不需要额外签名。
     private func setLiked(_ mediaId: String, action: String) async throws {
+        let id = Self.mediaID(mediaId)
         _ = try await request(
-            "\(base)/api/v1/web/likes/\(mediaId)/\(action)/",
+            "\(base)/api/v1/web/likes/\(id)/\(action)/",
             method: "POST",
-            formBody: "media_id=\(mediaId)",
+            formBody: "media_id=\(id)",
             interaction: true
         )
     }
 
     func comments(mediaId: String) async throws -> [IGComment] {
         let json = try await request(
-            "\(base)/api/v1/media/\(mediaId)/comments/?can_support_threading=true&permalink_enabled=false"
+            "\(base)/api/v1/media/\(Self.mediaID(mediaId))/comments/?can_support_threading=true&permalink_enabled=false"
         )
         return IGJSON.array(json["comments"]).compactMap { IGJSON.comment($0) }
     }
 
     @discardableResult
     func addComment(mediaId: String, text: String) async throws -> IGComment? {
+        let id = Self.mediaID(mediaId)
         let json = try await request(
-            "\(base)/api/v1/web/comments/add/\(mediaId)/",
+            "\(base)/api/v1/web/comments/add/\(id)/",
             method: "POST",
             formBody: "comment_text=\(Self.percentEncode(text))",
             interaction: true
         )
         return IGJSON.comment(json["comment"])
+    }
+
+    /// Instagram 部分入口返回的是 `<media pk>_<user pk>` 复合 id，而媒体、评论
+    /// 和点赞接口的路径只认前半段数字 pk。统一在这里收口，避免某个入口漏掉。
+    static func mediaID(_ raw: String) -> String {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let separator = value.firstIndex(of: "_") else { return value }
+        let prefix = value[..<separator]
+        guard !prefix.isEmpty, prefix.allSatisfy({ $0.isNumber }) else { return value }
+        return String(prefix)
     }
 
     // MARK: - 底层
@@ -310,6 +322,11 @@ final class InstagramService {
                 message: message.isEmpty ? "请求失败（HTTP \(status)）" : message,
                 needLogin: false
             )
+        }
+        if interaction, json.isEmpty {
+            // 点赞 / 取消点赞在部分网页会话里就是 204 或空 body；HTTP 2xx 已经
+            // 成功，不能因为「没 JSON 可解析」再把用户刚点亮的爱心回滚。
+            return [:]
         }
         guard !json.isEmpty else {
             throw IGError(message: "接口返回格式异常", needLogin: false)
