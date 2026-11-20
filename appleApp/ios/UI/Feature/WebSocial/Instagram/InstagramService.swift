@@ -328,7 +328,7 @@ final class InstagramService {
         // 网页版只有拿到真实 claim 才带这个头。以前这里缺省填 `"0"`，
         // 等于主动告诉服务端「这个会话没有 claim」，点赞 / 评论更容易被判
         // feedback_required。没有就不发，让服务端按 cookie 自己判断。
-        if let claim = CookieJar.value(inHeader: cookie, named: "x-ig-www-claim"),
+        if let claim = IGSession.value(inHeader: cookie, named: "x-ig-www-claim"),
            !claim.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             urlRequest.setValue(
                 Self.sanitizeHeader(claim),
@@ -348,7 +348,7 @@ final class InstagramService {
         urlRequest.setValue("3brTvw==", forHTTPHeaderField: "X-IG-Capabilities")
         urlRequest.setValue("WIFI", forHTTPHeaderField: "X-IG-Connection-Type")
         urlRequest.setValue("Liger", forHTTPHeaderField: "X-FB-HTTP-Engine")
-        let safeCookie = Self.sanitizeHeader(cookie)
+        let safeCookie = IGSession.normalizeCookieHeader(cookie)
         if !safeCookie.isEmpty {
             urlRequest.setValue(safeCookie, forHTTPHeaderField: "Cookie")
         }
@@ -356,7 +356,7 @@ final class InstagramService {
         // `csrftoken`，避免写操作因为漏了一次 `pushCredentials()` 就 403。
         let rawCSRF =
             csrfToken.isEmpty
-                ? (CookieJar.value(inHeader: cookie, named: "csrftoken") ?? "")
+                ? (IGSession.value(inHeader: cookie, named: "csrftoken") ?? "")
                 : csrfToken
         let safeCSRF = Self.sanitizeHeader(rawCSRF)
         if !safeCSRF.isEmpty {
@@ -430,13 +430,7 @@ final class InstagramService {
     /// HTTP 头只能放可见 ASCII。换行 / 中文 / 控制字符会让 `setValue` 抛
     /// ObjC 异常 —— 那是 SIGABRT，Kotlin 那边也接不住，表现就是登录成功后闪退。
     static func sanitizeHeader(_ value: String) -> String {
-        var result = ""
-        result.unicodeScalars.reserveCapacity(value.unicodeScalars.count)
-        for scalar in value.unicodeScalars
-        where scalar.isASCII && scalar.value >= 0x20 && scalar.value != 0x7F {
-            result.unicodeScalars.append(scalar)
-        }
-        return result
+        IGSession.sanitizeHeader(value)
     }
 
     /// 接口要一个稳定的设备 id，随便造一个存下来就行。

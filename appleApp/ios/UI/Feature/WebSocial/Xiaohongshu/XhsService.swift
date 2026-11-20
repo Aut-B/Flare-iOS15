@@ -226,6 +226,35 @@ final class XhsService {
         return profile
     }
 
+    /// 冷启动时从系统 cookie 仓库捡回的会话只能当候选。
+    ///
+    /// 登录页在 `clearCookies` 后会先种一个游客 `web_session`，非空不代表
+    /// 已登录。必须用它真的问一次「我是谁」，`selfProfile()` 成功才算
+    /// 有效会话，否则用户会被卡在「假登录态」里，首页一直 -100。
+    ///
+    /// 校验期间会临时改写共享的 `cookie` / 签名页；结束后只在没有新登录
+    /// 插队时恢复 `XhsService.cookie`。签名页不回写旧 cookie：登录页可能
+    /// 已经清空并开始新的扫码会话，回写旧会话会把刚清掉的 cookie 又种回去。
+    func validateSession(cookie candidate: String) async -> Bool {
+        let normalized = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return false }
+        let previous = cookie
+        cookie = normalized
+        XhsSigner.shared.applyCookies(normalized, force: true)
+        defer {
+            // 校验期间用户可能已经扫码登录，别把新 cookie 覆盖掉。
+            if cookie == normalized {
+                cookie = previous
+            }
+        }
+        do {
+            _ = try await selfProfile()
+            return true
+        } catch {
+            return false
+        }
+    }
+
     // MARK: - 底层
 
     private func post(
@@ -271,6 +300,12 @@ final class XhsService {
         var attempt = 0
         var authRetried = false
         while true {
+            // 冷启动后签名页可能还是匿名会话。首页流以前在 `XhsStore.refresh`
+            // 里单独灌过 cookie，但详情 / 评论 / 点赞 / 用户资料都走这里，
+            // 不灌就会拿匿名 cookie 去请求，直接被判 `-100`，看起来像掉登录。
+            if !cookie.isEmpty {
+                XhsSigner.shared.applyCookies(cookie)
+            }
             let result: XhsSigner.PageResult
             do {
                 result = try await XhsSigner.shared.pageRequest(

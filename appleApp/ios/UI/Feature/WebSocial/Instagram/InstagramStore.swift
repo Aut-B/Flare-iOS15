@@ -12,7 +12,8 @@ struct IGLikeState: Equatable {
 /// Instagram 的登录态与首页时间线。
 ///
 /// 凭证就是网页版 cookie（关键是 `sessionid`），存 UserDefaults，
-/// 掉线时接口返回 401，这里清掉登录态让界面回到「重新登录」。
+/// 掉线时接口返回 401 只提示重试，不删 cookie：一次瞬时 401 不代表会话失效，
+/// 删掉反而会让下次冷启动也恢复不回来。只有主动退出 / 隔离才清。
 final class InstagramStore: ObservableObject {
     static let shared = InstagramStore()
     private static let log = Logger(subsystem: "dev.dimension.flare.instagram", category: "like")
@@ -30,6 +31,9 @@ final class InstagramStore: ObservableObject {
     private let defaults = UserDefaults.standard
     private let cookieKey = "instagram.cookie"
     private let userKey = "instagram.username"
+    /// 用户主动退出 / 强制隔离后置 true。只有它为空时才允许
+    /// 从系统 cookie 仓库把旧会话捡回来，否则退出登录会被冷启动撤销。
+    private let loggedOutKey = IGSession.loggedOutKey
     private var nextCursor: String?
     private var loaded = false
     /// 防止重复刷新：`.task` 和下拉刷新同时触发时会叠在一起，
@@ -42,23 +46,45 @@ final class InstagramStore: ObservableObject {
     /// 按钮同时触发时请求乱序，最后把状态翻回去。
     private let likeLock = NSLock()
     private var likeInFlight: Set<String> = []
+    /// 每次登录态真正变化都 +1。WK 异步快照回来时代次变了就丢弃，
+    /// 否则可能用旧 cookie 覆盖用户刚完成的新登录。
+    /// Bridge 可能从任意线程调 `adopt`，所以计数要加锁。
+    private let sessionGenerationLock = NSLock()
+    private var sessionGeneration = 0
 
     private init() {
+        let loggedOut = defaults.bool(forKey: loggedOutKey)
         let stored = defaults.string(forKey: cookieKey) ?? ""
-        let cleaned = InstagramService.sanitizeHeader(stored)
+        // 老版本可能用换行分隔 cookie；先还原分隔符，避免清洗时把值粘坏。
+        let cleaned = IGSession.normalizeCookieHeader(stored)
+        let hasSession = IGSession.hasUsableSession(cleaned)
         // 自愈：老版本可能把带换行 / 中文的脏 cookie 存进过 UserDefaults。
-        // 这种串一旦进了 HTTP 头，setValue 会抛 ObjC 异常（SIGABRT），
-        // 而且覆盖安装不会清 UserDefaults —— 表现就是「登录一次以后再也打不开」。
-        if !stored.isEmpty,
-            cleaned != stored || CookieJar.value(inHeader: cleaned, named: "sessionid") == nil
+        // 这种串一旦进了 HTTP 头，setValue 会抛 ObjC 异常（SIGABRT）。
+        // 但清洗后只要 `sessionid` 还在，就必须把洗干净的串写回去，而不是
+        // 把整段登录态删掉 —— 以前这里一删，覆盖安装后每次冷启动都要重登。
+        if !loggedOut, !stored.isEmpty, hasSession {
+            if cleaned != stored {
+                defaults.set(cleaned, forKey: cookieKey)
+            }
+        } else if !loggedOut,
+            let recovered = Self.recoverCookieFromSharedStorage()
         {
+            // UserDefaults 被旧版本的隔离逻辑清过，但系统 cookie 仓库里
+            // 还留着登录态（IG 网页版仍显示已登录）。这里捡回来，
+            // 冷启动就不用再扫码。
+            defaults.set(recovered, forKey: cookieKey)
+            defaults.removeObject(forKey: userKey)
+        } else {
             defaults.removeObject(forKey: cookieKey)
             defaults.removeObject(forKey: userKey)
         }
         let cookie = defaults.string(forKey: cookieKey) ?? ""
-        isLoggedIn = !cookie.isEmpty
+        isLoggedIn = !loggedOut && IGSession.hasUsableSession(cookie)
         userName = defaults.string(forKey: userKey) ?? ""
         pushCredentials()
+        if !isLoggedIn {
+            recoverFromWebKitIfNeeded()
+        }
     }
 
     /// 启动连续失败时的最后手段：把可能带崩启动路径的凭证丢掉。
@@ -67,6 +93,7 @@ final class InstagramStore: ObservableObject {
         InstagramStateIsolator.requestQuarantineOnNextLaunch()
         UserDefaults.standard.removeObject(forKey: "instagram.cookie")
         UserDefaults.standard.removeObject(forKey: "instagram.username")
+        UserDefaults.standard.set(true, forKey: IGSession.loggedOutKey)
     }
 
     var cookie: String {
@@ -75,9 +102,21 @@ final class InstagramStore: ObservableObject {
 
     // MARK: - 登录态
 
+    private func sessionGenerationToken() -> Int {
+        sessionGenerationLock.lock()
+        defer { sessionGenerationLock.unlock() }
+        return sessionGeneration
+    }
+
+    private func bumpSessionGeneration() {
+        sessionGenerationLock.lock()
+        sessionGeneration += 1
+        sessionGenerationLock.unlock()
+    }
+
     func adopt(cookies: [HTTPCookie]) {
         guard !InstagramStateIsolator.suppressAdoptionThisLaunch else { return }
-        let header = CookieJar.header(cookies, domainSuffix: "instagram.com")
+        let header = IGSession.header(from: cookies, domainSuffix: "instagram.com")
         guard adopt(cookieHeader: header) else { return }
         // 顺手把 cookie 灌进 URLSession 共享仓库，网页兜底页也能直接用。
         CookieJar.syncToSharedStorage(cookies)
@@ -87,20 +126,18 @@ final class InstagramStore: ObservableObject {
     @discardableResult
     func adopt(cookieHeader raw: String) -> Bool {
         guard !InstagramStateIsolator.suppressAdoptionThisLaunch else { return false }
-        let normalized =
-            raw
-                .replacingOccurrences(of: "\r\n", with: "; ")
-                .replacingOccurrences(of: "\n", with: "; ")
-                .replacingOccurrences(of: "\r", with: "; ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = IGSession.normalizeCookieHeader(raw)
         // 只留可见 ASCII：cookie 里混进换行 / 中文时，`URLRequest.setValue`
         // 会抛 ObjC 异常直接闪退（Kotlin 也接不住）。
-        let header = InstagramService.sanitizeHeader(normalized)
-        guard CookieJar.value(inHeader: header, named: "sessionid") != nil else { return false }
+        let header = IGSession.sanitizeHeader(normalized)
+        guard IGSession.hasUsableSession(header) else { return false }
         // Kotlin 每次取数都会把同一份 cookie 同步过来。内容没变就直接返回，
         // 否则会把用户名清空、反复请求 currentUser，时间线看起来一直在闪。
         if isLoggedIn, cookie == header { return true }
+        bumpSessionGeneration()
         defaults.set(header, forKey: cookieKey)
+        // 有新的有效会话，撤销「已主动退出」标记。
+        defaults.set(false, forKey: loggedOutKey)
         // 之前这里把 `ds_user_id`（纯数字）当成用户名存了，界面会显示一串数字。
         // 真正的用户名异步从接口补，拿不到就留空。
         defaults.removeObject(forKey: userKey)
@@ -128,6 +165,9 @@ final class InstagramStore: ObservableObject {
     }
 
     func logout() {
+        // 主动退出不能被下一次冷启动的「系统 cookie 恢复」撤销。
+        bumpSessionGeneration()
+        defaults.set(true, forKey: loggedOutKey)
         defaults.removeObject(forKey: cookieKey)
         defaults.removeObject(forKey: userKey)
         pushCredentials()
@@ -146,13 +186,94 @@ final class InstagramStore: ObservableObject {
         let header = cookie
         let service = InstagramService.shared
         service.cookie = header
-        service.csrfToken = CookieJar.value(inHeader: header, named: "csrftoken") ?? ""
-        service.userId = CookieJar.value(inHeader: header, named: "ds_user_id") ?? ""
+        service.csrfToken = IGSession.value(inHeader: header, named: "csrftoken") ?? ""
+        service.userId = IGSession.value(inHeader: header, named: "ds_user_id") ?? ""
+    }
+
+    /// 从 URLSession 共享仓库里拼回 Instagram 的 cookie。
+    ///
+    /// 旧版本把 UserDefaults 里的 `instagram.cookie` 删掉后，网页版
+    /// （WKWebView）里的会话仍在。这里只做同步读取，不创建任何 WebView。
+    private static func recoverCookieFromSharedStorage() -> String? {
+        guard let cookies = HTTPCookieStorage.shared.cookies else { return nil }
+        let targets = cookies.filter { $0.domain.lowercased().contains("instagram.com") }
+        let header = IGSession.header(from: targets, domainSuffix: "instagram.com")
+        guard IGSession.hasUsableSession(header) else { return nil }
+        return header
+    }
+
+    /// UserDefaults 和共享仓库都没有时，再给 WK 网页仓库一次机会。
+    /// 只读 cookie，不创建 WebView；`adopt` 自己会检查隔离/退出标记。
+    private func recoverFromWebKitIfNeeded() {
+        guard !defaults.bool(forKey: loggedOutKey) else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.isLoggedIn else { return }
+            guard !self.defaults.bool(forKey: self.loggedOutKey),
+                !InstagramStateIsolator.suppressAdoptionThisLaunch
+            else { return }
+            // 等主队列的这一拍里 Bridge 可能已经同步了 cookie；别再用
+            // 启动时的旧结论去 WK 里捞，更不能用旧快照覆盖新会话。
+            if self.hasStoredSession {
+                self.useStoredSession()
+                return
+            }
+            let generation = self.sessionGenerationToken()
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+                DispatchQueue.main.async {
+                    guard !self.defaults.bool(forKey: self.loggedOutKey) else { return }
+                    guard !InstagramStateIsolator.suppressAdoptionThisLaunch else { return }
+                    // 回调期间用户可能已经登录 / Bridge 已经 adopt / 主动退出。
+                    // 旧快照只在登录态没有变化时才允许落盘。
+                    guard generation == self.sessionGenerationToken() else { return }
+                    if self.hasStoredSession {
+                        self.useStoredSession()
+                        return
+                    }
+                    self.adopt(cookies: cookies)
+                    self.refreshAfterRecovery()
+                }
+            }
+        }
+    }
+
+    private var hasStoredSession: Bool {
+        IGSession.hasUsableSession(cookie)
+    }
+
+    /// 会话可能由隔离器的 WK 校验先一步写进 UserDefaults。Store 已经
+    /// 构造完时不会自动读到它，这里补一次内存状态，别让界面停在登录页。
+    private func useStoredSession() {
+        guard hasStoredSession, !defaults.bool(forKey: loggedOutKey) else { return }
+        bumpSessionGeneration()
+        defaults.set(false, forKey: loggedOutKey)
+        pushCredentials()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if !self.isLoggedIn {
+                self.isLoggedIn = true
+                self.errorMessage = nil
+                self.loaded = false
+                self.refreshUserName()
+            }
+            self.refreshAfterRecovery()
+        }
+    }
+
+    /// 恢复晚于首页的 `.task`；`isLoggedIn` 后来才翻成 true，`.task`
+    /// 不会重跑，这里补一次首屏请求。
+    private func refreshAfterRecovery() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isLoggedIn else { return }
+            Task { await self.refreshIfNeeded() }
+        }
     }
 
     private func handle(_ error: Error) {
         if let error = error as? IGError, error.needLogin {
-            logout()
+            // 一次瞬时 401 / login_required 不代表 cookie 真失效。以前这里
+            // 直接 logout()，会把 cookie 和「已主动退出」标记一起改掉，
+            // 之后冷启动再也不会从系统仓库恢复，只能重新扫码。
+            // 保留登录态，只提示重试；真正退出由用户主动触发。
             DispatchQueue.main.async {
                 self.errorMessage = error.message
             }

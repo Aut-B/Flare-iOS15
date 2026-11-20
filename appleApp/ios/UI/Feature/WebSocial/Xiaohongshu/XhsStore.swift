@@ -32,6 +32,8 @@ final class XhsStore: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let cookieKey = "xhs.cookie"
+    /// 只有用户主动退出才置 true，避免冷启动把系统仓库里的旧会话又捡回来。
+    private let loggedOutKey = "xhs.loggedOut"
     private var loaded = false
     private var harvester: WebPageHarvester?
     /// 连续几次滚动都没捞到新内容，就当到底了，别一直空转。
@@ -46,32 +48,190 @@ final class XhsStore: ObservableObject {
     private var lastLoadMoreAt = Date.distantPast
     /// 隐藏网页当前加载的是不是「关注」流。
     private var harvesterFollow: Bool?
+    /// 每次登录态真正变化都 +1。WK 异步快照 / 授权校验回来时代次变了就丢弃，
+    /// 否则可能用旧 cookie 覆盖用户刚完成的新登录。
+    /// Bridge 可能从任意线程调 `adopt`，所以计数要加锁。
+    private let sessionGenerationLock = NSLock()
+    private var sessionGeneration = 0
+    /// 冷启动恢复只跑一次。初始化时不能碰 WKWebView，等真正进小红书
+    /// 标签页、视图 `.task` 调 `refreshIfNeeded()` 时再开始。
+    private let recoveryLock = NSLock()
+    private var recoveryStarted = false
 
     private static let recommendURL = "https://www.xiaohongshu.com/explore"
     private static let followURL = "https://www.xiaohongshu.com/explore?channel_id=homefeed.follow"
 
     private init() {
-        let cookie = defaults.string(forKey: cookieKey) ?? ""
-        isLoggedIn = !cookie.isEmpty
+        let loggedOut = defaults.bool(forKey: loggedOutKey)
+        if loggedOut {
+            defaults.removeObject(forKey: cookieKey)
+        }
+        let stored = defaults.string(forKey: cookieKey) ?? ""
+        let cookie = Self.sanitizeHeader(stored)
+        if !stored.isEmpty, cookie != stored {
+            defaults.set(cookie, forKey: cookieKey)
+        }
+        // 存过的 cookie 是上次登录 / Bridge 同步的结果，有 `web_session`
+        // 就直接恢复，冷启动不再要求重登。只有本地没有时才去系统仓库捡候选，
+        // 那种候选可能是游客会话，必须用 `selfProfile()` 校验后才 adopt。
+        isLoggedIn = !loggedOut && Self.hasSession(inHeader: cookie)
         pushCredentials()
         // 这里**绝对不能**碰 WKWebView。
         //
         // `XhsStore.shared` 会在 TabView 构建标签页时就被创建，也就是冷启动
         // 首帧。此时窗口还没就绪，同步建一个 1280x1600 的隐藏页面，在
         // 15 Pro Max 上会直接把进程带走（用户看到的就是「点开就闪退」）。
-        // 签名页改成真正要用的时候（进小红书标签页取数）再懒创建。
+        // 签名页改成真正要用的时候（进小红书标签页取数）再懒创建；
+        // 登录态恢复也放在 `refreshIfNeeded()` 里，不在 init 启动。
     }
 
     var cookie: String {
         defaults.string(forKey: cookieKey) ?? ""
     }
 
+    nonisolated private static func sanitizeHeader(_ raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "\r\n", with: "; ")
+            .replacingOccurrences(of: "\n", with: "; ")
+            .replacingOccurrences(of: "\r", with: "; ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func hasSession(inHeader header: String) -> Bool {
+        for part in header.split(separator: ";") {
+            let piece = part.trimmingCharacters(in: .whitespaces)
+            guard let index = piece.firstIndex(of: "=") else { continue }
+            guard String(piece[piece.startIndex..<index]) == "web_session" else {
+                continue
+            }
+            let value = String(piece[piece.index(after: index)...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return !value.isEmpty
+        }
+        return false
+    }
+
+    nonisolated private static func xhsCookies(from cookies: [HTTPCookie]) -> [HTTPCookie] {
+        cookies.filter { $0.domain.lowercased().contains("xiaohongshu.com") }
+    }
+
+    nonisolated private static func cookieHeader(from cookies: [HTTPCookie]) -> String {
+        cookies
+            .filter { $0.domain.contains("xiaohongshu.com") }
+            .map { "\($0.name)=\($0.value)" }
+            .joined(separator: "; ")
+    }
+
+    /// 本地没有可用 `web_session` 时（例如旧版本 `-100` 把 `xhs.cookie` 删了），
+    /// 网页登录态可能还在系统
+    /// cookie 仓库里。这里按「本地缓存 → URLSession 共享仓库 → WK 网页仓库」
+    /// 依次取候选；每个候选都要先问一次 `selfProfile()`，成功才落盘。
+    /// 游客 `web_session` 不能直接当登录态。调用方必须已经在小红书标签页里，
+    /// 否则 `selfProfile()` 会提前建隐藏 WKWebView，拖垮冷启动。
+    private func recoverFromSharedStorage() async {
+        let generation = sessionGenerationToken()
+        var candidates: [(header: String, cookies: [HTTPCookie])] = []
+        func addCandidate(_ raw: String, cookies: [HTTPCookie]) {
+            let header = Self.sanitizeHeader(raw)
+            guard !header.isEmpty,
+                  !candidates.contains(where: { $0.header == header })
+            else { return }
+            candidates.append((header, cookies))
+        }
+        addCandidate(defaults.string(forKey: cookieKey) ?? "", cookies: [])
+        if let cookies = HTTPCookieStorage.shared.cookies {
+            let targets = Self.xhsCookies(from: cookies)
+            addCandidate(Self.cookieHeader(from: targets), cookies: targets)
+        }
+        // 必须先把 WK 快照读完再校验：`validateSession` 会把候选写进共享
+        // WK cookie 仓库，先校验本地旧串可能把网页里刚刷新过的有效会话覆盖掉。
+        let cookies = await webKitCookies()
+        guard canRestore(generation: generation) else { return }
+        let targets = Self.xhsCookies(from: cookies)
+        addCandidate(Self.cookieHeader(from: targets), cookies: targets)
+        // 回调期间可能已经扫码登录 / Bridge adopt / 主动退出。
+        for candidate in candidates {
+            guard canRestore(generation: generation) else { return }
+            if await validateAndAdopt(
+                cookieHeader: candidate.header,
+                cookies: candidate.cookies
+            ) {
+                return
+            }
+        }
+    }
+
+    private func canRestore(generation: Int) -> Bool {
+        generation == sessionGenerationToken()
+            && !isLoggedIn
+            && !defaults.bool(forKey: loggedOutKey)
+    }
+
+    private func beginRecovery() -> Bool {
+        recoveryLock.lock()
+        defer { recoveryLock.unlock() }
+        guard !recoveryStarted else { return false }
+        recoveryStarted = true
+        return true
+    }
+
+    private func webKitCookies() async -> [HTTPCookie] {
+        await withCheckedContinuation { continuation in
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+                continuation.resume(returning: cookies)
+            }
+        }
+    }
+
+    /// 系统仓库里的候选 cookie 先问一次服务端「我是谁」，成功才落盘；
+    /// 游客 `web_session` 会在 `selfProfile()` 里被 -100 拒掉，不会变成
+    /// 假登录态。
+    private func validateAndAdopt(
+        cookieHeader header: String,
+        cookies: [HTTPCookie]
+    ) async -> Bool {
+        let generation = sessionGenerationToken()
+        let valid = await XhsService.shared.validateSession(cookie: header)
+        guard valid, canRestore(generation: generation) else { return false }
+        guard adopt(cookieHeader: header) else { return false }
+        if !cookies.isEmpty {
+            CookieJar.syncToSharedStorage(cookies)
+        }
+        scheduleRecoveryRefresh()
+        return true
+    }
+
+    /// 冷启动恢复晚于视图的 `.task`：`isLoggedIn` 翻成 true 时不会重跑
+    /// `.task`，这里补一次首页请求。`adopt` 的状态更新先入主队列，
+    /// 所以这个 block 执行时已经可以安全发请求。
+    private func scheduleRecoveryRefresh() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isLoggedIn else { return }
+            Task { await self.refresh() }
+        }
+    }
+
     // MARK: - 登录态
 
-    func adopt(cookies: [HTTPCookie]) {
-        let header = CookieJar.header(cookies, domainSuffix: "xiaohongshu.com")
-        guard CookieJar.value(inHeader: header, named: "web_session") != nil else { return }
+    private func sessionGenerationToken() -> Int {
+        sessionGenerationLock.lock()
+        defer { sessionGenerationLock.unlock() }
+        return sessionGeneration
+    }
+
+    private func bumpSessionGeneration() {
+        sessionGenerationLock.lock()
+        sessionGeneration += 1
+        sessionGenerationLock.unlock()
+    }
+
+    @discardableResult
+    func adopt(cookies: [HTTPCookie]) -> Bool {
+        let header = Self.cookieHeader(from: Self.xhsCookies(from: cookies))
+        guard Self.hasSession(inHeader: header) else { return false }
+        bumpSessionGeneration()
         defaults.set(header, forKey: cookieKey)
+        defaults.set(false, forKey: loggedOutKey)
         pushCredentials()
         // 签名页面的 cookie 也换了，重新加载一次让它拿到新会话。
         XhsSigner.shared.applyCookies(header, force: true)
@@ -81,21 +241,19 @@ final class XhsStore: ObservableObject {
             self.loaded = false
         }
         CookieJar.syncToSharedStorage(cookies)
+        return true
     }
 
     /// 直接吃一段原始 cookie 串（Kotlin 登录成功后通过 `XhsBridge` 同步过来）。
     @discardableResult
     func adopt(cookieHeader raw: String) -> Bool {
-        let header =
-            raw
-                .replacingOccurrences(of: "\r\n", with: "; ")
-                .replacingOccurrences(of: "\n", with: "; ")
-                .replacingOccurrences(of: "\r", with: "; ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard CookieJar.value(inHeader: header, named: "web_session") != nil else { return false }
+        let header = Self.sanitizeHeader(raw)
+        guard Self.hasSession(inHeader: header) else { return false }
         // Kotlin 每次取数都会同步同一份 cookie；内容没变就别重置签名页。
         if isLoggedIn, cookie == header { return true }
+        bumpSessionGeneration()
         defaults.set(header, forKey: cookieKey)
+        defaults.set(false, forKey: loggedOutKey)
         pushCredentials()
         XhsSigner.shared.applyCookies(header, force: true)
         DispatchQueue.main.async {
@@ -114,12 +272,18 @@ final class XhsStore: ObservableObject {
     }
 
     func logout() {
+        bumpSessionGeneration()
+        defaults.set(true, forKey: loggedOutKey)
         defaults.removeObject(forKey: cookieKey)
         pushCredentials()
         harvester?.stop()
         harvester = nil
         // 网页仓库里的旧会话也清掉，否则下次登录页会「一打开就已是登录态」。
         CookieJar.clear(domainSuffix: "xiaohongshu.com") {}
+        for cookie in HTTPCookieStorage.shared.cookies ?? []
+        where cookie.domain.lowercased().contains("xiaohongshu.com") {
+            HTTPCookieStorage.shared.deleteCookie(cookie)
+        }
         DispatchQueue.main.async {
             self.isLoggedIn = false
             self.notes = []
@@ -135,8 +299,16 @@ final class XhsStore: ObservableObject {
     // MARK: - 首页流
 
     func refreshIfNeeded() async {
-        guard isLoggedIn, !loaded else { return }
-        await refresh()
+        if isLoggedIn {
+            guard !loaded else { return }
+            await refresh()
+            return
+        }
+        // 冷启动时 `XhsStore.shared` 会在 TabView 构建标签栏时创建；
+        // 等用户真正进小红书标签页（视图 `.task` 调到这里）再恢复会话，
+        // 此刻创建签名页不会影响首帧启动。
+        guard !defaults.bool(forKey: loggedOutKey), beginRecovery() else { return }
+        await recoverFromSharedStorage()
     }
 
     /// 在「推荐」和「关注」之间切换，切换后重新拉第一页。
@@ -176,7 +348,7 @@ final class XhsStore: ObservableObject {
             // 成功时 `merge(replace: true)` 会整批换掉。
         }
         // 冷启动时签名页的 `cookieHeader` 还是空的：先 warmUp 的话，隐藏页会
-        // 以匿名会话加载，homefeed 返回 -100 后 logout() 连 xhs.cookie 一起删掉。
+        // 以匿名会话加载，homefeed 会被判 -100，界面看起来就像掉了登录。
         // 先把已保存的会话灌给签名页；cookie 没变时 `applyCookies` 不会重载。
         XhsSigner.shared.applyCookies(cookie)
 
@@ -293,7 +465,19 @@ final class XhsStore: ObservableObject {
         } catch {
             guard token == generation else { return true }
             if let xhs = error as? XhsError, xhs.needLogin {
-                logout()
+                // `-100` 经常只是隐藏页还拿着旧 cookie 或刚被风控挡了一次。
+                // 以前这里直接 `logout()` 把 `xhs.cookie` 删掉，用户就得重新
+                // 扫码；这里保留登录态，只提示重试。真正退出只由用户主动触发。
+                DispatchQueue.main.async {
+                    if reset {
+                        self.errorMessage =
+                            "小红书会话暂时没通过（\(xhs.message)）。登录态已保留，点「重试」再来一次；持续失败再重新登录"
+                        self.isLoading = false
+                    } else {
+                        self.isLoadingMore = false
+                        self.loadMoreFailed = true
+                    }
+                }
                 return true
             }
             return false
@@ -379,8 +563,10 @@ final class XhsStore: ObservableObject {
         let code = XhsJSON.int(json["code"])
         guard code == 0 else {
             if code == -100 {
-                logout()
-                errorMessage = XhsError.notLoggedIn.message
+                // 网页自己拿匿名会话发了一次请求，不代表本地 cookie 失效。
+                // 保留登录态，让用户点重试，别把整段会话删掉。
+                errorMessage =
+                    "小红书网页会话暂时没通过（登录态已保留）。点「重试」再来一次；持续失败再重新登录"
                 isLoading = false
                 return
             }
@@ -681,10 +867,10 @@ final class XhsStore: ObservableObject {
         return nil
     }
 
-    /// 把错误翻成一句能显示的话；掉登录就顺手退回登录页。
+    /// 把错误翻成一句能显示的话。掉登录不再自动清 cookie，
+    /// 由用户决定是否重新登录，避免一次瞬时 -100 就把会话删掉。
     func message(for error: Error) -> String {
         if let xhs = error as? XhsError {
-            if xhs.needLogin { logout() }
             return xhs.message
         }
         return error.localizedDescription

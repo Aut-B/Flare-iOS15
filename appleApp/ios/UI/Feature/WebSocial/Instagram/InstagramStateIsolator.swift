@@ -8,11 +8,17 @@ nonisolated enum InstagramStateIsolator: @unchecked Sendable {
 
     private static let epochKey = "flare.instagram.quarantine.epoch"
     private static let forceKey = "flare.instagram.quarantine.force"
+    private static let cookieKey = "instagram.cookie"
+    private static let usernameKey = "instagram.username"
     private static var defaults: UserDefaults { .standard }
 
     nonisolated private final class State: @unchecked Sendable {
         private let lock = NSLock()
         private var suppressed = false
+        private var verificationScheduled = false
+        /// 每次 purge 都 +1。异步 WK 回调拿到的是旧快照，回来时代次变了
+        /// 就必须丢弃，否则刚登录的新会话会被旧快照里的「无会话」判死。
+        private var generation = 0
 
         nonisolated func isSuppressed() -> Bool {
             lock.lock()
@@ -24,6 +30,32 @@ nonisolated enum InstagramStateIsolator: @unchecked Sendable {
             lock.lock()
             defer { lock.unlock() }
             suppressed = value
+        }
+
+        nonisolated func beginVerification() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !verificationScheduled else { return false }
+            verificationScheduled = true
+            return true
+        }
+
+        nonisolated func currentGeneration() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return generation
+        }
+
+        nonisolated func advanceGeneration() {
+            lock.lock()
+            defer { lock.unlock() }
+            generation += 1
+        }
+
+        nonisolated func isCurrent(_ token: Int) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return generation == token
         }
     }
 
@@ -45,18 +77,24 @@ nonisolated enum InstagramStateIsolator: @unchecked Sendable {
         private let lock = NSLock()
         private var purgeCompleted = true
         private var fullUIShown = false
+        /// 每轮 purge 的编号。早先那轮的 10 秒兜底回调可能在下一轮 purge
+        /// 开始后才回来；没有编号会把新一轮的 pending 提前清掉。
+        private var generation = 0
 
-        nonisolated func beginPurge() {
+        nonisolated func beginPurge() -> Int {
             lock.lock()
             defer { lock.unlock() }
+            generation += 1
             purgeCompleted = false
             fullUIShown = false
+            return generation
         }
 
         /// 返回 true 表示主界面已经出现过，可以清 pending。
-        nonisolated func completePurge() -> Bool {
+        nonisolated func completePurge(_ token: Int) -> Bool {
             lock.lock()
             defer { lock.unlock() }
+            guard token == generation else { return false }
             purgeCompleted = true
             return fullUIShown
         }
@@ -97,14 +135,125 @@ nonisolated enum InstagramStateIsolator: @unchecked Sendable {
 
     @discardableResult
     nonisolated static func quarantineIfNeeded() -> Bool {
-        guard needsQuarantine else { return false }
-        purgeInstagramState()
+        let forced = defaults.bool(forKey: forceKey)
+        guard forced || needsQuarantine else { return false }
+        // force 是用户 / 崩溃兜底明确要求隔离。它必须最优先：不能再从
+        // 任何仓库里把会话捡回来，否则点「清掉 Instagram 登录」后
+        // 冷启动又恢复成同一个坏状态。
+        if forced {
+            purgeInstagramState()
+            return true
+        }
+        // 旧版本留下的 epoch / pending 只说明「迁移没跑完」，不说明当前 cookie
+        // 有问题。共享仓库里还有可用会话时先捡回来，不能因为一个旧标记就
+        // 把登录态清掉，否则用户每次冷启动都得重登一次 Instagram。
+        if acceptPersistedSession() { return false }
+        // URLSession 仓库没有不代表网页仓库没有：IG 网页版仍登录着时，
+        // 会话在 `WKWebsiteDataStore.default()` 里。先异步读一次：有就落盘，
+        // 没有也只结掉旧迁移标记，绝不删 DbAccount。
+        recoverWebKitSessionIfNeeded()
+        return false
+    }
+
+    nonisolated private static func acceptPersistedSession() -> Bool {
+        guard !defaults.bool(forKey: forceKey) else { return false }
+        guard !defaults.bool(forKey: IGSession.loggedOutKey) else { return false }
+        if let raw = defaults.string(forKey: cookieKey),
+            IGSession.hasUsableSession(raw)
+        {
+            guard persistSession(raw) else { return false }
+            markMigrationComplete()
+            return true
+        }
+        guard let cookies = HTTPCookieStorage.shared.cookies else { return false }
+        let targets = cookies.filter { isInstagramDomain($0.domain) }
+        let header = IGSession.header(from: targets, domainSuffix: "instagram.com")
+        guard IGSession.hasUsableSession(header) else { return false }
+        syncToSharedStorage(targets)
+        guard persistSession(header) else { return false }
+        markMigrationComplete()
         return true
     }
 
+    nonisolated private static func recoverWebKitSessionIfNeeded() {
+        guard state.beginVerification() else { return }
+        let generation = state.currentGeneration()
+        DispatchQueue.main.async {
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+                DispatchQueue.main.async {
+                    // purge 之后回来的旧快照直接作废，别把清理后的新状态再删一遍。
+                    guard state.isCurrent(generation) else { return }
+                    // 异步回调期间可能又收到一次强制隔离请求；force 仍然优先。
+                    guard !defaults.bool(forKey: forceKey) else {
+                        purgeInstagramState()
+                        return
+                    }
+                    // 回调等待期间 Bridge / Store 可能已经同步了有效会话。
+                    // 先接受它，不能拿「刚才 WK 里没有」的旧结论去 purge。
+                    if IGSession.hasUsableSession(defaults.string(forKey: cookieKey) ?? ""),
+                        acceptPersistedSession()
+                    {
+                        return
+                    }
+                    guard !defaults.bool(forKey: IGSession.loggedOutKey) else {
+                        // 用户已经主动退出：只把旧迁移标记结掉，不能再删
+                        // DbAccount；Kotlin 里可能还有别的 IG 账号。
+                        markMigrationComplete()
+                        return
+                    }
+                    let targets = cookies.filter { isInstagramDomain($0.domain) }
+                    let header = IGSession.header(from: targets, domainSuffix: "instagram.com")
+                    if IGSession.hasUsableSession(header) {
+                        syncToSharedStorage(targets)
+                        if persistSession(header) {
+                            markMigrationComplete()
+                            return
+                        }
+                    }
+                    // 非强制迁移走到这里说明原生仓库里确实没有会话，但
+                    // Kotlin 的 DbAccount 可能还有一份有效凭证，稍后才会经
+                    // Bridge 同步过来。这里绝不能 purge：删掉 DbAccount 就
+                    // 把用户逼回登录页，正是 r3 真机重登的根因。只结掉迁移
+                    // 标记，等 Bridge / 登录页把会话送进来。
+                    markMigrationComplete()
+                }
+            }
+        }
+    }
+
+    /// 只写会话本身，不碰 force / pending。强制隔离期间返回 false，
+    /// 由调用方继续走 purge。
+    @discardableResult
+    nonisolated private static func persistSession(_ raw: String) -> Bool {
+        guard !defaults.bool(forKey: forceKey) else { return false }
+        // 老版本可能用换行分隔 cookie。清洗只删控制字符，直接用它会把
+        // 多条 cookie 粘成一个坏值；这里先还原成正常分隔符。
+        let header = IGSession.normalizeCookieHeader(raw)
+        guard IGSession.hasUsableSession(header) else { return false }
+        defaults.set(header, forKey: cookieKey)
+        defaults.set(false, forKey: IGSession.loggedOutKey)
+        return true
+    }
+
+    /// 非强制迁移成功后才允许清 pending / 提升 epoch。
+    nonisolated private static func markMigrationComplete() {
+        guard !defaults.bool(forKey: forceKey) else { return }
+        defaults.set(quarantineEpoch, forKey: epochKey)
+        clearQuarantinePending()
+        // 迁移结束，允许 Bridge / 登录页同步新会话。
+        state.setSuppressed(false)
+    }
+
+    nonisolated private static func syncToSharedStorage(_ cookies: [HTTPCookie]) {
+        for cookie in cookies {
+            HTTPCookieStorage.shared.setCookie(cookie)
+        }
+    }
+
     nonisolated private static func purgeInstagramState() {
+        state.advanceGeneration()
         state.setSuppressed(true)
-        progress.beginPurge()
+        let purgeToken = progress.beginPurge()
 
         purgeUserDefaults()
         purgeSharedHTTPCookies()
@@ -113,7 +262,7 @@ nonisolated enum InstagramStateIsolator: @unchecked Sendable {
         defaults.set(quarantineEpoch, forKey: epochKey)
         defaults.set(false, forKey: forceKey)
         defaults.set(true, forKey: quarantinePendingKey)
-        purgeWebsiteData()
+        purgeWebsiteData(purgeToken)
     }
 
     nonisolated static func clearQuarantinePendingOnFullUI() {
@@ -123,8 +272,11 @@ nonisolated enum InstagramStateIsolator: @unchecked Sendable {
     }
 
     nonisolated private static func purgeUserDefaults() {
-        defaults.removeObject(forKey: "instagram.cookie")
-        defaults.removeObject(forKey: "instagram.username")
+        defaults.removeObject(forKey: cookieKey)
+        defaults.removeObject(forKey: usernameKey)
+        // 隔离就是「这次必须重新登录」。不写这个标记的话，Store 初始化时
+        // 可能抢在 WK 异步删除前把同一个坏会话又 adopt 回来。
+        defaults.set(true, forKey: IGSession.loggedOutKey)
     }
 
     nonisolated private static func purgeSharedHTTPCookies() {
@@ -177,7 +329,7 @@ nonisolated enum InstagramStateIsolator: @unchecked Sendable {
         purgeDatabase(at: path)
     }
 
-    nonisolated private static func purgeWebsiteData() {
+    nonisolated private static func purgeWebsiteData(_ token: Int) {
         let store = WKWebsiteDataStore.default()
         let cookieStore = store.httpCookieStore
         // 兜底：WK 的两个回调在坏状态（数据库损坏 / WebKit 进程卡死）下可能永远不返回。
@@ -185,8 +337,9 @@ nonisolated enum InstagramStateIsolator: @unchecked Sendable {
         // 表现是「登录成功但标签页里没有账号」「每次都提示登录已失效」。
         // 这里最多等 10 秒，超时也当作清理完成，保证只隔离一次。
         let fallback = DispatchWorkItem {
-            _ = progress.completePurge()
-            clearQuarantinePending()
+            if progress.completePurge(token) {
+                clearQuarantinePending()
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: fallback)
         cookieStore.getAllCookies { cookies in
@@ -197,7 +350,7 @@ nonisolated enum InstagramStateIsolator: @unchecked Sendable {
                 let matching = records.filter { isInstagramDomain($0.displayName) }
                 if matching.isEmpty {
                     fallback.cancel()
-                    if progress.completePurge() {
+                    if progress.completePurge(token) {
                         clearQuarantinePending()
                     }
                 } else {
@@ -206,7 +359,7 @@ nonisolated enum InstagramStateIsolator: @unchecked Sendable {
                         for: matching
                     ) {
                         fallback.cancel()
-                        if progress.completePurge() {
+                        if progress.completePurge(token) {
                             clearQuarantinePending()
                         }
                     }
@@ -221,8 +374,13 @@ nonisolated enum InstagramStateIsolator: @unchecked Sendable {
 
     #if DEBUG
     nonisolated static func seedCorruptStateForTesting() {
-        defaults.set("sessionid=bad-value\ninvalid-cookie", forKey: "instagram.cookie")
-        defaults.set("broken-user", forKey: "instagram.username")
+        defaults.set("sessionid=bad-value\ninvalid-cookie", forKey: cookieKey)
+        defaults.set("broken-user", forKey: usernameKey)
+        defaults.set(true, forKey: IGSession.loggedOutKey)
+        // `quarantineIfNeeded()` 只在 forced 分支 purge。测试种子必须把
+        // force 打开，否则坏 DbAccount 行和共享仓库里的坏 sessionid 都会
+        // 留到第二次冷启动，Kotlin decode 半截 JSON 时直接 abort。
+        defaults.set(true, forKey: forceKey)
         defaults.set(0, forKey: epochKey)
         defaults.set(true, forKey: quarantinePendingKey)
         if let cookie = HTTPCookie(properties: [

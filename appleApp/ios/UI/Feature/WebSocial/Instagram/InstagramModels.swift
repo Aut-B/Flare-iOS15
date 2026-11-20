@@ -1,6 +1,70 @@
 import Foundation
 import CoreGraphics
 
+/// 登录态相关的纯字符串 / cookie 工具。
+///
+/// 放在 Models 里是刻意的：`LogicTests` 只编译 Models + StateIsolator，
+/// 不编译 `InstagramService`。隔离器和 Store 都要判断「这段 cookie 还能不能
+/// 当登录态用」，逻辑必须放在两边都能看到的地方，否则测试目标直接编不过。
+nonisolated enum IGSession {
+    static let loggedOutKey = "instagram.loggedOut"
+
+    /// HTTP 头只能放可见 ASCII。换行 / 中文 / 控制字符会让 `setValue` 抛
+    /// ObjC 异常 —— 那是 SIGABRT，Kotlin 那边也接不住。
+    static func sanitizeHeader(_ value: String) -> String {
+        var result = ""
+        result.unicodeScalars.reserveCapacity(value.unicodeScalars.count)
+        for scalar in value.unicodeScalars
+        where scalar.isASCII && scalar.value >= 0x20 && scalar.value != 0x7F {
+            result.unicodeScalars.append(scalar)
+        }
+        return result
+    }
+
+    /// 去掉换行并清洗成可安全放进请求头的形式。
+    static func normalizeCookieHeader(_ raw: String) -> String {
+        let flattened =
+            raw
+                .replacingOccurrences(of: "\r\n", with: "; ")
+                .replacingOccurrences(of: "\n", with: "; ")
+                .replacingOccurrences(of: "\r", with: "; ")
+        return sanitizeHeader(flattened)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func value(inHeader header: String, named name: String) -> String? {
+        for part in header.split(separator: ";") {
+            let piece = part.trimmingCharacters(in: .whitespaces)
+            guard let index = piece.firstIndex(of: "=") else { continue }
+            if String(piece[piece.startIndex..<index]) == name {
+                return String(piece[piece.index(after: index)...])
+            }
+        }
+        return nil
+    }
+
+    /// 有非空 `sessionid` 才算一条可用的 Instagram 登录态。
+    static func hasUsableSession(_ header: String) -> Bool {
+        let safe = sanitizeHeader(header)
+        guard let value = value(inHeader: safe, named: "sessionid") else { return false }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 从系统 cookie 仓库拼请求头。过期的 cookie 不要，否则会把一个早就
+    /// 失效的 `sessionid` 当成「已登录」重新捡回来。
+    static func header(from cookies: [HTTPCookie], domainSuffix: String) -> String {
+        let now = Date()
+        return cookies
+            .filter { cookie in
+                cookie.domain.contains(domainSuffix)
+                    && !cookie.value.isEmpty
+                    && (cookie.expiresDate == nil || cookie.expiresDate! > now)
+            }
+            .map { "\($0.name)=\($0.value)" }
+            .joined(separator: "; ")
+    }
+}
+
 /// Instagram 的一个用户。
 struct IGUser: Identifiable, Hashable {
     let id: String
