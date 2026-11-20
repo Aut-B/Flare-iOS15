@@ -1,6 +1,35 @@
 import Foundation
 import os
 
+/// 续期结果必须可区分：只有服务端明确拒绝才允许上层清掉登录态。
+nonisolated enum WereadRenewalOutcome: Sendable, Equatable {
+    /// 服务端给了新的 `Set-Cookie`，并且和旧串不同。
+    case renewed(String)
+    /// 服务端说续期成功，但没有下发新 cookie（或值没变）。
+    case unchanged
+    /// 服务端明确拒绝了这个会话（401/403、`succ=0`、`-2010/-2012`）。
+    case rejected
+    /// 网络/HTTP/解析等临时失败，不能据此注销用户。
+    case transient
+}
+
+/// 需要和 `WereadError` 区分开的鉴权失败：`rejected` 可以清登录态，
+/// `transient` 必须保留 cookie 让用户重试。
+nonisolated enum WereadAuthFailure: Error, LocalizedError, Sendable, Equatable {
+    /// 服务端明确拒绝了这个 cookie；注销前必须确认它仍是当前会话。
+    case rejected(failedCookie: String)
+    case transient
+
+    var errorDescription: String? {
+        switch self {
+        case .rejected:
+            return "微信读书登录已失效，请重新登录。"
+        case .transient:
+            return "登录状态暂时无法确认，已保留本地登录信息，请检查网络后重试。"
+        }
+    }
+}
+
 /// 微信读书 Web 接口封装。
 ///
 /// 全部走 `weread.qq.com` 的网页接口，登录态就是浏览器那套 cookie
@@ -22,6 +51,8 @@ final class WereadService: @unchecked Sendable {
     private var sessionCache: [String: (value: WereadReaderSession, stamp: Date)] = [:]
     /// 信标有效期。`psvts` 会随时间失效，太短会反复抓页面，太长会拿到过期的。
     private static let sessionTTL: TimeInterval = 120
+    /// 同一源 cookie 的并发续期只打一次服务端，其余调用等这一次结果。
+    private let renewalCoordinator = WereadRenewalCoordinator()
 
     /// 抓取阅读器页面时用的 UA。
     ///
@@ -125,17 +156,22 @@ final class WereadService: @unchecked Sendable {
 
     // MARK: - 会话续期
 
-    /// 续期成功后把新 cookie 交出去（由 `WereadStore` 落盘）。
-    ///
-    /// 不在这里直接写 UserDefaults：Service 不该知道存储键，
-    /// 而且 Store 才是 cookie 的唯一持有者。
-    var onCookieRenewed: (@Sendable (String) -> Void)?
-
     /// cookie 过期时续一次。
     ///
-    /// 返回 `Set-Cookie` 里的新 cookie 串；没有新值就返回 nil。
-    /// 服务端成功时回 `{"succ":1}`。
-    func renew(cookie: String) async -> String? {
+    /// 服务端成功时回 `{"succ":1}`。成功但没有下发新 cookie 是
+    /// `.unchanged`，不是失败；传输错误是 `.transient`。只有服务端
+    /// 明确拒绝时才返回 `.rejected`，调用方据此决定是否清登录态。
+    ///
+    /// 同一个源 cookie 的并发续期会合并成一次请求；结果由 Store
+    /// 以「源 cookie + generation」为条件原子落盘。
+    func renew(cookie: String) async -> WereadRenewalOutcome {
+        await renewalCoordinator.renew(cookie: cookie) { [weak self] in
+            guard let self else { return .transient }
+            return await self.performRenewal(cookie: cookie)
+        }
+    }
+
+    private func performRenewal(cookie: String) async -> WereadRenewalOutcome {
         var request = URLRequest(url: URL(string: "\(base)/web/login/renewal")!)
         request.httpMethod = "POST"
         request.setValue("application/json;charset=UTF-8", forHTTPHeaderField: "Content-Type")
@@ -145,22 +181,43 @@ final class WereadService: @unchecked Sendable {
         )
         do {
             let (data, response) = try await self.session.data(for: request)
-            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            let success = (json?["succ"] as? NSNumber)?.intValue == 1
-            guard success else {
-                log.info("weread: renewal rejected")
-                return nil
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 401 || http.statusCode == 403 {
+                    log.info("weread: renewal rejected HTTP \(http.statusCode, privacy: .public)")
+                    return .rejected
+                }
+                guard (200..<300).contains(http.statusCode) else {
+                    log.info("weread: renewal transient HTTP \(http.statusCode, privacy: .public)")
+                    return .transient
+                }
+            }
+            guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                log.info("weread: renewal returned a non-JSON body")
+                return .transient
+            }
+            if let code = intValue(json["errCode"]), code == -2010 || code == -2012 {
+                log.info("weread: renewal rejected errCode \(code, privacy: .public)")
+                return .rejected
+            }
+            guard intValue(json["succ"]) == 1 else {
+                if let succ = intValue(json["succ"]), succ == 0 {
+                    log.info("weread: renewal rejected succ=0")
+                    return .rejected
+                }
+                log.info("weread: renewal response has no success flag")
+                return .transient
             }
             // 从响应头里捞新 cookie，合并进旧的。
             let merged = Self.mergeCookies(existing: cookie, response: response)
-            log.info("weread: renewal ok, cookie changed=\(merged != nil, privacy: .public)")
-            if let merged {
-                onCookieRenewed?(merged)
+            if let merged, merged != cookie {
+                log.info("weread: renewal ok, cookie changed")
+                return .renewed(merged)
             }
-            return merged
+            log.info("weread: renewal ok, cookie unchanged")
+            return .unchanged
         } catch {
             log.info("weread: renewal failed: \(String(describing: error), privacy: .public)")
-            return nil
+            return .transient
         }
     }
 
@@ -186,7 +243,10 @@ final class WereadService: @unchecked Sendable {
             }
         }
 
-        var changed = false
+        // 只有会话键真的换了才算续期成功。`Set-Cookie` 里经常还会刷新
+        // 埋点/设备类 cookie；把它们当新会话会让调用方误以为已经续期，
+        // 用同一个 `wr_skey` 重试再被拒，最后错误地注销用户。
+        var sessionChanged = false
         for (key, raw) in http.allHeaderFields {
             guard String(describing: key).lowercased() == "set-cookie" else { continue }
             for line in String(describing: raw).components(separatedBy: "\n") {
@@ -197,21 +257,32 @@ final class WereadService: @unchecked Sendable {
                 let value = pieces[1].trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty, !value.isEmpty else { continue }
                 if let at = index[name] {
-                    if pairs[at].1 != value { pairs[at].1 = value; changed = true }
+                    if pairs[at].1 != value {
+                        pairs[at].1 = value
+                        if name == "wr_skey" { sessionChanged = true }
+                    }
                 } else {
                     index[name] = pairs.count
                     pairs.append((name, value))
-                    changed = true
+                    if name == "wr_skey" { sessionChanged = true }
                 }
             }
         }
-        guard changed else { return nil }
+        guard sessionChanged else { return nil }
         return pairs.map { "\($0.0)=\($0.1)" }.joined(separator: "; ")
     }
 
     // MARK: - 书架
 
     func shelf(cookie: String) async throws -> [WereadBook] {
+        do {
+            return try await fetchShelf(cookie: cookie)
+        } catch WereadError.notLoggedIn {
+            throw WereadAuthFailure.rejected(failedCookie: cookie)
+        }
+    }
+
+    private func fetchShelf(cookie: String) async throws -> [WereadBook] {
         // `synckeys=0` 只给第一页，书架大的人会少一截（用户说的「没还原全」）。
         // 接口会在响应里回一个新的 synckey，带着它再要一页，直到没有新书。
         var result: [WereadBook] = []
@@ -403,6 +474,14 @@ final class WereadService: @unchecked Sendable {
     // MARK: - 目录
 
     func chapters(bookId: String, cookie: String) async throws -> [WereadChapter] {
+        do {
+            return try await fetchChapters(bookId: bookId, cookie: cookie)
+        } catch WereadError.notLoggedIn {
+            throw WereadAuthFailure.rejected(failedCookie: cookie)
+        }
+    }
+
+    private func fetchChapters(bookId: String, cookie: String) async throws -> [WereadChapter] {
         var request = URLRequest(url: URL(string: "\(base)/web/book/publicchapterInfos")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -439,7 +518,7 @@ final class WereadService: @unchecked Sendable {
     ///    不带 `sc` / `prevChapter`。书架里的已购书走这条老路一直是通的，
     ///    reader-session 改动把这条回退路径漏掉了；
     /// 3. 直接请求也空 → 丢掉缓存信标、重抓一次页面，再试一次；
-    /// 4. 回 `-2012`（登录超时）→ 续期 cookie、重试一次。
+    /// 4. 回 `-2012`（登录超时）→ 交给 Store 串行续期、切换会话后重试。
     func content(bookId: String, chapterUid: Int, cookie: String) async throws -> String {
         do {
             return try await fetchChapterWithFallback(
@@ -448,21 +527,11 @@ final class WereadService: @unchecked Sendable {
                 cookie: cookie
             )
         } catch WereadError.notLoggedIn {
-            // 登录超时：续期一次，拿到新 cookie 就重试；拿不到就如实报过期。
-            guard let renewed = await renew(cookie: cookie), renewed != cookie else {
-                log.info("weread: content got -2012 and renewal produced nothing")
-                throw WereadError.notLoggedIn
-            }
+            // 续期/候选会话切换统一由 Store 串行处理；这里只标记被拒绝的源 cookie。
+            // 旧实现会在续期成功后丢掉信标缓存；现在续期搬到 Store，也必须
+            // 在换会话重试前丢掉，否则新 cookie 仍会带着旧 `psvts` 再吃一次 -2012。
             invalidateSession(bookId: bookId, chapterUid: chapterUid)
-            do {
-                return try await fetchChapterWithFallback(
-                    bookId: bookId,
-                    chapterUid: chapterUid,
-                    cookie: renewed
-                )
-            } catch WereadError.notLoggedIn {
-                throw WereadError.notLoggedIn
-            }
+            throw WereadAuthFailure.rejected(failedCookie: cookie)
         }
     }
 
@@ -823,8 +892,13 @@ final class WereadService: @unchecked Sendable {
 
     private func send(_ request: URLRequest) async throws -> Data {
         let (data, response) = try await session.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw WereadError.http(http.statusCode)
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 401 || http.statusCode == 403 {
+                throw WereadError.notLoggedIn
+            }
+            if !(200..<300).contains(http.statusCode) {
+                throw WereadError.http(http.statusCode)
+            }
         }
         return data
     }
@@ -894,6 +968,29 @@ final class WereadService: @unchecked Sendable {
             with: "$1 src=\"$2\"",
             options: .regularExpression
         )
+        return result
+    }
+}
+
+/// 同一个源 cookie 的续期请求合并成一次，避免 prefetch / 当前章
+/// 同时过期时各发一遍 renewal，拿到不同结果后互相覆盖。
+private actor WereadRenewalCoordinator {
+    private var flights: [String: (id: UUID, task: Task<WereadRenewalOutcome, Never>)] = [:]
+
+    func renew(
+        cookie: String,
+        operation: @escaping @Sendable () async -> WereadRenewalOutcome
+    ) async -> WereadRenewalOutcome {
+        if let flight = flights[cookie] {
+            return await flight.task.value
+        }
+        let id = UUID()
+        let task = Task { await operation() }
+        flights[cookie] = (id, task)
+        let result = await task.value
+        if flights[cookie]?.id == id {
+            flights[cookie] = nil
+        }
         return result
     }
 }

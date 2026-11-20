@@ -30,6 +30,7 @@ final class WereadStore: ObservableObject {
     private let defaults = UserDefaults.standard
     private let cookieKey = "weread.cookie"
     private let nameKey = "weread.nickname"
+    private let loggedOutKey = "weread.loggedOut"
     private let linksKey = "weread.readerLinks"
     private let linksByIdKey = "weread.readerLinksById"
     private let linksEpochKey = "weread.readerLinksEpoch"
@@ -43,10 +44,27 @@ final class WereadStore: ObservableObject {
     /// 一次启动里只跑一次线上书架同步。隐藏网页很吃 CPU，
     /// 反复建页面既费电，也容易在旧机型上把进程拖崩。
     private var syncedThisSession = false
+    /// cookie 与会话 generation 必须一起变：generation 每次换会话都递增，
+    /// 用来丢弃迟到的续期回调 / 旧请求的 rejected。
+    private let sessionLock = NSLock()
+    private var sessionGeneration = 0
+    private var currentCookie = ""
+    /// 鉴权恢复串行化：同一时刻只允许一个请求续期、试系统仓库候选、切 cookie。
+    private let recoveryGate = WereadRecoveryGate()
 
     private init() {
-        let cookie = defaults.string(forKey: cookieKey) ?? ""
-        isLoggedIn = Self.looksLoggedIn(cookie)
+        let loggedOut = defaults.bool(forKey: loggedOutKey)
+        let storedCookie = defaults.string(forKey: cookieKey) ?? ""
+        var restoredCookie = storedCookie
+        // 旧版本清过本地 cookie，但网页登录态可能还在 URLSession 共享仓库里。
+        // 这里同步捡一次，让界面首帧就能看到已登录；WK 仓库异步再补。
+        if !loggedOut, !Self.looksLoggedIn(restoredCookie),
+           let recovered = Self.cookieHeaderFromSharedStorage() {
+            restoredCookie = recovered
+            defaults.set(recovered, forKey: cookieKey)
+        }
+        currentCookie = restoredCookie
+        isLoggedIn = !loggedOut && Self.looksLoggedIn(restoredCookie)
         nickname = defaults.string(forKey: nameKey) ?? ""
         readerLinks = defaults.dictionary(forKey: linksKey) as? [String: String] ?? [:]
         bookLinks = defaults.dictionary(forKey: linksByIdKey) as? [String: String] ?? [:]
@@ -57,19 +75,25 @@ final class WereadStore: ObservableObject {
             readerLinks = [:]
             bookLinks = [:]
         }
-        // 只在这里挂一次：`content()` 会被 prefetch 并发调用，
-        // 每次都赋值等于多线程同时写同一个单例属性，属于数据竞争。
-        WereadService.shared.onCookieRenewed = { [weak self] renewed in
-            guard let self = self else { return }
-            // `isLoggedIn` 是 @Published，必须切主线程。
-            DispatchQueue.main.async {
-                self.persistRenewedCookie(renewed)
-            }
+        if !isLoggedIn {
+            recoverFromWebKitIfNeeded()
         }
     }
 
     var cookie: String {
-        defaults.string(forKey: cookieKey) ?? ""
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        return currentCookie
+    }
+
+    private func sessionSnapshot() -> (cookie: String, generation: Int, loggedOut: Bool) {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        return (
+            currentCookie,
+            sessionGeneration,
+            defaults.bool(forKey: loggedOutKey)
+        )
     }
 
     // MARK: - 登录态
@@ -86,22 +110,24 @@ final class WereadStore: ObservableObject {
     }
 
     static func cookieHeader(from cookies: [HTTPCookie]) -> String {
-        cookies
-            .filter { $0.domain.contains("weread.qq.com") }
-            .map { "\($0.name)=\($0.value)" }
-            .joined(separator: "; ")
+        // 同名 cookie 以最后一个为准；保留首次出现的位置，避免重复键
+        // 让服务端读到过期值。
+        var order: [String] = []
+        var values: [String: String] = [:]
+        for cookie in cookies where cookie.domain.contains("weread.qq.com") {
+            let name = cookie.name
+            guard !name.isEmpty, !cookie.value.isEmpty else { continue }
+            if values[name] == nil { order.append(name) }
+            values[name] = cookie.value
+        }
+        return order.compactMap { name in
+            values[name].map { "\(name)=\($0)" }
+        }.joined(separator: "; ")
     }
 
     @discardableResult
     func adopt(cookies: [HTTPCookie]) -> Bool {
-        let header = Self.cookieHeader(from: cookies)
-        guard Self.looksLoggedIn(header) else { return false }
-        defaults.set(header, forKey: cookieKey)
-        DispatchQueue.main.async {
-            self.isLoggedIn = true
-            self.errorMessage = nil
-        }
-        return true
+        adopt(cookieHeader: Self.cookieHeader(from: cookies))
     }
 
     /// 直接吃一段**原始 cookie 串**（用户从浏览器里复制出来的）。
@@ -110,19 +136,17 @@ final class WereadStore: ObservableObject {
     /// 「别处登录好，把 cookie 贴进来」的通道。返回是否被接受。
     @discardableResult
     func adopt(cookieHeader raw: String) -> Bool {
-        // 从 DevTools / 扩展里复制出来的经常带换行，先摊平成 `k=v; k=v`。
-        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.lowercased().hasPrefix("cookie:") {
-            text = String(text.dropFirst("cookie:".count))
-        }
-        let header =
-            text
-                .replacingOccurrences(of: "\r\n", with: "; ")
-                .replacingOccurrences(of: "\n", with: "; ")
-                .replacingOccurrences(of: "\r", with: "; ")
-                .trimmingCharacters(in: CharacterSet(charactersIn: "; "))
+        let header = Self.normalizeCookieHeader(raw)
         guard Self.looksLoggedIn(header) else { return false }
+        sessionLock.lock()
+        let wasLoggedOut = defaults.bool(forKey: loggedOutKey)
+        if currentCookie != header || wasLoggedOut {
+            sessionGeneration += 1
+        }
+        currentCookie = header
         defaults.set(header, forKey: cookieKey)
+        defaults.set(false, forKey: loggedOutKey)
+        sessionLock.unlock()
         DispatchQueue.main.async {
             self.isLoggedIn = true
             self.errorMessage = nil
@@ -130,14 +154,394 @@ final class WereadStore: ObservableObject {
         return true
     }
 
+    /// 从 DevTools / 扩展里复制、或从 WK 仓库拼出来的 cookie 经常带换行。
+    private static func normalizeCookieHeader(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.lowercased().hasPrefix("cookie:") {
+            text = String(text.dropFirst("cookie:".count))
+        }
+        return
+            text
+                .replacingOccurrences(of: "\r\n", with: "; ")
+                .replacingOccurrences(of: "\n", with: "; ")
+                .replacingOccurrences(of: "\r", with: "; ")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "; "))
+    }
+
     /// 微信读书书架接口两样都要：`wr_vid` 是账号，`wr_skey` 才是会话。
+    /// 必须校验值非空，不能用 `contains("wr_skey=")` 把空值当登录。
     private static func looksLoggedIn(_ header: String) -> Bool {
-        header.contains("wr_vid=") && header.contains("wr_skey=")
+        var hasUserId = false
+        var hasSession = false
+        for part in header.split(separator: ";") {
+            let pieces = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pieces.count == 2 else { continue }
+            let name = pieces[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = pieces[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { continue }
+            if name == "wr_vid" { hasUserId = true }
+            if name == "wr_skey" { hasSession = true }
+        }
+        return hasUserId && hasSession
+    }
+
+    /// 从 URLSession 共享仓库同步取一次 cookie，不创建任何 WebView。
+    private static func cookieHeaderFromSharedStorage() -> String? {
+        guard let cookies = HTTPCookieStorage.shared.cookies else { return nil }
+        let header = cookieHeader(from: cookies)
+        return looksLoggedIn(header) ? header : nil
+    }
+
+    /// 本地 cookie 为空或无效时才走这里；只读 WK 的 cookie 仓库，不建页面。
+    private func recoverFromWebKitIfNeeded() {
+        let snapshot = sessionSnapshot()
+        guard !snapshot.loggedOut, !isLoggedIn else { return }
+        WKWebsiteDataStore.default().httpCookieStore.getAllCookies { [weak self] cookies in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let now = self.sessionSnapshot()
+                guard snapshot.generation == now.generation,
+                      !self.isLoggedIn,
+                      !now.loggedOut
+                else {
+                    return
+                }
+                guard self.adopt(cookieHeader: Self.cookieHeader(from: cookies)),
+                      self.books.isEmpty
+                else {
+                    return
+                }
+                // 视图的 `.task` 在 isLoggedIn 翻成 true 之前已经跑过了，
+                // 这里补一次首屏请求，避免停在空白书架。
+                Task { await self.refreshShelf() }
+            }
+        }
+    }
+
+    /// 收集 HTTPCookieStorage 与 WK 仓库里的全部有效会话（去重后），
+    /// 不再只取第一个：HTTP 里可能还是过期会话，WK 里才是新会话。
+    private static func systemCookieCandidates() async -> [String] {
+        var raw: [String] = []
+        if let cookies = HTTPCookieStorage.shared.cookies {
+            raw.append(cookieHeader(from: cookies))
+        }
+        let webKitCookies = await readCookies(from: .default())
+        raw.append(cookieHeader(from: webKitCookies))
+
+        var seen = Set<String>()
+        var result: [String] = []
+        for item in raw {
+            let header = normalizeCookieHeader(item)
+            guard looksLoggedIn(header) else { continue }
+            let fingerprint = cookieFingerprint(header)
+            guard seen.insert(fingerprint).inserted else { continue }
+            result.append(header)
+        }
+        return result
+    }
+
+    /// 同名键排序后比较，避免两个仓库只是顺序不同就被当成两份会话。
+    private static func cookieFingerprint(_ header: String) -> String {
+        header
+            .split(separator: ";")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .sorted()
+            .joined(separator: ";")
+    }
+
+    /// 提交续期结果：只有 generation 未变、当前 cookie 仍是续期源时才落盘。
+    /// 写入不同 cookie 时递增 generation，让旧的 rejected 自动失效。
+    private func commitRenewedCookie(
+        _ renewed: String,
+        source: String,
+        generation: Int
+    ) -> Bool {
+        guard Self.looksLoggedIn(renewed) else { return false }
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        guard !defaults.bool(forKey: loggedOutKey),
+              generation == sessionGeneration,
+              currentCookie == source,
+              renewed != currentCookie
+        else {
+            return false
+        }
+        sessionGeneration += 1
+        currentCookie = renewed
+        defaults.set(renewed, forKey: cookieKey)
+        return true
+    }
+
+    /// 系统仓库候选只有在本地会话仍是那个失败会话时才采用，避免覆盖
+    /// 用户刚完成的新登录或别处已提交的续期。
+    private func adoptRecoveredCandidate(
+        _ header: String,
+        expectedCookie: String,
+        expectedGeneration: Int
+    ) -> Bool {
+        guard Self.looksLoggedIn(header) else { return false }
+        sessionLock.lock()
+        guard !defaults.bool(forKey: loggedOutKey),
+              sessionGeneration == expectedGeneration,
+              currentCookie == expectedCookie
+        else {
+            sessionLock.unlock()
+            return false
+        }
+        let changed = currentCookie != header
+        if changed {
+            sessionGeneration += 1
+            currentCookie = header
+            defaults.set(header, forKey: cookieKey)
+        }
+        defaults.set(false, forKey: loggedOutKey)
+        sessionLock.unlock()
+        if changed {
+            DispatchQueue.main.async {
+                self.isLoggedIn = true
+                self.errorMessage = nil
+            }
+        }
+        return true
+    }
+
+    /// 业务请求的统一鉴权恢复入口：本地失败 → 串行续期 → 系统仓库候选；
+    /// 成功才 adopt，明确拒绝才注销，临时失败保留 cookie。
+    private func withSessionRecovery<T>(
+        _ operation: @escaping (String) async throws -> T
+    ) async throws -> T {
+        let snapshot = sessionSnapshot()
+        if !snapshot.loggedOut, Self.looksLoggedIn(snapshot.cookie) {
+            do {
+                return try await operation(snapshot.cookie)
+            } catch let failure as WereadAuthFailure {
+                guard case .rejected = failure else { throw failure }
+                return try await withRecoveryGate {
+                    try await self.recoverAfterRejection(
+                        operation,
+                        failedCookie: snapshot.cookie,
+                        failedGeneration: snapshot.generation
+                    )
+                }
+            }
+        }
+        guard !snapshot.loggedOut else { throw WereadError.notLoggedIn }
+        return try await withRecoveryGate {
+            try await self.recoverWithoutLocalCookie(operation, initial: snapshot)
+        }
+    }
+
+    /// 串行化整个恢复过程，避免同一 cookie 并发续期后拿旧 rejected 清掉新会话。
+    private func withRecoveryGate<T>(_ body: () async throws -> T) async throws -> T {
+        await recoveryGate.acquire()
+        do {
+            let value = try await body()
+            await recoveryGate.release()
+            return value
+        } catch {
+            await recoveryGate.release()
+            throw error
+        }
+    }
+
+    private func recoverAfterRejection<T>(
+        _ operation: @escaping (String) async throws -> T,
+        failedCookie initialCookie: String,
+        failedGeneration initialGeneration: Int
+    ) async throws -> T {
+        var failedCookie = initialCookie
+        var failedGeneration = initialGeneration
+        var renewed = false
+        var sawTransient = false
+        var tried = Set<String>([initialCookie])
+
+        for _ in 0..<3 {
+            let snapshot = sessionSnapshot()
+            if snapshot.loggedOut { throw WereadError.notLoggedIn }
+
+            // 恢复期间别处已经换了新会话：先用当前会话重试，不再续期旧 cookie。
+            if Self.looksLoggedIn(snapshot.cookie), snapshot.cookie != failedCookie {
+                failedCookie = snapshot.cookie
+                failedGeneration = snapshot.generation
+                renewed = false
+                tried.insert(failedCookie)
+                do {
+                    return try await operation(failedCookie)
+                } catch let failure as WereadAuthFailure {
+                    if case .transient = failure { throw failure }
+                    guard case .rejected(let failed) = failure else { throw failure }
+                    failedCookie = failed
+                    failedGeneration = sessionSnapshot().generation
+                    continue
+                }
+            }
+
+            guard Self.looksLoggedIn(snapshot.cookie),
+                  snapshot.cookie == failedCookie,
+                  snapshot.generation == failedGeneration
+            else {
+                break
+            }
+            guard !renewed else { break }
+            renewed = true
+
+            switch await WereadService.shared.renew(cookie: failedCookie) {
+            case .renewed(let newCookie) where newCookie != failedCookie:
+                if commitRenewedCookie(
+                    newCookie,
+                    source: failedCookie,
+                    generation: failedGeneration
+                ) {
+                    failedCookie = newCookie
+                    failedGeneration = sessionSnapshot().generation
+                    // 新 cookie 是新的源会话：若它仍被拒绝，允许它自己再续期一次，
+                    // 但绝不把旧 cookie 的 rejected 结果套到它身上。
+                    renewed = false
+                } else {
+                    let now = sessionSnapshot()
+                    if now.loggedOut { throw WereadError.notLoggedIn }
+                    guard Self.looksLoggedIn(now.cookie) else {
+                        // 续期结果因退出/重新登录被丢弃；不要注销新状态。
+                        throw WereadAuthFailure.transient
+                    }
+                    if now.cookie == failedCookie {
+                        // generation 变了但 cookie 没变（例如重登同一串），旧续期不能覆盖。
+                        throw WereadAuthFailure.transient
+                    }
+                    failedCookie = now.cookie
+                    failedGeneration = now.generation
+                    // 换成了别处提交的新会话：这是一份没试过续期的 cookie，
+                    // 下一轮若仍被拒绝要允许它自己走一次 renewal。
+                    renewed = false
+                }
+                tried.insert(failedCookie)
+                do {
+                    return try await operation(failedCookie)
+                } catch let failure as WereadAuthFailure {
+                    if case .transient = failure { throw failure }
+                    guard case .rejected(let failed) = failure else { throw failure }
+                    failedCookie = failed
+                    failedGeneration = sessionSnapshot().generation
+                    continue
+                }
+            case .rejected:
+                break
+            case .unchanged, .transient:
+                // 服务端没给新会话或只是网络失败：保留 cookie，再试一次。
+                // `.unchanged` 说明续期本身成功，后面即便数据请求再被拒绝，
+                // 也不能当作「同源续期失败」去注销，只能报告暂时无法确认。
+                sawTransient = true
+                do {
+                    return try await operation(failedCookie)
+                } catch let failure as WereadAuthFailure {
+                    if case .transient = failure { throw failure }
+                    guard case .rejected(let failed) = failure else { throw failure }
+                    failedCookie = failed
+                    failedGeneration = sessionSnapshot().generation
+                }
+                break
+            case .renewed:
+                break
+            }
+        }
+
+        // 所有系统仓库候选逐份试；某份被拒绝或临时失败都继续下一份。
+        let candidates = await Self.systemCookieCandidates()
+        var lastTransientError: Error?
+        for candidate in candidates {
+            let snapshot = sessionSnapshot()
+            if snapshot.loggedOut { throw WereadError.notLoggedIn }
+            guard tried.insert(candidate).inserted else { continue }
+            do {
+                let value = try await operation(candidate)
+                _ = adoptRecoveredCandidate(
+                    candidate,
+                    expectedCookie: failedCookie,
+                    expectedGeneration: failedGeneration
+                )
+                return value
+            } catch let failure as WereadAuthFailure {
+                switch failure {
+                case .rejected:
+                    continue
+                case .transient:
+                    sawTransient = true
+                    continue
+                }
+            } catch {
+                // 传输 / 解析等临时失败不是服务端拒绝：保留本地 cookie，
+                // 继续试下一份候选，别让第一份候选的网络错误挡住后面的有效会话。
+                sawTransient = true
+                lastTransientError = error
+                continue
+            }
+        }
+
+        if sawTransient {
+            let message = WereadAuthFailure.transient.errorDescription
+            DispatchQueue.main.async { self.errorMessage = message }
+            if let lastTransientError { throw lastTransientError }
+            throw WereadAuthFailure.transient
+        }
+        if handleAuthFailure(expectedCookie: failedCookie, generation: failedGeneration) {
+            throw WereadError.notLoggedIn
+        }
+        // 状态在恢复期间被别处改过（新登录/主动退出）：没有注销任何会话，
+        // 不能对用户谎称登录已过期。
+        throw WereadAuthFailure.transient
+    }
+
+    /// 本地没有有效 cookie 时，也只从系统仓库候选里逐个尝试。
+    private func recoverWithoutLocalCookie<T>(
+        _ operation: @escaping (String) async throws -> T,
+        initial: (cookie: String, generation: Int, loggedOut: Bool)
+    ) async throws -> T {
+        var sawTransient = false
+        var lastTransientError: Error?
+        let candidates = await Self.systemCookieCandidates()
+        for candidate in candidates {
+            let snapshot = sessionSnapshot()
+            if snapshot.loggedOut { throw WereadError.notLoggedIn }
+            do {
+                let value = try await operation(candidate)
+                _ = adoptRecoveredCandidate(
+                    candidate,
+                    expectedCookie: initial.cookie,
+                    expectedGeneration: initial.generation
+                )
+                return value
+            } catch let failure as WereadAuthFailure {
+                switch failure {
+                case .rejected:
+                    continue
+                case .transient:
+                    sawTransient = true
+                    continue
+                }
+            } catch {
+                sawTransient = true
+                lastTransientError = error
+                continue
+            }
+        }
+        if sawTransient {
+            let message = WereadAuthFailure.transient.errorDescription
+            DispatchQueue.main.async { self.errorMessage = message }
+            if let lastTransientError { throw lastTransientError }
+            throw WereadAuthFailure.transient
+        }
+        throw WereadError.notLoggedIn
     }
 
     func logout() {
+        sessionLock.lock()
+        sessionGeneration += 1
+        currentCookie = ""
+        defaults.set(true, forKey: loggedOutKey)
         defaults.removeObject(forKey: cookieKey)
         defaults.removeObject(forKey: nameKey)
+        sessionLock.unlock()
         harvester?.stop()
         harvester = nil
         DispatchQueue.main.async {
@@ -149,10 +553,25 @@ final class WereadStore: ObservableObject {
         }
     }
 
-    /// 服务端说登录失效时调用：清掉本地 cookie，让界面回到「重新登录」。
-    func handleAuthFailure() {
+    /// 只有服务端明确拒绝时才调用：清掉本地 cookie，让界面回到「重新登录」。
+    /// 必须带上失败时的源 cookie 与 generation；状态已变则说明有更新的
+    /// 会话或用户主动退出，不能拿旧请求的结果去清登录态。
+    @discardableResult
+    private func handleAuthFailure(expectedCookie: String, generation: Int) -> Bool {
+        sessionLock.lock()
+        guard sessionGeneration == generation,
+              currentCookie == expectedCookie,
+              !defaults.bool(forKey: loggedOutKey)
+        else {
+            sessionLock.unlock()
+            return false
+        }
+        sessionGeneration += 1
+        currentCookie = ""
+        defaults.set(true, forKey: loggedOutKey)
         defaults.removeObject(forKey: cookieKey)
         defaults.removeObject(forKey: nameKey)
+        sessionLock.unlock()
         DispatchQueue.main.async {
             self.isLoggedIn = false
             self.nickname = ""
@@ -161,21 +580,31 @@ final class WereadStore: ObservableObject {
             self.bookLinks = [:]
             self.errorMessage = WereadError.notLoggedIn.errorDescription
         }
+        return true
     }
 
     // MARK: - 书架
 
     func refreshShelf() async {
-        guard !cookie.isEmpty else { return }
+        if cookie.isEmpty {
+            // 旧版本清过本地 cookie，但共享仓库里可能还有登录态。
+            guard !defaults.bool(forKey: loggedOutKey),
+                  let recovered = Self.cookieHeaderFromSharedStorage()
+            else { return }
+            adopt(cookieHeader: recovered)
+        }
         DispatchQueue.main.async { self.isLoading = true }
         do {
-            let list = try await WereadService.shared.shelf(cookie: cookie)
+            let list = try await withSessionRecovery { attemptCookie in
+                try await WereadService.shared.shelf(cookie: attemptCookie)
+            }
             DispatchQueue.main.async {
                 self.books = list
                 self.errorMessage = nil
             }
-        } catch WereadError.notLoggedIn {
-            handleAuthFailure()
+        } catch let failure as WereadAuthFailure {
+            let message = failure.errorDescription
+            DispatchQueue.main.async { self.errorMessage = message }
         } catch {
             let message = error.localizedDescription
             DispatchQueue.main.async { self.errorMessage = message }
@@ -438,37 +867,19 @@ final class WereadStore: ObservableObject {
     // MARK: - 章节
 
     func chapters(for bookId: String) async throws -> [WereadChapter] {
-        do {
-            return try await WereadService.shared.chapters(bookId: bookId, cookie: cookie)
-        } catch WereadError.notLoggedIn {
-            handleAuthFailure()
-            throw WereadError.notLoggedIn
+        try await withSessionRecovery { attemptCookie in
+            try await WereadService.shared.chapters(bookId: bookId, cookie: attemptCookie)
         }
     }
 
     func content(bookId: String, chapterUid: Int) async throws -> String {
-        do {
-            return try await WereadService.shared.content(
+        try await withSessionRecovery { attemptCookie in
+            try await WereadService.shared.content(
                 bookId: bookId,
                 chapterUid: chapterUid,
-                cookie: cookie
+                cookie: attemptCookie
             )
-        } catch WereadError.notLoggedIn {
-            // 走到这里说明续期也失败了（Service 内部已经试过一次）。
-            // 这才是「真的过期」，清 cookie 让界面回到重新扫码。
-            handleAuthFailure()
-            throw WereadError.notLoggedIn
         }
-    }
-
-    /// 续期拿到的 cookie 落盘，并刷新登录态。
-    ///
-    /// 调用方已经切到主线程（`isLoggedIn` 是 @Published）。
-    /// 只在 cookie 真的变了时才写，避免每章都动 UserDefaults。
-    private func persistRenewedCookie(_ renewed: String) {
-        guard !renewed.isEmpty, renewed != cookie else { return }
-        defaults.set(renewed, forKey: cookieKey)
-        self.isLoggedIn = Self.looksLoggedIn(renewed)
     }
 
     func progress(for bookId: String) async -> WereadProgress? {
@@ -486,6 +897,31 @@ final class WereadStore: ObservableObject {
                 chapterIndex: chapterIndex,
                 cookie: cookie
             )
+        }
+    }
+}
+
+/// 简单的异步互斥：鉴权恢复（续期 + 试系统仓库候选 + 切 cookie）
+/// 一次只跑一条，后来的请求排队，拿到已刷新会话后直接重试。
+private actor WereadRecoveryGate {
+    private var locked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        if !locked {
+            locked = true
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func release() {
+        if waiters.isEmpty {
+            locked = false
+        } else {
+            waiters.removeFirst().resume()
         }
     }
 }
