@@ -472,6 +472,9 @@ final class XhsImageCache {
             diskCapacity: 160 * 1024 * 1024,
             diskPath: "xhs-images"
         )
+        // 图床偶尔不返回也不报错，默认 60 秒超时会让第二张一直灰着。
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
         session = URLSession(configuration: configuration)
     }
 
@@ -496,9 +499,10 @@ final class XhsImageCache {
     /// `original` 是最初请求的 key：回退到原图后结果仍要交回原来的等待者，
     /// 否则 `finish` 找不到 waiter，界面就一直灰着。
     ///
-    /// 三级回退：带 cookie 的桌面请求 → 去掉 `!` 样式后缀的原图 →
-    /// 不带 cookie 的移动端请求。第二张之后经常是受保护图床，前两级都可能
-    /// 403，最后一级能救回来一部分。
+    /// 四级回退：带 cookie 的桌面请求 → 去掉 `!` 样式后缀的原图 →
+    /// 带 cookie 的移动端请求 → 不带 cookie 的移动端请求。
+    /// 第二张之后经常是受保护图床，前两级都可能 403；以前第三级直接丢 cookie，
+    /// 需要「cookie + 移动 UA」的图就永远救不回来，只剩灰块。
     private func load(_ url: String, original: String, stage: Int) {
         // 图床偶尔下发 `http://`，ATS 会直接拦掉；统一提到 https 再请求。
         var value = url
@@ -521,7 +525,7 @@ final class XhsImageCache {
             UserDefaults.standard.string(forKey: "xhs.cookie")?
                 .replacingOccurrences(of: "\r", with: " ")
                 .replacingOccurrences(of: "\n", with: " ") ?? ""
-        if stage < 2, !cookie.isEmpty {
+        if stage < 3, !cookie.isEmpty {
             request.setValue(cookie, forHTTPHeaderField: "Cookie")
         }
         session.dataTask(with: request) { [weak self] data, _, _ in
@@ -529,14 +533,18 @@ final class XhsImageCache {
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 if image == nil {
-                    if stage == 0, let fallback = Self.originalURL(url), fallback != url {
-                        // 末尾的 `!xxx` 是图床的处理样式（webp / 裁切），
-                        // iOS 15 上偶尔解不出来，退回原图再试一次。
-                        self.load(fallback, original: original, stage: 1)
+                    if stage == 0 {
+                        if let fallback = Self.originalURL(url), fallback != url {
+                            // 末尾的 `!xxx` 是图床的处理样式（webp / 裁切），
+                            // iOS 15 上偶尔解不出来，退回原图再试一次。
+                            self.load(fallback, original: original, stage: 1)
+                        } else {
+                            self.load(original, original: original, stage: 2)
+                        }
                         return
                     }
-                    if stage < 2 {
-                        self.load(original, original: original, stage: 2)
+                    if stage < 3 {
+                        self.load(original, original: original, stage: stage + 1)
                         return
                     }
                 }
@@ -569,6 +577,7 @@ struct XhsImageView: View {
     var fit: Bool = false
 
     @State private var image: UIImage?
+    @State private var retries = 0
 
     var body: some View {
         Group {
@@ -587,11 +596,15 @@ struct XhsImageView: View {
                     .fill(Color(.tertiarySystemFill))
             }
         }
-        .onAppear { load() }
+        .onAppear {
+            retries = 0
+            load()
+        }
         // 详情页换图 / 卡片换图时 URL 会变，但视图身份不变：
         // 不重新加载就会一直显示上一张（或者一直灰着）。
         .onChange(of: url) { _ in
             image = nil
+            retries = 0
             load()
         }
     }
@@ -599,15 +612,25 @@ struct XhsImageView: View {
     private func load() {
         guard let url = url, !url.isEmpty else {
             image = nil
+            retries = 0
             return
         }
         if let cached = XhsImageCache.shared.cached(url) {
             image = cached
+            retries = 0
             return
         }
         XhsImageCache.shared.image(for: url) { loaded in
             if let loaded = loaded {
                 self.image = loaded
+                self.retries = 0
+            } else if self.retries < 2 {
+                // 图床偶发 403 / 超时：隔一会儿再走一遍四级回退，
+                // 不要一次失败就灰到用户退出页面。
+                self.retries += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    self.load()
+                }
             }
         }
     }

@@ -117,6 +117,15 @@ enum XhsJSON {
 
     static func array(_ value: Any?) -> [[String: Any]] { value as? [[String: Any]] ?? [] }
 
+    /// 图片列表在接口和 SSR 里出现过三种写法，元素既可能是字典，也可能是纯地址；
+    /// 只按 `[[String: Any]]` 转会把字符串数组和混合数组整段转成空数组。
+    static func imageList(_ value: Any?) -> [Any] {
+        if let list = value as? [Any] { return list }
+        if let object = value as? [String: Any] { return [object] }
+        if let text = value as? String, !text.isEmpty { return [text] }
+        return []
+    }
+
     static func string(_ value: Any?) -> String? {
         if let text = value as? String, !text.isEmpty { return text }
         if let number = value as? NSNumber, number.intValue != 0 { return number.stringValue }
@@ -163,7 +172,9 @@ enum XhsJSON {
     /// 图片地址藏在好几层里，挨个试。
     static func imageURL(_ value: Any?) -> (url: String, aspect: CGFloat)? {
         guard let object = object(value) else {
-            if let text = string(value) { return (text, 0) }
+            // 字符串形态同样要走 https 归一化：小红书会下发 `http://sns-webpic...`，
+            // 原样返回会被 ATS 拦掉，最后就是一块灰。
+            if let text = string(value) { return (XhsNote.normalizedImageURL(text), 0) }
             return nil
         }
         var candidates: [String] = []
@@ -174,8 +185,13 @@ enum XhsJSON {
         for key in ["url", "urlRaw", "url_raw", "url_pre", "urlPre", "url_default", "urlDefault"] {
             if let value = string(object[key]), !value.isEmpty { candidates.append(value) }
         }
-        for info in array(object["info_list"]) {
-            if let value = string(info["url"]), !value.isEmpty { candidates.append(value) }
+        let infoList = imageList(object["info_list"]) + imageList(object["infoList"])
+        for item in infoList {
+            if let info = XhsJSON.object(item) {
+                if let value = string(info["url"]), !value.isEmpty { candidates.append(value) }
+            } else if let value = string(item), !value.isEmpty {
+                candidates.append(value)
+            }
         }
         // iOS 15 的 UIImage 解不了 avif（webp 能解）。按上面的清晰度顺序，取第一条
         // 非 avif 的地址；只有全都 avif 时才退回第一条。
@@ -186,6 +202,10 @@ enum XhsJSON {
         let height = CGFloat(int(object["height"]))
         if width > 0, height > 0 {
             aspect = width / height
+        } else if let info = XhsJSON.object(infoList.first) {
+            let infoWidth = CGFloat(int(info["width"]))
+            let infoHeight = CGFloat(int(info["height"]))
+            if infoWidth > 0, infoHeight > 0 { aspect = infoWidth / infoHeight }
         }
         guard let resolved = url else { return nil }
         return (XhsNote.normalizedImageURL(resolved), aspect)
@@ -232,15 +252,23 @@ enum XhsJSON {
 
         var images: [String] = []
         var aspect: CGFloat = 0
-        for item in array(card["image_list"]) {
-            if let info = imageURL(item) {
+        // 接口/SSR 混用过 `image_list`、`imageList`、`images` 三种键；
+        // 以前只认第一种，遇到后两种就只剩 cover，一张图。
+        for list in [card["image_list"], card["imageList"], card["images"]] {
+            for item in imageList(list) {
+                guard let info = imageURL(item) else { continue }
                 if images.isEmpty { aspect = info.aspect }
-                images.append(info.url)
+                if !images.contains(info.url) { images.append(info.url) }
             }
         }
-        if images.isEmpty, let info = imageURL(card["cover"]) {
-            aspect = info.aspect
-            images.append(info.url)
+        if images.isEmpty {
+            for key in ["cover", "image", "cover_url", "coverUrl"] {
+                if let info = imageURL(card[key]) {
+                    aspect = info.aspect
+                    images.append(info.url)
+                    break
+                }
+            }
         }
         guard !images.isEmpty else { return nil }
         if aspect <= 0 { aspect = 0.75 }

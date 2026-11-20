@@ -221,12 +221,17 @@ struct XhsNoteView: View {
             TabView(selection: $page) {
                 ForEach(Array(current.images.enumerated()), id: \.offset) { index, url in
                     XhsImageView(url: url, fit: true)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
                         .contentShape(Rectangle())
                         .onTapGesture { viewer = XhsViewerTarget(index: index) }
                         .tag(index)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .always))
+            // 默认圆点在白底 / 浅色图上几乎看不见，用户会以为只有一张。
+            .indexViewStyle(.page(backgroundDisplayMode: .always))
+            .frame(maxWidth: .infinity)
             .frame(height: mediaHeight)
             .background(Color(.secondarySystemBackground))
             .overlay(alignment: .bottomTrailing) { pageBadge }
@@ -580,8 +585,15 @@ struct XhsNoteView: View {
             await MainActor.run {
                 var merged = full
                 // 详情接口偶尔只回一张图；首页卡片已经有多图时不要倒退。
-                if merged.images.count < note.images.count {
-                    merged.images = note.images
+                // 反过来详情也可能比卡片更全，所以做并集：详情在前（token 更新、
+                // 地址更可信），卡片只补详情缺的那几张，不再整段覆盖。
+                var seen = Set<String>()
+                var mergedImages: [String] = []
+                for url in (full.images + note.images) where !url.isEmpty {
+                    if seen.insert(url).inserted { mergedImages.append(url) }
+                }
+                if !mergedImages.isEmpty {
+                    merged.images = mergedImages
                 }
                 detail = merged
                 // 详情里的图可能比首页卡片多：页码越界会直接显示空白。
