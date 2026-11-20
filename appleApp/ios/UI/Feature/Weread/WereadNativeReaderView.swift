@@ -566,6 +566,11 @@ private struct WereadChapterWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        // 和网页版阅读器保持一致：按字符选中，并显式打开文本交互。
+        // 默认的 dynamic 粒度会把整段/整页当成一个可选块，正文里的
+        // 内联 user-select 锁又会让长按根本起不了选区。
+        configuration.selectionGranularity = .character
+        configuration.preferences.isTextInteractionEnabled = true
         configuration.userContentController.add(context.coordinator, name: "weread")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
@@ -840,20 +845,16 @@ enum WereadReaderHTML {
             -webkit-text-size-adjust: 100%;
             word-wrap: break-word;
             overflow-wrap: break-word;
+            -webkit-user-select: text;
+            user-select: text;
+            -webkit-touch-callout: default;
         }
-        /* 不要给 html/body 设 user-select:none：iOS 15 的 WKWebView 里，
-           祖先一旦是 none，子节点的 user-select:text 经常盖不回来，直接表现
-           为「怎么长按都选不了字」。正文整块放开选择，只对图片和工具条禁止。 */
+        /* 正文所有节点都放开选择。WeRead 章节 HTML 自带内联
+           `-webkit-user-select:none`（有时还带 !important），只给 p/span
+           列白名单盖不住更深层的 div，所以这里用 ID 选择器覆盖整棵正文树；
+           内联锁由下面的 JS 在页面加载后直接 removeProperty 清掉。 */
         #wr-content,
-        #wr-content p, #wr-content div, #wr-content section, #wr-content article,
-        #wr-content h1, #wr-content h2, #wr-content h3,
-        #wr-content h4, #wr-content h5, #wr-content h6, #wr-content li,
-        #wr-content blockquote, #wr-content pre, #wr-content code,
-        #wr-content td, #wr-content th, #wr-content tr, #wr-content tbody,
-        #wr-content em, #wr-content strong, #wr-content mark,
-        #wr-content span, #wr-content a, #wr-content i, #wr-content b,
-        #wr-content u, #wr-content font, #wr-content cite, #wr-content small,
-        #wr-content sup, #wr-content sub {
+        #wr-content * {
             -webkit-user-select: text !important;
             user-select: text !important;
             -webkit-touch-callout: default !important;
@@ -916,28 +917,30 @@ enum WereadReaderHTML {
             var tools = document.getElementById('wr-tools');
             var savedRange = null;
 
-            // iOS 15 的 WKWebView 对 user-select 的继承很挑：只要祖先里有 none，
-            // 长按就可能根本起不了选区。微信读书的正文层级不固定（p / div / 更深
-            // 的嵌套都有），所以不靠一张静态选择器表，而是在手指按下时把命中的
-            // 元素往上 4 层临时放开选择。这样任何结构都能选中，同时不放开 body，
-            // 避免「一拖就整章全选」。
-            function enableSelectionAt(target) {
-                var el = target;
-                var depth = 0;
-                while (el && el !== document.body && depth < 4) {
+            // 章节 HTML 会在元素上内联写 user-select:none / touch-callout:none，
+            // 且可能带 !important。样式表里的 !important 压不过内联 !important，
+            // 所以加载后直接把正文树上的这些内联属性删掉。
+            function stripSelectionLocks(root) {
+                if (!root) return;
+                var nodes = [root];
+                var descendants = root.querySelectorAll('*');
+                for (var i = 0; i < descendants.length; i++) {
+                    nodes.push(descendants[i]);
+                }
+                for (var j = 0; j < nodes.length; j++) {
+                    var el = nodes[j];
                     try {
-                        el.style.setProperty('-webkit-user-select', 'text', 'important');
-                        el.style.setProperty('user-select', 'text', 'important');
-                        el.style.setProperty('-webkit-touch-callout', 'default', 'important');
+                        el.removeAttribute('unselectable');
+                        if (!el.style) continue;
+                        el.style.removeProperty('-webkit-user-select');
+                        el.style.removeProperty('user-select');
+                        el.style.removeProperty('-webkit-touch-callout');
                     } catch (e) {}
-                    el = el.parentElement;
-                    depth += 1;
                 }
             }
-            ['touchstart', 'pointerdown', 'mousedown'].forEach(function (name) {
-                document.addEventListener(name, function (event) {
-                    if (event.target) { enableSelectionAt(event.target); }
-                }, { passive: true, capture: true });
+            stripSelectionLocks(document.getElementById('wr-content'));
+            window.addEventListener('load', function () {
+                stripSelectionLocks(document.getElementById('wr-content'));
             });
 
             function hideTools() {
@@ -955,11 +958,19 @@ enum WereadReaderHTML {
             document.addEventListener('selectionchange', function () {
                 setTimeout(function () {
                     var current = selectedText();
-                    if (!current) { hideTools(); return; }
+                    if (!current) {
+                        // 点工具条时系统会先收起选区，但 click 可能晚一拍才到；
+                        // 只要 savedRange 还在就保留工具条，避免第一下点击落空。
+                        if (!savedRange) { hideTools(); }
+                        return;
+                    }
                     var rect = current.range.getBoundingClientRect();
                     if (!rect || (rect.width === 0 && rect.height === 0)) { hideTools(); return; }
                     var top = rect.top - 46;
                     if (top < 8) top = rect.bottom + 8;
+                    if (top + 40 > window.innerHeight - 8) {
+                        top = Math.max(8, rect.top - 46);
+                    }
                     var left = Math.min(Math.max(rect.left + rect.width / 2 - 62, 8), window.innerWidth - 132);
                     tools.style.top = top + 'px';
                     tools.style.left = left + 'px';
@@ -1001,12 +1012,21 @@ enum WereadReaderHTML {
             }
 
             function keepSelection(event) {
-                event.preventDefault();
                 event.stopPropagation();
             }
-            ['touchstart', 'touchend', 'mousedown'].forEach(function (name) {
-                document.getElementById('wr-hl').addEventListener(name, keepSelection, { passive: false });
-                document.getElementById('wr-note').addEventListener(name, keepSelection, { passive: false });
+            // 不能 preventDefault：touchend 被拦后 iOS 不会再合成 click，
+            // 划线和想法按钮就成了「看得见但点不动」。
+            ['touchstart', 'pointerdown', 'mousedown'].forEach(function (name) {
+                document.getElementById('wr-hl').addEventListener(name, keepSelection, { passive: true });
+                document.getElementById('wr-note').addEventListener(name, keepSelection, { passive: true });
+            });
+            // 点正文或空白处才收起工具条并清掉暂存选区。
+            ['touchstart', 'mousedown'].forEach(function (name) {
+                document.addEventListener(name, function (event) {
+                    if (event.target && tools.contains(event.target)) return;
+                    savedRange = null;
+                    hideTools();
+                }, { passive: true, capture: true });
             });
 
             document.getElementById('wr-hl').addEventListener('click', function (event) {
