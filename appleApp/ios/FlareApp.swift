@@ -169,7 +169,10 @@ struct FlareApp: App {
 
     @ViewBuilder
     private var appRoot: some View {
-        if #available(iOS 18.0, *) {
+        // 15PM(iPhone, iOS18+) 走 FlareRoot 的 iOS18 新 Tab API（.sidebarAdaptable / Tab(value:role:)）
+        // 会在根视图渲染阶段 SIGTRAP 闪退；而 6S 走的 BackportFlareRoot 一直稳定。
+        // 这里让 iPhone 也走稳定的 BackportFlareRoot，仅在 iPad 上保留 FlareRoot（侧边栏 tab 只有 iPad 用得到）。
+        if #available(iOS 18.0, *), UIDevice.current.userInterfaceIdiom == .pad {
             FlareRoot()
                 .onAppear {
                     LaunchGuard.markFullUIShown()
