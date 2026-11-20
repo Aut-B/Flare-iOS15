@@ -299,11 +299,19 @@ enum Route: Hashable, Identifiable {
         case .rssManagement:
             RssScreen()
         case .weread:
-            WereadTabView()
+            if FlareBuildVariant.isPhoneLite {
+                PhoneLiteUnavailableView()
+            } else {
+                WereadTabView()
+            }
         case .instagram:
             InstagramFeedView()
         case .xiaohongshu:
-            XhsTabView()
+            if FlareBuildVariant.isPhoneLite {
+                PhoneLiteUnavailableView()
+            } else {
+                XhsTabView()
+            }
         case .draftBox:
             DraftBoxScreen { groupId in
                 onNavigate(.composeDraft(groupId))
@@ -671,5 +679,19 @@ enum Route: Hashable, Identifiable {
         default:
             EmptyView()
         }
+    }
+}
+
+private struct PhoneLiteUnavailableView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "iphone.slash")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text("Not available in this build")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

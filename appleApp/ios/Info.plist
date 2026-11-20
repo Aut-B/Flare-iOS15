@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>FlarePhoneLite</key>
+	<string>$(FLARE_PHONE_LITE)</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Flare connects to your configured proxy servers and local media playback service.</string>
     <key>NSAppTransportSecurity</key>

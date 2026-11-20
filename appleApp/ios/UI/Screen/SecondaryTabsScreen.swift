@@ -1,8 +1,18 @@
 import SwiftUI
+import Foundation
 import KotlinSharedUI
 import FlareAppleCore
 import FlareAppleUI
 import NavigationBackport
+
+/// 15PM 精简版开关：构建时用 `FLARE_PHONE_LITE=YES` 注入 Info.plist 的
+/// `FlarePhoneLite`。普通包不传这个构建设置，值为空 → false，6S 上行为不变。
+enum FlareBuildVariant {
+    static let isPhoneLite: Bool = {
+        let value = Bundle.main.object(forInfoDictionaryKey: "FlarePhoneLite") as? String
+        return value == "YES" || value == "true"
+    }()
+}
 
 struct SecondaryTabsScreen: View {
     @Environment(\.dismiss) private var dismiss
@@ -68,9 +78,13 @@ struct SecondaryTabsScreen: View {
                 // 在主导航栈上 push，全系统版本行为一致，也不再有任何嵌套导航栈。
                 secondaryRouteButton("Drafts", icon: .penToSquare, route: .draftBox)
                 secondaryRouteButton("settings_rss_management_title", icon: .squareRss, route: .rssManagement)
-                secondaryRouteButton("微信读书", icon: .bookmark, route: .weread)
+                if !FlareBuildVariant.isPhoneLite {
+                    secondaryRouteButton("微信读书", icon: .bookmark, route: .weread)
+                }
                 secondaryRouteButton("Instagram", icon: .photoFilm, route: .instagram)
-                secondaryRouteButton("小红书", icon: .image, route: .xiaohongshu)
+                if !FlareBuildVariant.isPhoneLite {
+                    secondaryRouteButton("小红书", icon: .image, route: .xiaohongshu)
+                }
                 secondaryRouteButton("local_history_title", icon: .clockRotateLeft, route: .localHostory)
                 if aiAgentEnabledPresenter.state.enabled {
                     secondaryRouteButton("agent_history_title", icon: .robot, route: .agentHistory)
@@ -116,9 +130,9 @@ func route(for tab: SecondaryTabsPresenter.Tab, accountKey: MicroBlogKey) -> Rou
     case "instagram.com":
         return .instagram
     case "xiaohongshu.com":
-        return .xiaohongshu
+        return FlareBuildVariant.isPhoneLite ? nil : Route.xiaohongshu
     case "weread.qq.com":
-        return .weread
+        return FlareBuildVariant.isPhoneLite ? nil : Route.weread
     default:
         break
     }

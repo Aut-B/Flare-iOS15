@@ -82,7 +82,8 @@ struct FlareRoot: View {
                         }
                     }
                     ForEach(SecondarySidebarStaticRoute.allCases.filter { route in
-                        route != .agentHistory || aiAgentEnabledPresenter.state.enabled
+                        !route.isPhoneLiteHidden
+                            && (route != .agentHistory || aiAgentEnabledPresenter.state.enabled)
                     }, id: \.self) { route in
                         secondarySidebarStaticRoute(route)
                     }
@@ -376,6 +377,17 @@ private enum SecondarySidebarStaticRoute: CaseIterable {
     case localHistory
     case agentHistory
     case settings
+
+    /// 15PM 精简版不展示的板块（代码保留，只是不放入侧边栏）。
+    var isPhoneLiteHidden: Bool {
+        guard FlareBuildVariant.isPhoneLite else { return false }
+        switch self {
+        case .weread, .xiaohongshu:
+            return true
+        default:
+            return false
+        }
+    }
 
     var selectionValue: String {
         switch self {

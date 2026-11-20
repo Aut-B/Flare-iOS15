@@ -14,7 +14,7 @@ private enum NativeSocialTab {
     case weread
 }
 
-private func nativeSocialTab(for tab: UiTimelineTabItem) -> NativeSocialTab? {
+private func detectedNativeSocialTab(for tab: UiTimelineTabItem) -> NativeSocialTab? {
     // `tab.id` 是 `home:<accountKey>`，accountKey 里带 host；比标题可靠，
     // 用户改过标签名也认得出来。老版本标签页再用标题兜底。
     let key = tab.id.lowercased()
@@ -30,6 +30,27 @@ private func nativeSocialTab(for tab: UiTimelineTabItem) -> NativeSocialTab? {
         return .weread
     default:
         return nil
+    }
+}
+
+private func nativeSocialTab(for tab: UiTimelineTabItem) -> NativeSocialTab? {
+    guard let detected = detectedNativeSocialTab(for: tab) else { return nil }
+    guard FlareBuildVariant.isPhoneLite else { return detected }
+    switch detected {
+    case .xiaohongshu, .weread:
+        return nil
+    case .instagram:
+        return .instagram
+    }
+}
+
+private func isPhoneLiteHiddenTab(_ tab: UiTimelineTabItem) -> Bool {
+    guard FlareBuildVariant.isPhoneLite else { return false }
+    switch detectedNativeSocialTab(for: tab) {
+    case .xiaohongshu, .weread:
+        return true
+    default:
+        return false
     }
 }
 
@@ -94,7 +115,8 @@ struct HomeTimelineScreen: View {
     var body: some View {
         GeometryReader { proxy in
             StateView(state: presenter.state.tabState) { state in
-                let tabs: [UiTimelineTabItem] = state.cast(UiTimelineTabItem.self)
+                let allTabs: [UiTimelineTabItem] = state.cast(UiTimelineTabItem.self)
+                let tabs: [UiTimelineTabItem] = allTabs.filter { !isPhoneLiteHiddenTab($0) }
                 if tabs.isEmpty {
                     BackportContentUnavailableView("tab_settings_title", systemImage: "square.grid.2x2")
                         .toolbar {
