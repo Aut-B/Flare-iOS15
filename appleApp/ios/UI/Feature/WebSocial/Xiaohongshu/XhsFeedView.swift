@@ -492,75 +492,111 @@ final class XhsImageCache {
             return
         }
         waiters[url] = [completion]
-        load(url, original: url, stage: 0)
+        load(Self.loadPlan(for: url), index: 0, original: url)
     }
 
-    /// 小红书图床对 Referer / UA 有要求，个别机型还要避开 `!` 样式后缀。
+    /// 一个请求组合：清晰度候选 + 鉴权方式。
+    private struct LoadStep {
+        let url: String
+        let mobileUserAgent: Bool
+        let sendsCookie: Bool
+    }
+
+    /// 先要原图（`!` 前是原图 token，换到原图 CDN），再退到展示图。
+    /// DOM/SSR 兜底路径会把 `urlDefault` 放在最前（见 `XhsStore.firstURL`），
+    /// 拿到的就是低清 WebP；这里按 token 重建原图地址，能一并修掉那些笔记。
+    private static func loadPlan(for raw: String) -> [LoadStep] {
+        let display = XhsNote.normalizedImageURL(raw)
+        var urls: [String] = []
+        func add(_ value: String?) {
+            guard let value = value, !value.isEmpty, !urls.contains(value) else { return }
+            urls.append(value)
+        }
+        let token = XhsNote.imageToken(display)
+        add(XhsNote.originalImageURL(display))
+        if let token = token {
+            // ci 的 w/1440 仍是清晰大图，但比原图小，适合 6S 做第二候选。
+            add("https://ci.xiaohongshu.com/\(token)?imageView2/2/w/1440/format/jpg/v3")
+        }
+        add(XhsNote.strippedImageURL(display))
+        add(display)
+
+        var steps: [LoadStep] = []
+        func append(_ url: String, mobile: Bool, cookie: Bool) {
+            let duplicate = steps.contains {
+                $0.url == url && $0.mobileUserAgent == mobile && $0.sendsCookie == cookie
+            }
+            guard !duplicate else { return }
+            steps.append(LoadStep(url: url, mobileUserAgent: mobile, sendsCookie: cookie))
+        }
+        for (index, url) in urls.enumerated() {
+            append(url, mobile: false, cookie: true)
+            if index == 0 {
+                // 受保护图床有时只认移动端 UA；原图候选也给它一次机会。
+                append(url, mobile: true, cookie: true)
+            }
+            if url == display {
+                append(url, mobile: true, cookie: true)
+                append(url, mobile: true, cookie: false)
+            }
+        }
+        return steps
+    }
+
     /// `original` 是最初请求的 key：回退到原图后结果仍要交回原来的等待者，
     /// 否则 `finish` 找不到 waiter，界面就一直灰着。
-    ///
-    /// 四级回退：带 cookie 的桌面请求 → 去掉 `!` 样式后缀的原图 →
-    /// 带 cookie 的移动端请求 → 不带 cookie 的移动端请求。
-    /// 第二张之后经常是受保护图床，前两级都可能 403；以前第三级直接丢 cookie，
-    /// 需要「cookie + 移动 UA」的图就永远救不回来，只剩灰块。
-    private func load(_ url: String, original: String, stage: Int) {
-        // 图床偶尔下发 `http://`，ATS 会直接拦掉；统一提到 https 再请求。
-        var value = url
-        if value.hasPrefix("//") { value = "https:" + value }
-        if value.hasPrefix("http://") { value = "https://" + value.dropFirst(7) }
-        guard let target = URL(string: value) else {
+    private func load(_ steps: [LoadStep], index: Int, original: String) {
+        guard index < steps.count else {
             finish(original, image: nil)
             return
         }
+        let step = steps[index]
+        // 图床偶尔下发 `http://`，ATS 会直接拦掉；统一提到 https 再请求。
+        var value = step.url
+        if value.hasPrefix("//") { value = "https:" + value }
+        if value.hasPrefix("http://") { value = "https://" + value.dropFirst(7) }
+        guard let target = URL(string: value) else {
+            load(steps, index: index + 1, original: original)
+            return
+        }
         var request = URLRequest(url: target)
+        request.timeoutInterval = 12
         request.setValue("https://www.xiaohongshu.com/", forHTTPHeaderField: "Referer")
         request.setValue(
-            stage >= 2 ? WebPlatformUserAgent.mobile : WebPlatformUserAgent.desktop,
+            step.mobileUserAgent ? WebPlatformUserAgent.mobile : WebPlatformUserAgent.desktop,
             forHTTPHeaderField: "User-Agent"
         )
         request.setValue("image/webp,image/apng,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
         // 受保护的图（尤其是详情页第二张之后）不带登录 Cookie 会回 403，
         // 表现就是卡片一直灰着。`XhsStore` 把 cookie 存在这个 key 里。
-        let cookie =
-            UserDefaults.standard.string(forKey: "xhs.cookie")?
-                .replacingOccurrences(of: "\r", with: " ")
-                .replacingOccurrences(of: "\n", with: " ") ?? ""
-        if stage < 3, !cookie.isEmpty {
-            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        if step.sendsCookie {
+            let cookie =
+                UserDefaults.standard.string(forKey: "xhs.cookie")?
+                    .replacingOccurrences(of: "\r", with: " ")
+                    .replacingOccurrences(of: "\n", with: " ") ?? ""
+            if !cookie.isEmpty {
+                request.setValue(cookie, forHTTPHeaderField: "Cookie")
+            }
         }
         session.dataTask(with: request) { [weak self] data, _, _ in
             let image = data.flatMap { UIImage(data: $0) }
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                if image == nil {
-                    if stage == 0 {
-                        if let fallback = Self.originalURL(url), fallback != url {
-                            // 末尾的 `!xxx` 是图床的处理样式（webp / 裁切），
-                            // iOS 15 上偶尔解不出来，退回原图再试一次。
-                            self.load(fallback, original: original, stage: 1)
-                        } else {
-                            self.load(original, original: original, stage: 2)
-                        }
-                        return
-                    }
-                    if stage < 3 {
-                        self.load(original, original: original, stage: stage + 1)
-                        return
-                    }
+                if let image = image {
+                    self.finish(original, image: image, resolved: target.absoluteString)
+                } else {
+                    self.load(steps, index: index + 1, original: original)
                 }
-                self.finish(original, image: image)
             }
         }.resume()
     }
 
-    private static func originalURL(_ url: String) -> String? {
-        guard let index = url.lastIndex(of: "!") else { return nil }
-        let value = String(url[url.startIndex..<index])
-        return value.isEmpty ? nil : value
-    }
-    private func finish(_ url: String, image: UIImage?) {
+    private func finish(_ url: String, image: UIImage?, resolved: String? = nil) {
         if let image = image {
             cache.setObject(image, forKey: url as NSString)
+            if let resolved = resolved, resolved != url {
+                cache.setObject(image, forKey: resolved as NSString)
+            }
         }
         let list = waiters[url] ?? []
         waiters[url] = nil

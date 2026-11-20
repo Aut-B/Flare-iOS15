@@ -42,9 +42,73 @@ struct XhsNote: Identifiable, Hashable {
     /// 小红书偶尔会下发 `http://sns-webpic...`：iOS 的 ATS 直接拦掉，
     /// 表现就是「第一张能看、第二张一片灰」。`//` 开头的协议相对地址同理。
     static func normalizedImageURL(_ raw: String) -> String {
-        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var value = raw
+            .replacingOccurrences(of: "\u{FEFF}", with: "")
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: "\n", with: "")
+            .replacingOccurrences(of: "\t", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if value.hasPrefix("//") { value = "https:" + value }
         if value.hasPrefix("http://") { value = "https://" + value.dropFirst(7) }
+        return value
+    }
+
+    /// 小红书图床把原图 token 放在 `!` 前，`!nd_dft_wlteh_webp_3` 只是 CDN
+    /// 生成的有损 WebP 展示变体；`!nd_prv...` 更是缩略预览。首页半屏卡片把它
+    /// 放大后就会出现块状「碎图」，所以下载前要按 token 换回原图地址。
+    ///
+    /// `sns-webpic-*` 的路径是 `/<时间戳>/<hash>/[spectrum/]<token>!nd_dft...`，
+    /// 原图 CDN 只认最后的 token；带 `spectrum/` 的图要把这个前缀一起保留。
+    /// DOM/HTML 里的 `!` 可能被写成 `%21`，两种都要能截断。
+    static func imageToken(_ raw: String) -> String? {
+        let value = normalizedImageURL(raw)
+        guard let components = URLComponents(string: value),
+              let host = components.host?.lowercased(),
+              (host.hasSuffix(".xhscdn.com") || host == "ci.xiaohongshu.com"),
+              !host.hasPrefix("sns-avatar")
+        else { return nil }
+        var path = components.percentEncodedPath
+        for marker in ["!", "%21"] {
+            if let range = path.range(of: marker, options: .caseInsensitive) {
+                path = String(path[..<range.lowerBound])
+            }
+        }
+        path = path.replacingOccurrences(of: "/wmwatermark/", with: "/")
+        var parts = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        if let spectrum = parts.firstIndex(where: { $0.lowercased() == "spectrum" }) {
+            parts = Array(parts[spectrum...])
+        } else if parts.count > 1 {
+            parts = [parts[parts.count - 1]]
+        }
+        let token = parts.joined(separator: "/")
+        guard token.count >= 8 else { return nil }
+        return token
+    }
+
+    /// `sns-webpic-*` 域名只提供压缩/加水印变体；只删 `!` 后缀、域名不变时
+    /// 经常 403/404，于是又退回模糊的展示图。原图要走 `sns-img-bd`。
+    static func originalImageURL(_ raw: String) -> String? {
+        guard let token = imageToken(raw) else { return nil }
+        return "https://sns-img-bd.xhscdn.com/\(token)"
+    }
+
+    /// 去掉 `!nd_dft...` 之类处理后缀；query 是裁剪/缩放命令时也一并去掉。
+    static func strippedImageURL(_ raw: String) -> String? {
+        let source = normalizedImageURL(raw)
+        var value = source
+        for marker in ["!", "%21"] {
+            if let range = value.range(of: marker, options: .caseInsensitive) {
+                value = String(value[..<range.lowerBound])
+            }
+        }
+        if let components = URLComponents(string: value),
+           let query = components.percentEncodedQuery?.lowercased(),
+           query.contains("imageview") || query.contains("x-oss-process") || query.contains("format/") {
+            var clean = components
+            clean.percentEncodedQuery = nil
+            value = clean.string ?? value
+        }
+        guard value != source else { return nil }
         return value
     }
     /// 视频直链。首页流里就带着，有它就能原生播放，不用再请求详情。
@@ -177,26 +241,48 @@ enum XhsJSON {
             if let text = string(value) { return (XhsNote.normalizedImageURL(text), 0) }
             return nil
         }
-        var candidates: [String] = []
-        // 顺序就是清晰度优先级：`url` 是原图，`url_pre` 是中等预览，`url_default`
-        // 是最小的缩略图。以前把 `url_default` 放最前面，首页卡片和详情页拿到的
-        // 全是缩略图，用户看到的就是「图片好糊」。info_list 里的地址通常是原图，
-        // 作为补充放在最后，避免它抢在 url 前面挑了低分辨率那条。
-        for key in ["url", "urlRaw", "url_raw", "url_pre", "urlPre", "url_default", "urlDefault"] {
-            if let value = string(object[key]), !value.isEmpty { candidates.append(value) }
+        var candidates: [(url: String, score: Int)] = []
+        // `url` 仍是完整展示图，`url_pre` 是预览，`url_default` 是缩略图。
+        // 旧顺序把 `url_pre` 放在 `url_default` 前面，url 缺失时会先挑到更小的
+        // `!nd_prv` 预览图；现在按清晰度打分，不让 preview 抢到 default 前面。
+        for (key, score) in [
+            ("url", 100), ("urlRaw", 110), ("url_raw", 110),
+            ("url_default", 90), ("urlDefault", 90),
+            ("url_pre", 20), ("urlPre", 20),
+        ] {
+            if let value = string(object[key]), !value.isEmpty {
+                candidates.append((XhsNote.normalizedImageURL(value), score))
+            }
         }
         let infoList = imageList(object["info_list"]) + imageList(object["infoList"])
         for item in infoList {
             if let info = XhsJSON.object(item) {
-                if let value = string(info["url"]), !value.isEmpty { candidates.append(value) }
+                guard let value = string(info["url"]), !value.isEmpty else { continue }
+                let scene = (string(info["image_scene"]) ?? string(info["imageScene"]) ?? "").uppercased()
+                // info_list 常同时给 WB_PRV 和 WB_DFT；取前者会拿到预览图。
+                let score = scene == "WB_DFT" ? 95 : (scene == "WB_PRV" ? 10 : 60)
+                candidates.append((XhsNote.normalizedImageURL(value), score))
             } else if let value = string(item), !value.isEmpty {
-                candidates.append(value)
+                candidates.append((XhsNote.normalizedImageURL(value), 60))
             }
         }
-        // iOS 15 的 UIImage 解不了 avif（webp 能解）。按上面的清晰度顺序，取第一条
-        // 非 avif 的地址；只有全都 avif 时才退回第一条。
-        let url = candidates.first(where: { !$0.lowercased().contains("avif") })
-            ?? candidates.first
+        // iOS 15 的 UIImage 解不了 avif（webp 能解）。先排除 avif，再按清晰度取
+        // 最高分；只有全都 avif 时才保留原顺序。
+        let usable = candidates.filter { !$0.url.lowercased().contains("avif") }
+        let pool = usable.isEmpty ? candidates : usable
+        var resolved: (url: String, score: Int)?
+        for candidate in pool {
+            var score = candidate.score
+            let lower = (candidate.url.removingPercentEncoding ?? candidate.url).lowercased()
+            if lower.contains("!nd_prv") || lower.contains("nd_prv_") || lower.contains("!nc_") {
+                score -= 80
+            }
+            if let current = resolved {
+                if score > current.score { resolved = (url: candidate.url, score: score) }
+            } else {
+                resolved = (url: candidate.url, score: score)
+            }
+        }
         var aspect: CGFloat = 0
         let width = CGFloat(int(object["width"]))
         let height = CGFloat(int(object["height"]))
@@ -207,8 +293,8 @@ enum XhsJSON {
             let infoHeight = CGFloat(int(info["height"]))
             if infoWidth > 0, infoHeight > 0 { aspect = infoWidth / infoHeight }
         }
-        guard let resolved = url else { return nil }
-        return (XhsNote.normalizedImageURL(resolved), aspect)
+        guard let url = resolved?.url else { return nil }
+        return (url, aspect)
     }
 
     /// 视频直链。`video.media.stream` 里按编码分了 h264 / h265 / av1 三档，
