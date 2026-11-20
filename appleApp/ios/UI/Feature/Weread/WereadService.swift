@@ -82,6 +82,12 @@ final class WereadService: @unchecked Sendable {
                 log.info("weread: reader page has no session beacon")
                 return nil
             }
+            // 只解析出 token、没有 `psvts`/`pclts` 的页面没法拿来取正文，
+            // 当没信标处理，让调用方直接走旧版请求。
+            guard !parsed.isEmpty else {
+                log.info("weread: reader page session beacon is empty")
+                return nil
+            }
             storeSession(parsed, for: cacheKey)
             return parsed
         } catch {
@@ -427,14 +433,20 @@ final class WereadService: @unchecked Sendable {
 
     /// 返回一章的 HTML。epub 书要拼 4 个分片，txt 书拼 2 个。
     ///
-    /// 会话处理分三层，任何一层失败都尽量不让用户看到白屏：
-    /// 1. 先抓阅读器页面拿信标，拿到就用真实 `ps`/`pc` + `sc=1`；
-    /// 2. 正文回 `{}`（信标不对/过期）→ 丢掉缓存信标、重抓、再试一次；
-    /// 3. 回 `-2012`（登录超时）→ 续期 cookie、重抓信标、再试一次。
-    /// 仍然失败就按真实原因报错：登录过期会明确说「请重新扫码」。
+    /// 取正文的优先级（从「新」到「旧」）：
+    /// 1. 阅读器页面信标可用 → 真实 `ps`/`pc` + `sc=1`；
+    /// 2. 信标请求回 `{}` → 退回旧版「直接正文请求」：固定 `ps`/`pc`，
+    ///    不带 `sc` / `prevChapter`。书架里的已购书走这条老路一直是通的，
+    ///    reader-session 改动把这条回退路径漏掉了；
+    /// 3. 直接请求也空 → 丢掉缓存信标、重抓一次页面，再试一次；
+    /// 4. 回 `-2012`（登录超时）→ 续期 cookie、重试一次。
     func content(bookId: String, chapterUid: Int, cookie: String) async throws -> String {
         do {
-            return try await fetchChapter(bookId: bookId, chapterUid: chapterUid, cookie: cookie)
+            return try await fetchChapterWithFallback(
+                bookId: bookId,
+                chapterUid: chapterUid,
+                cookie: cookie
+            )
         } catch WereadError.notLoggedIn {
             // 登录超时：续期一次，拿到新 cookie 就重试；拿不到就如实报过期。
             guard let renewed = await renew(cookie: cookie), renewed != cookie else {
@@ -443,27 +455,100 @@ final class WereadService: @unchecked Sendable {
             }
             invalidateSession(bookId: bookId, chapterUid: chapterUid)
             do {
-                return try await fetchChapter(bookId: bookId, chapterUid: chapterUid, cookie: renewed)
+                return try await fetchChapterWithFallback(
+                    bookId: bookId,
+                    chapterUid: chapterUid,
+                    cookie: renewed
+                )
             } catch WereadError.notLoggedIn {
                 throw WereadError.notLoggedIn
             }
-        } catch WereadError.empty {
-            // `{}` 多半是信标不对。丢掉缓存、重新抓一次页面再试。
-            invalidateSession(bookId: bookId, chapterUid: chapterUid)
-            let beacon = await readerSession(bookId: bookId, chapterUid: chapterUid, cookie: cookie)
-            guard beacon != nil else {
-                // 连信标都抓不到，说明不是「信标过期」能解释的，别白试第二遍。
-                log.info("weread: content empty and no session beacon available")
-                throw WereadError.empty
-            }
-            return try await fetchChapter(bookId: bookId, chapterUid: chapterUid, cookie: cookie)
         }
     }
 
-    private func fetchChapter(bookId: String, chapterUid: Int, cookie: String) async throws -> String {
+    /// 先按会话信标取正文，失败再退回旧版直接请求。
+    ///
+    /// 真机上的书架书（已购）以前直接带着固定 `ps`/`pc` 就能取到；
+    /// 新版把固定参数换成了 `_e(ct)` 并追加 `prevChapter`，信标又不一定
+    /// 抓得到，结果两边都不通。这里保证「信标失败 → 旧版请求」这条退路存在。
+    private func fetchChapterWithFallback(
+        bookId: String,
+        chapterUid: Int,
+        cookie: String
+    ) async throws -> String {
+        var beacon = await readerSession(bookId: bookId, chapterUid: chapterUid, cookie: cookie)
+        // 只认能给出本章 ps 的信标；否则和没有一样。
+        if beacon?.ps(for: chapterUid) == nil { beacon = nil }
+        let usedSession = beacon != nil
+
+        do {
+            return try await fetchChapter(
+                bookId: bookId,
+                chapterUid: chapterUid,
+                cookie: cookie,
+                beacon: beacon
+            )
+        } catch WereadError.empty {
+            guard usedSession else {
+                // 第一遍已经是不依赖会话的旧版请求，先把信标刷新再试。
+                return try await fetchWithRefreshedSession(
+                    bookId: bookId,
+                    chapterUid: chapterUid,
+                    cookie: cookie,
+                    previous: nil
+                )
+            }
+            log.info("weread: content empty with reader session, retrying legacy direct request")
+            do {
+                return try await fetchChapter(
+                    bookId: bookId,
+                    chapterUid: chapterUid,
+                    cookie: cookie,
+                    beacon: nil
+                )
+            } catch WereadError.empty {
+                return try await fetchWithRefreshedSession(
+                    bookId: bookId,
+                    chapterUid: chapterUid,
+                    cookie: cookie,
+                    previous: beacon
+                )
+            }
+        }
+    }
+
+    /// 丢掉缓存信标、重抓一次页面，再取一次正文。
+    private func fetchWithRefreshedSession(
+        bookId: String,
+        chapterUid: Int,
+        cookie: String,
+        previous: WereadReaderSession?
+    ) async throws -> String {
+        invalidateSession(bookId: bookId, chapterUid: chapterUid)
+        guard let fresh = await readerSession(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            cookie: cookie
+        ), fresh.ps(for: chapterUid) != nil, fresh != previous else {
+            log.info("weread: content empty and no refreshed session beacon")
+            throw WereadError.empty
+        }
+        log.info("weread: retrying content with refreshed reader session")
+        return try await fetchChapter(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            cookie: cookie,
+            beacon: fresh
+        )
+    }
+
+    private func fetchChapter(
+        bookId: String,
+        chapterUid: Int,
+        cookie: String,
+        beacon: WereadReaderSession?
+    ) async throws -> String {
         let uid = String(chapterUid)
-        // 拿不到信标就传 nil，`fragment` 会退回写死 ps、不加 sc。
-        let beacon = await readerSession(bookId: bookId, chapterUid: chapterUid, cookie: cookie)
 
         // 四种分片用 `try?`：txt 书请求 `e_*` 会 404，以前这里 `try await`
         // 一抛错就整章失败，下面的 `t_*` 兜底根本走不到 —— 表现就是
@@ -647,8 +732,9 @@ final class WereadService: @unchecked Sendable {
     /// 发一个正文分片请求。
     ///
     /// `beacon` 是这一章阅读器页面的会话信标。有就用真实 `ps`/`pc` 并带上
-    /// `sc = 1`（整章）；没有就退回写死值、不带 `sc`（Step 1 的老行为），
-    /// 并打日志说明走了回退 —— 这条日志就是真机上判断「白屏到底是哪一类」的依据。
+    /// `sc = 1`（整章）；没有就发和 reader-session 改动之前完全一样的请求：
+    /// 固定 `ps`/`pc`，签名和 body 里都没有 `sc` / `prevChapter`。
+    /// 这条回退路径是已购书架书此前一直能取到正文的关键，不能带新字段。
     private func fragment(
         _ path: String,
         bookId: String,
@@ -669,16 +755,15 @@ final class WereadService: @unchecked Sendable {
         let hashedChapter = WereadCrypto.calcHash(chapterUid)
 
         // ps：优先用阅读器页面给的本章信标；没有就用写死值兜底。
-        // pc：优先用页面给的 pclts，没有就 `_e(ct)` 现算 —— 两者都不是写死的。
+        // pc：有信标时用页面给的 pclts，没有就 `_e(ct)` 现算；没有信标时
+        // 必须用旧版的固定串 —— 换成 `_e(ct)` 后服务端会回 `{}`。
         let uid = Int(chapterUid) ?? 0
         let livePs = beacon?.ps(for: uid)
-        let ps = livePs ?? Self.placeholderPs
-        let pc = beacon?.pc(for: timestamp) ?? WereadCrypto.calcHash(String(timestamp))
         let hasBeacon = livePs != nil
-
-        // 只有拿到真实信标才敢要整章：拿不到时加 sc=1 也更可能被拒。
-        let sc = hasBeacon ? 1 : 0
-        let prevChapter = false
+        let ps = livePs ?? Self.placeholderPs
+        let pc = hasBeacon
+            ? (beacon?.pc(for: timestamp) ?? WereadCrypto.calcHash(String(timestamp)))
+            : Self.placeholderPc
 
         var fields: [(String, String)] = [
             ("b", hashedBook),
@@ -688,12 +773,7 @@ final class WereadService: @unchecked Sendable {
             ("ct", String(timestamp)),
             ("ps", ps),
             ("pc", pc),
-            ("prevChapter", prevChapter ? "true" : "false"),
         ]
-        if hasBeacon {
-            fields.append(("sc", String(sc)))
-        }
-        let signed = WereadCrypto.sign(fields)
 
         var payload: [String: Any] = [
             "b": hashedBook,
@@ -703,17 +783,20 @@ final class WereadService: @unchecked Sendable {
             "ct": timestamp,
             "ps": ps,
             "pc": pc,
-            "prevChapter": prevChapter,
-            "s": signed,
         ]
         if hasBeacon {
-            payload["sc"] = sc
-        }
-        if !hasBeacon {
+            // `sc` / `prevChapter` 只在带阅读器会话时发。旧版请求没有这两项，
+            // 补上去会让服务端按另一套字段验签而回 `{}`。
+            fields.append(("prevChapter", "false"))
+            fields.append(("sc", "1"))
+            payload["prevChapter"] = false
+            payload["sc"] = 1
+        } else {
             log.info(
-                "weread: \(path, privacy: .public) no session beacon, falling back to placeholder ps and sc=0"
+                "weread: \(path, privacy: .public) no session beacon, using legacy ps/pc without sc"
             )
         }
+        payload["s"] = WereadCrypto.sign(fields)
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
         let data = try await send(request)
@@ -733,6 +816,8 @@ final class WereadService: @unchecked Sendable {
 
     /// 拿不到会话信标时的兜底 ps（沿用历史上能过签的占位串）。
     private static let placeholderPs = "a2b325707a19e580g0186a2"
+    /// 旧版（reader-session 改动之前）一直随 `placeholderPs` 一起发的固定 pc。
+    private static let placeholderPc = "430321207a19e581g013ab0"
 
     // MARK: - 工具
 

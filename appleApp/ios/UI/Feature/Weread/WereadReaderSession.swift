@@ -31,6 +31,8 @@ struct WereadReaderSession: Sendable, Equatable {
     func pc(for timestamp: Int) -> String? {
         let key = String(timestamp)
         if let value = pclts[key], !value.isEmpty { return value }
+        // `readPclts` 把单字符串形态放在 `""` 下：整本书一个 pc。
+        if let value = pclts[""], !value.isEmpty { return value }
         return nil
     }
 }
