@@ -220,20 +220,25 @@ final class VideoPlaybackSessionTests: XCTestCase {
 
         detail.play(media: testVideo(url.absoluteString), muted: false)
         XCTAssertEqual(AVAudioSession.sharedInstance().category, .playback,
-                       "Configure detail audio before starting its playback")
+                       "Audible playback must hold the playback route")
         detail.setPlaying(false)
         detail.seek(to: 17)
+        XCTAssertEqual(AVAudioSession.sharedInstance().category, .ambient,
+                       "Pausing and seeking must release the playback route")
+        detail.play(media: testVideo(url.absoluteString), muted: false)
         XCTAssertEqual(AVAudioSession.sharedInstance().category, .playback,
-                       "Pause and seek must not reconfigure the audio route")
+                       "Resuming audible playback must reclaim the playback route")
         VideoPlaybackSession.continuePlayback(to: url.absoluteString)
         detail.detach()
-        XCTAssertEqual(AVAudioSession.sharedInstance().category, .playback)
+        XCTAssertEqual(AVAudioSession.sharedInstance().category, .ambient,
+                       "Detaching must release the playback route")
         inline.play(media: testVideo(url.absoluteString))
         XCTAssertEqual(AVAudioSession.sharedInstance().category, .ambient)
 
         detail.play(media: testVideo(url.absoluteString), muted: false)
         detail.detach()
-        XCTAssertEqual(AVAudioSession.sharedInstance().category, .ambient)
+        XCTAssertEqual(AVAudioSession.sharedInstance().category, .ambient,
+                       "Detaching an audible player must restore ambient audio")
 
         detail.play(media: testVideo(url.absoluteString), muted: false)
         VideoPlaybackSession.continuePlayback(to: url.absoluteString)

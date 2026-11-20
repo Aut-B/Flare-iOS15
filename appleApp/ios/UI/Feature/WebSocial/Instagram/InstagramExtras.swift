@@ -28,7 +28,10 @@ enum IGVideoFactory {
             url: url,
             options: ["AVURLAssetHTTPHeaderFieldsKey": headers]
         )
-        let player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        let item = AVPlayerItem(asset: asset)
+        VideoPlaybackQuality.configure(item)
+        let player = AVPlayer(playerItem: item)
+        player.automaticallyWaitsToMinimizeStalling = true
         player.isMuted = false
         return player
     }

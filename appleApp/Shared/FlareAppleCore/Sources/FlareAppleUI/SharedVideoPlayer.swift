@@ -22,6 +22,29 @@ private func playbackFailure(_ error: any Error) -> NSError {
     ])
 }
 
+/// Adaptive quality limits for devices that cannot sustain high-bitrate video.
+/// Progressive MP4 sources expose one rendition, so the model layer's
+/// low-resolution URL choice still decides those.
+public enum VideoPlaybackQuality {
+    /// iPhone 6s/7/8 and SE (1st gen) ship with 2 GB of RAM.
+    public static var isConstrainedDevice: Bool {
+        #if os(iOS)
+        return ProcessInfo.processInfo.physicalMemory <= 2 * 1024 * 1024 * 1024
+        #else
+        return false
+        #endif
+    }
+
+    public static func configure(_ item: AVPlayerItem) {
+        guard isConstrainedDevice else { return }
+        item.preferredPeakBitRate = 1_200_000
+        // A square cap keeps portrait 540x960 while excluding 720x1280.
+        item.preferredMaximumResolution = CGSize(width: 960, height: 960)
+        // Let AVPlayer pick the forward buffer instead of forcing a fixed one.
+        item.preferredForwardBufferDuration = 0
+    }
+}
+
 /// The only AVPlayer allocation for inline video and the media viewer.
 @MainActor
 final class SharedVideoPlayer {
@@ -37,6 +60,7 @@ final class SharedVideoPlayer {
     private var generation = 0
     private var seekGeneration = 0
     private var wantsPlayback = false
+    private var audioEnabled = false
     private var rate: Float = 1
     private var loadedSource: MediaPlaybackSource?
     private var playbackFile: LivePhotoPlaybackFile?
@@ -73,9 +97,12 @@ final class SharedVideoPlayer {
             MediaProxy.shared.release(source: source)
             throw URLError(.badURL)
         }
+        // Never force playback past a starved buffer on slow networks.
+        player.automaticallyWaitsToMinimizeStalling = true
         if loadedSource?.key == source.key { continuePlayback(to: source.originalUrl) }
         if owner !== session { owner?.detach() }
         owner = session
+        audioEnabled = allowsAudio
         updateAudioSession(active: allowsAudio)
         retentionTask?.cancel()
         handoffTask?.cancel()
@@ -131,16 +158,22 @@ final class SharedVideoPlayer {
     }
 
     private func makeItem(url: URL) -> AVPlayerItem {
+        let item: AVPlayerItem
         #if os(iOS)
         if usesVideoCache,
            let loaderURL = URL(string: "loader-" + url.absoluteString) {
             // shortcut: GSPlayer's loader- convention is internal; recheck it when upgrading GSPlayer.
             let asset = AVURLAsset(url: loaderURL)
             asset.resourceLoader.setDelegate(VideoLoadManager.shared, queue: .main)
-            return AVPlayerItem(asset: asset)
+            item = AVPlayerItem(asset: asset)
+        } else {
+            item = AVPlayerItem(url: url)
         }
+        #else
+        item = AVPlayerItem(url: url)
         #endif
-        return AVPlayerItem(url: url)
+        VideoPlaybackQuality.configure(item)
+        return item
     }
 
     func canCache(_ source: MediaPlaybackSource) async -> Bool {
@@ -242,12 +275,22 @@ final class SharedVideoPlayer {
         guard owner === session else { return }
         wantsPlayback = playing
         self.rate = rate
-        if !playing { player.pause() }
-        else if pendingPosition == nil, !seeking { player.playImmediately(atRate: rate) }
+        if playing {
+            updateAudioSession(active: audioEnabled)
+            if pendingPosition == nil, !seeking { startPlayback() }
+        } else {
+            player.pause()
+            updateAudioSession(active: false)
+        }
     }
 
     func isPlaybackRequested(_ session: VideoPlaybackSession) -> Bool {
         owner === session && wantsPlayback
+    }
+
+    private func startPlayback() {
+        player.play()
+        if rate != 1 { player.rate = rate }
     }
 
     private func updateAudioSession(active: Bool) {
@@ -317,7 +360,7 @@ final class SharedVideoPlayer {
                 self.seeking = false
                     if finished {
                         self.pendingPosition = nil
-                        if self.wantsPlayback { self.player.playImmediately(atRate: self.rate) }
+                        if self.wantsPlayback { self.startPlayback() }
                         self.owner?.refresh()
                 }
             }
@@ -327,13 +370,12 @@ final class SharedVideoPlayer {
     func detach(_ session: VideoPlaybackSession) {
         guard owner === session else { return }
         owner = nil
+        audioEnabled = false
         player.isMuted = true
         player.preventsDisplaySleepDuringVideoPlayback = false
-        if handoffTask == nil {
-            player.pause()
-            wantsPlayback = false
-            updateAudioSession(active: false)
-        }
+        player.pause()
+        wantsPlayback = false
+        updateAudioSession(active: false)
         retentionTask?.cancel()
         retentionTask = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: 5 * 1_000_000_000) } catch { return }
@@ -382,6 +424,7 @@ final class SharedVideoPlayer {
         pendingPosition = nil
         seeking = false
         wantsPlayback = false
+        audioEnabled = false
         playbackError = nil
     }
 
@@ -544,7 +587,7 @@ public final class VideoPlaybackSession {
     }
 
     func surfaceReady() {
-        guard player != nil, hasRestoredPosition else { return }
+        guard player != nil else { return }
         hasDisplayedFrame = true
         if allowsAudio { SharedVideoPlayer.shared.unmute(self) }
     }
@@ -598,6 +641,7 @@ public final class VideoPlaybackSession {
         if let url { MediaPlaybackMemory.shared.save(position, for: url) }
         SharedVideoPlayer.shared.detach(self)
         player = nil
+        allowsAudio = false
         hasRestoredPosition = false
         hasDisplayedFrame = false
         state = .idle
