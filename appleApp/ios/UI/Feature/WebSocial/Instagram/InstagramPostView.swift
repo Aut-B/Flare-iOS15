@@ -88,7 +88,8 @@ struct InstagramPostView: View {
             IGImageGalleryView(
                 items: current.items,
                 startIndex: galleryIndex,
-                caption: current.caption
+                caption: current.caption,
+                onClose: { showGallery = false }
             )
         }
     }

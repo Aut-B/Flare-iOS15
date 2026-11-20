@@ -544,24 +544,39 @@ final class IGImageCache {
 struct IGImageGalleryView: View {
     let items: [IGMediaItem]
     let caption: String
+    let onClose: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
     @State private var index: Int
+    @State private var zoomedPages: Set<Int> = []
+    @State private var zoomResetGeneration = 0
 
-    init(items: [IGMediaItem], startIndex: Int, caption: String = "") {
+    init(
+        items: [IGMediaItem],
+        startIndex: Int,
+        caption: String = "",
+        onClose: (() -> Void)? = nil
+    ) {
         self.items = items
         self.caption = caption
+        self.onClose = onClose
         let bounded = min(max(startIndex, 0), max(items.count - 1, 0))
         _index = State(initialValue: bounded)
     }
 
-    init(images: [String], startIndex: Int, caption: String = "") {
+    init(
+        images: [String],
+        startIndex: Int,
+        caption: String = "",
+        onClose: (() -> Void)? = nil
+    ) {
         self.init(
             items: images.map {
                 IGMediaItem(id: $0, image: $0, video: nil, aspect: 1)
             },
             startIndex: startIndex,
-            caption: caption
+            caption: caption,
+            onClose: onClose
         )
     }
 
@@ -583,9 +598,20 @@ struct IGImageGalleryView: View {
                                 showsFullscreenButton: false
                             )
                         } else {
-                            IGZoomableImage(url: item.image ?? "")
+                            IGZoomableImage(
+                                url: item.image ?? "",
+                                resetGeneration: zoomResetGeneration,
+                                onZoomChange: { zoomed in
+                                    if zoomed {
+                                        zoomedPages.insert(offset)
+                                    } else {
+                                        zoomedPages.remove(offset)
+                                    }
+                                }
+                            )
                         }
                     }
+                    .id("\(offset)|\(item.id)")
                     .tag(offset)
                 }
             }
@@ -594,17 +620,17 @@ struct IGImageGalleryView: View {
 
             VStack {
                 HStack {
-                    Button {
-                        dismiss()
-                    } label: {
+                    Button(action: close) {
                         Image(systemName: "xmark")
                             .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(.white)
-                            .padding(10)
+                            .frame(width: 44, height: 44)
                             .background(Color.black.opacity(0.45))
                             .clipShape(Circle())
+                            .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("关闭")
 
                     Spacer(minLength: 0)
 
@@ -640,6 +666,42 @@ struct IGImageGalleryView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onChange(of: items.map(\.id)) { _ in
+            resetZoomState()
+            if index >= items.count {
+                index = max(items.count - 1, 0)
+            }
+        }
+        .onChange(of: index) { _ in
+            resetZoomState()
+        }
+        .simultaneousGesture(dismissDrag())
+    }
+
+    private func dismissDrag() -> some Gesture {
+        DragGesture(minimumDistance: 20)
+            .onEnded { value in
+                guard !zoomedPages.contains(index) else { return }
+                let dy = value.translation.height
+                let projected = value.predictedEndTranslation.height
+                guard dy > 0, abs(dy) > abs(value.translation.width) * 1.5 else { return }
+                if dy > 120 || projected > 180 {
+                    close()
+                }
+            }
+    }
+
+    private func resetZoomState() {
+        zoomedPages.removeAll()
+        zoomResetGeneration &+= 1
+    }
+
+    private func close() {
+        if let onClose {
+            onClose()
+        } else {
+            dismiss()
+        }
     }
 
     private func save() {
@@ -651,6 +713,8 @@ struct IGImageGalleryView: View {
 /// 单张可缩放的图。双击在 1x / 2.5x 之间切，捏合到 4x，放大后可拖动。
 struct IGZoomableImage: View {
     let url: String
+    var resetGeneration: Int = 0
+    var onZoomChange: ((Bool) -> Void)? = nil
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -672,9 +736,11 @@ struct IGZoomableImage: View {
                         MagnificationGesture()
                             .onChanged { value in
                                 scale = min(max(lastScale * value, 1), 4)
+                                onZoomChange?(scale > 1)
                             }
                             .onEnded { _ in
                                 lastScale = scale
+                                onZoomChange?(scale > 1)
                                 if scale <= 1 {
                                     offset = .zero
                                     lastOffset = .zero
@@ -699,6 +765,7 @@ struct IGZoomableImage: View {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             scale = scale > 1 ? 1 : 2.5
                             lastScale = scale
+                            onZoomChange?(scale > 1)
                             if scale == 1 {
                                 offset = .zero
                                 lastOffset = .zero
@@ -717,6 +784,16 @@ struct IGZoomableImage: View {
             }
         }
         .onAppear(perform: load)
+        .onChange(of: resetGeneration) { _ in
+            resetZoom()
+        }
+    }
+
+    private func resetZoom() {
+        scale = 1
+        lastScale = 1
+        offset = .zero
+        lastOffset = .zero
     }
 
     private func load() {

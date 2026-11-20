@@ -404,7 +404,8 @@ struct IGMediaCarousel: View {
             IGImageGalleryView(
                 items: items,
                 startIndex: index,
-                caption: media.caption
+                caption: media.caption,
+                onClose: { showGallery = false }
             )
         }
     }

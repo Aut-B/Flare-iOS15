@@ -125,7 +125,9 @@ struct XhsNoteView: View {
             IGShareSheet(items: shareItems)
         }
         .fullScreenCover(item: $viewer) { target in
-            XhsImageViewer(images: current.images, index: target.index)
+            XhsImageViewer(images: current.images, index: target.index) {
+                viewer = nil
+            }
         }
         .sheet(item: $profileTarget) { target in
             NavigationView {
@@ -716,36 +718,67 @@ struct XhsViewerTarget: Identifiable {
 struct XhsImageViewer: View {
     let images: [String]
     let startIndex: Int
+    let onClose: (() -> Void)?
 
     @Environment(\.dismiss) private var dismiss
     @State private var index: Int
     @State private var showShare = false
+    @State private var zoomedPages: Set<Int> = []
+    @State private var zoomResetGeneration = 0
 
-    init(images: [String], index: Int) {
+    init(images: [String], index: Int, onClose: (() -> Void)? = nil) {
         self.images = images
         self.startIndex = index
+        self.onClose = onClose
         _index = State(initialValue: index)
     }
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .top) {
             Color.black.ignoresSafeArea()
 
             TabView(selection: $index) {
                 ForEach(Array(images.enumerated()), id: \.offset) { offset, url in
-                    XhsZoomableImage(url: url)
+                    XhsZoomableImage(
+                        url: url,
+                        resetGeneration: zoomResetGeneration,
+                        onZoomChange: { zoomed in
+                            if zoomed {
+                                zoomedPages.insert(offset)
+                            } else {
+                                zoomedPages.remove(offset)
+                            }
+                        }
+                    )
+                        .id("\(offset)|\(url)")
                         .tag(offset)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
             .ignoresSafeArea()
 
-            VStack(alignment: .trailing, spacing: 10) {
-                Button {
-                    dismiss()
-                } label: {
-                    circle("xmark")
+            VStack {
+                HStack {
+                    Button(action: close) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(Color.black.opacity(0.45))
+                            .clipShape(Circle())
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("关闭")
+
+                    Spacer(minLength: 0)
                 }
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, 12)
+            .padding(.top, 16)
+
+            VStack(alignment: .trailing, spacing: 10) {
                 Button {
                     saveCurrent()
                 } label: {
@@ -771,6 +804,7 @@ struct XhsImageViewer: View {
                     .background(Color.black.opacity(0.45))
                     .clipShape(Capsule())
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
             .padding(.trailing, 12)
             .padding(.top, 16)
         }
@@ -778,6 +812,42 @@ struct XhsImageViewer: View {
         .statusBar(hidden: true)
         .sheet(isPresented: $showShare) {
             IGShareSheet(items: shareItems)
+        }
+        .onChange(of: images) { _ in
+            resetZoomState()
+            if index >= images.count {
+                index = max(images.count - 1, 0)
+            }
+        }
+        .onChange(of: index) { _ in
+            resetZoomState()
+        }
+        .simultaneousGesture(dismissDrag())
+    }
+
+    private func dismissDrag() -> some Gesture {
+        DragGesture(minimumDistance: 20)
+            .onEnded { value in
+                guard !zoomedPages.contains(index) else { return }
+                let dy = value.translation.height
+                let projected = value.predictedEndTranslation.height
+                guard dy > 0, abs(dy) > abs(value.translation.width) * 1.5 else { return }
+                if dy > 120 || projected > 180 {
+                    close()
+                }
+            }
+    }
+
+    private func resetZoomState() {
+        zoomedPages.removeAll()
+        zoomResetGeneration &+= 1
+    }
+
+    private func close() {
+        if let onClose {
+            onClose()
+        } else {
+            dismiss()
         }
     }
 
@@ -809,6 +879,8 @@ struct XhsImageViewer: View {
 /// 单张可缩放的图。双击 1x / 2.5x，捏合到 4x，放大后可拖动。
 struct XhsZoomableImage: View {
     let url: String
+    var resetGeneration: Int = 0
+    var onZoomChange: ((Bool) -> Void)? = nil
 
     @State private var image: UIImage?
     @State private var scale: CGFloat = 1
@@ -830,9 +902,11 @@ struct XhsZoomableImage: View {
                             MagnificationGesture()
                                 .onChanged { value in
                                     scale = min(max(lastScale * value, 1), 4)
+                                    onZoomChange?(scale > 1)
                                 }
                                 .onEnded { _ in
                                     lastScale = scale
+                                    onZoomChange?(scale > 1)
                                     if scale <= 1 {
                                         offset = .zero
                                         lastOffset = .zero
@@ -857,6 +931,7 @@ struct XhsZoomableImage: View {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 scale = scale > 1 ? 1 : 2.5
                                 lastScale = scale
+                                onZoomChange?(scale > 1)
                                 if scale == 1 {
                                     offset = .zero
                                     lastOffset = .zero
@@ -872,6 +947,16 @@ struct XhsZoomableImage: View {
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .onAppear(perform: load)
+        .onChange(of: resetGeneration) { _ in
+            resetZoom()
+        }
+    }
+
+    private func resetZoom() {
+        scale = 1
+        lastScale = 1
+        offset = .zero
+        lastOffset = .zero
     }
 
     private func load() {

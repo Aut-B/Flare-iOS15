@@ -186,7 +186,8 @@ struct MediaViewerScreen: View {
 
             MediaViewerDismissGestureHost(
                 enabled: !postExpanded,
-                chromeTapEnabled: !medias.isEmpty,
+                chromeTapEnabled: true,
+                chromeVisible: chromeVisible,
                 onChanged: updateDismissGesture,
                 onEnded: endDismissGesture,
                 onCancelled: cancelDismissGesture,
@@ -831,6 +832,7 @@ private struct MediaViewerDismissPan {
 private struct MediaViewerDismissGestureHost: UIViewRepresentable {
     let enabled: Bool
     let chromeTapEnabled: Bool
+    let chromeVisible: Bool
     let onChanged: (MediaViewerDismissPan) -> Void
     let onEnded: (MediaViewerDismissPan) -> Bool
     let onCancelled: () -> Void
@@ -848,6 +850,7 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
     func updateUIView(_ uiView: MediaViewerDismissGestureHostView, context: Context) {
         context.coordinator.enabled = enabled
         context.coordinator.chromeTapEnabled = chromeTapEnabled
+        context.coordinator.chromeVisible = chromeVisible
         context.coordinator.onChanged = onChanged
         context.coordinator.onEnded = onEnded
         context.coordinator.onCancelled = onCancelled
@@ -876,6 +879,7 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var enabled = true
         var chromeTapEnabled = true
+        var chromeVisible = true
         var onChanged: (MediaViewerDismissPan) -> Void
         var onEnded: (MediaViewerDismissPan) -> Bool
         var onCancelled: () -> Void
@@ -1037,7 +1041,8 @@ private struct MediaViewerDismissGestureHost: UIViewRepresentable {
                 return false
             }
             if gestureRecognizer === chromeTapRecognizer {
-                return chromeTapEnabled && MediaViewerDismissGesturePolicy.touchesPager(touchedView)
+                guard chromeTapEnabled else { return false }
+                return !chromeVisible || MediaViewerDismissGesturePolicy.touchesPager(touchedView)
             }
             guard enabled else { return false }
             let touchedScrollViews = ancestorScrollViews(from: touch.view)
