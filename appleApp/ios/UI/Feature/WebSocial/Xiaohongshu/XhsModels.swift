@@ -2,7 +2,7 @@ import Foundation
 import CoreGraphics
 
 /// 小红书的一个用户。
-struct XhsUser: Hashable {
+nonisolated struct XhsUser: Hashable, Sendable {
     let id: String
     let name: String
     let avatar: String?
@@ -26,7 +26,7 @@ struct XhsProfile: Hashable {
 }
 
 /// 小红书的一条笔记。
-struct XhsNote: Identifiable, Hashable {
+nonisolated struct XhsNote: Identifiable, Hashable, Sendable {
     let id: String
     let title: String
     let desc: String
@@ -144,7 +144,7 @@ struct XhsNote: Identifiable, Hashable {
 }
 
 /// 一条评论（`subComments` 是楼中楼，接口只给前几条）。
-struct XhsComment: Identifiable, Hashable {
+nonisolated struct XhsComment: Identifiable, Hashable, Sendable {
     let id: String
     let content: String
     let user: XhsUser
@@ -155,7 +155,7 @@ struct XhsComment: Identifiable, Hashable {
     var subCount: Int = 0
 }
 
-struct XhsError: LocalizedError {
+nonisolated struct XhsError: LocalizedError, Sendable {
     let message: String
     let needLogin: Bool
 

@@ -81,7 +81,7 @@ struct XhsUserView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                XhsImageView(url: profile?.avatar)
+                XhsImageView(url: profile?.avatar, maxPixel: 256)
                     .frame(width: 62, height: 62)
                     .clipShape(Circle())
                     .overlay(
@@ -201,7 +201,7 @@ struct XhsUserView: View {
 
     private func cell(_ note: XhsNote) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            XhsImageView(url: note.cover)
+            XhsImageView(url: note.cover, maxPixel: 720)
                 .aspectRatio(min(max(note.aspect, 0.5), 1.6), contentMode: .fit)
                 .frame(maxWidth: .infinity)
                 .clipped()

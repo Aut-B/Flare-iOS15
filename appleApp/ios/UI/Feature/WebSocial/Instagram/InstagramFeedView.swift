@@ -287,7 +287,7 @@ struct IGMediaCard: View {
                 onOpenUser(media.user.userName)
             } label: {
                 HStack(spacing: 10) {
-                    IGImageView(url: media.user.avatar)
+                    IGImageView(url: media.user.avatar, maxPixel: 96)
                         .frame(width: 30, height: 30)
                         .clipShape(Circle())
                     VStack(alignment: .leading, spacing: 1) {
@@ -450,7 +450,7 @@ private struct IGMediaCarouselPage: View {
     var body: some View {
         ZStack {
             if item.image != nil {
-                IGImageView(url: item.image)
+                IGImageView(url: item.image, maxPixel: 1280)
                     .frame(width: width, height: height)
                     .clipped()
             } else {
@@ -475,6 +475,8 @@ private struct IGMediaCarouselPage: View {
 /// 在 6s 上经常一直灰着，滚回来还会重新下载。
 struct IGImageView: View {
     let url: String?
+    /// 0 = 原图；列表卡片传目标像素，避免全尺寸图在主线程缩到卡片大小。
+    var maxPixel: Int = 0
 
     @State private var image: UIImage?
 
@@ -503,12 +505,12 @@ struct IGImageView: View {
             image = nil
             return
         }
-        if let cached = IGImageCache.shared.cached(url) {
+        if let cached = IGImageCache.shared.cached(url, maxPixel: maxPixel) {
             image = cached
             return
         }
         image = nil
-        IGImageCache.shared.image(for: url) { loaded in
+        IGImageCache.shared.image(for: url, maxPixel: maxPixel) { loaded in
             if let loaded = loaded { image = loaded }
         }
     }

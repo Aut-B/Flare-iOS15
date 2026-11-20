@@ -229,6 +229,9 @@ final class XhsSigner: HiddenWebViewOwner {
         }
         var lastError: Error = XhsError.signFailed
         for attempt in 0..<max(attempts, 1) {
+            // 签名页是全局共享的：被取消的请求必须在 reload 之前退出，
+            // 否则它会把赢家还在跑的分页请求一起打断。
+            if Task.isCancelled { throw CancellationError() }
             if attempt > 0 {
                 await reloadPage()
             }
@@ -361,6 +364,8 @@ final class XhsSigner: HiddenWebViewOwner {
         }
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
+            // 并发竞速里落败的请求会被取消：别继续空等到超时。
+            if Task.isCancelled { throw CancellationError() }
             if await isSignerReady() { return }
             try? await Task.sleep(nanoseconds: 400_000_000)
         }

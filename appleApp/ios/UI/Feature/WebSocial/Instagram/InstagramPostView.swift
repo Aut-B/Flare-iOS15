@@ -99,7 +99,7 @@ struct InstagramPostView: View {
                 openProfile(current.user.userName)
             } label: {
                 HStack(spacing: 10) {
-                    IGImageView(url: current.user.avatar)
+                    IGImageView(url: current.user.avatar, maxPixel: 160)
                         .frame(width: 34, height: 34)
                         .clipShape(Circle())
                     VStack(alignment: .leading, spacing: 1) {
@@ -132,7 +132,7 @@ struct InstagramPostView: View {
         } else if let item = current.items.first {
             mediaItem(item, at: 0, autoPlay: item.isVideo)
         } else {
-            IGImageView(url: current.cover)
+            IGImageView(url: current.cover, maxPixel: 1600)
                 .aspectRatio(current.aspect, contentMode: .fit)
                 .frame(maxWidth: .infinity)
                 .clipped()
@@ -151,7 +151,7 @@ struct InstagramPostView: View {
                 .frame(maxWidth: .infinity)
                 .clipped()
         } else {
-            IGImageView(url: item.image)
+            IGImageView(url: item.image, maxPixel: 1600)
                 .aspectRatio(aspect, contentMode: .fit)
                 .frame(maxWidth: .infinity)
                 .clipped()
@@ -205,7 +205,7 @@ struct InstagramPostView: View {
                     Button {
                         openProfile(comment.userName)
                     } label: {
-                        IGImageView(url: comment.avatar)
+                        IGImageView(url: comment.avatar, maxPixel: 128)
                             .frame(width: 26, height: 26)
                             .clipShape(Circle())
                     }
@@ -422,7 +422,7 @@ struct InstagramProfileView: View {
                                 Button {
                                     selected = item
                                 } label: {
-                                    IGImageView(url: item.cover)
+                                    IGImageView(url: item.cover, maxPixel: 512)
                                         .aspectRatio(1, contentMode: .fill)
                                         .frame(maxWidth: .infinity)
                                         .clipped()
@@ -479,7 +479,7 @@ struct InstagramProfileView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 14) {
-                IGImageView(url: user?.avatar)
+                IGImageView(url: user?.avatar, maxPixel: 256)
                     .frame(width: 64, height: 64)
                     .clipShape(Circle())
                 VStack(alignment: .leading, spacing: 4) {
@@ -524,7 +524,11 @@ struct InstagramProfileView: View {
             )
             // 九宫格首屏同样先并发取前几张缩略图，避免逐张 onAppear 才发请求。
             DispatchQueue.main.async {
-                IGImageCache.shared.prefetch(result.media.prefix(6).compactMap(\.cover), limit: 6)
+                IGImageCache.shared.prefetch(
+                    result.media.prefix(6).compactMap(\.cover),
+                    limit: 6,
+                    maxPixel: 512
+                )
             }
         } catch {
             Self.profileLog.error(

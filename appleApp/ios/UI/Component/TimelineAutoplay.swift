@@ -31,6 +31,7 @@ final class TimelineAutoplay: NSObject {
     private var currentAutoplayURL: URL?
     private var autoplayPolicy = TimelineAutoplayPolicy()
     private let autoplayCarousels = NSHashTable<StatusMediaUIView>.weakObjects()
+    private var lastAutoplayVisibilityCheck = Date.distantPast
 
     init(collectionView: TimelineCollectionView, mediaSelections: TimelineMediaSelections,
          itemID: @escaping (IndexPath) -> String?) {
@@ -74,7 +75,13 @@ final class TimelineAutoplay: NSObject {
             autoplayPolicy.verticalScrollBegan()
         }
         isAutoplayViewportMoving = true
-        validateCurrentAutoplayVisibility()
+        // didScroll 是每一帧都来的；播放器还在屏上时每次做可见性计算会
+        // 让 6S 的滚动掉帧。150ms 一次足够在滚出屏幕时及时停机。
+        let now = Date()
+        if now.timeIntervalSince(lastAutoplayVisibilityCheck) >= 0.15 {
+            lastAutoplayVisibilityCheck = now
+            validateCurrentAutoplayVisibility()
+        }
         reconsider()
     }
 

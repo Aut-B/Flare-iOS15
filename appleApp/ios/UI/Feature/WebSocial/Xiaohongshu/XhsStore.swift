@@ -48,6 +48,12 @@ final class XhsStore: ObservableObject {
     private var lastLoadMoreAt = Date.distantPast
     /// 隐藏网页当前加载的是不是「关注」流。
     private var harvesterFollow: Bool?
+    /// 最近打开过的详情。首页卡片只有封面/作者名，正文和多图要再打一次
+    /// 详情接口；6S 上签名页冷启动要十几秒，同一篇笔记反复进出时不能每次都等。
+    /// 只缓存几分钟，点赞数/评论数过期可以接受，正文和多图不会。
+    private var detailCache: [String: (note: XhsNote, at: Date)] = [:]
+    private var detailCacheOrder: [String] = []
+    private let detailCacheLifetime: TimeInterval = 300
     /// 每次登录态真正变化都 +1。WK 异步快照 / 授权校验回来时代次变了就丢弃，
     /// 否则可能用旧 cookie 覆盖用户刚完成的新登录。
     /// Bridge 可能从任意线程调 `adopt`，所以计数要加锁。
@@ -278,6 +284,8 @@ final class XhsStore: ObservableObject {
         pushCredentials()
         harvester?.stop()
         harvester = nil
+        detailCache.removeAll()
+        detailCacheOrder.removeAll()
         // 网页仓库里的旧会话也清掉，否则下次登录页会「一打开就已是登录态」。
         CookieJar.clear(domainSuffix: "xiaohongshu.com") {}
         for cookie in HTTPCookieStorage.shared.cookies ?? []
@@ -332,6 +340,8 @@ final class XhsStore: ObservableObject {
         cursorScore = ""
         emptyScrolls = 0
         lastLoadMoreAt = Date.distantPast
+        detailCache.removeAll()
+        detailCacheOrder.removeAll()
         DispatchQueue.main.async {
             self.isLoading = true
             self.isLoadingMore = false
@@ -351,6 +361,9 @@ final class XhsStore: ObservableObject {
         // 以匿名会话加载，homefeed 会被判 -100，界面看起来就像掉了登录。
         // 先把已保存的会话灌给签名页；cookie 没变时 `applyCookies` 不会重载。
         XhsSigner.shared.applyCookies(cookie)
+        // 灌完 cookie 才能预热：匿名页面会被服务端判未登录，还会触发 logout。
+        // 冷启动 JS 跑十几秒，提前拉起后用户点进帖子/评论时签名页已经可用。
+        XhsSigner.shared.warmUp()
 
         // 超时要在发请求**之前**挂上：接口自己最多耗 12 秒，
         // 挂晚了用户就得对着转圈等两倍时间。
@@ -681,6 +694,177 @@ final class XhsStore: ObservableObject {
 
     // MARK: - 评论
 
+    private struct CommentPageRace {
+        var source: String?
+        var page: (items: [XhsComment], next: String?)?
+        var error: XhsError?
+        var loginError: XhsError?
+    }
+
+    /// 任务组的结果要跨并发域传回主线程，只带可 `Sendable` 的值。
+    private nonisolated struct CommentPageOutcome: Sendable {
+        let source: String
+        let items: [XhsComment]?
+        let next: String?
+        let error: XhsError?
+    }
+
+    /// 单个来源的评论请求。任务组只捕获值，不会把 `XhsStore` 本身
+    /// 带进 @Sendable 闭包。
+    private static func loadCommentPage(
+        noteId: String,
+        token: String,
+        source: String,
+        cursor: String?
+    ) async -> CommentPageOutcome {
+        do {
+            let page = try await XhsService.shared.comments(
+                noteId: noteId,
+                xsecToken: token,
+                cursor: cursor,
+                xsecSource: source
+            )
+            return CommentPageOutcome(
+                source: source,
+                items: page.items,
+                next: page.next,
+                error: nil
+            )
+        } catch {
+            return CommentPageOutcome(
+                source: source,
+                items: nil,
+                next: nil,
+                error: (error as? XhsError)
+                    ?? XhsError(message: error.localizedDescription, needLogin: false)
+            )
+        }
+    }
+
+    /// 最多同时试两个来源，谁先成功用谁。6S 上签名页一次失败要等 10 秒，
+    /// 串行枚举 5 个来源时用户就是对着评论区空白转很久。
+    private func raceCommentSources(
+        _ sources: [String],
+        noteId: String,
+        token: String,
+        cursor: String?
+    ) async -> CommentPageRace {
+        await withTaskGroup(of: CommentPageOutcome.self) { group in
+            var next = 0
+            for _ in 0..<min(2, sources.count) {
+                let source = sources[next]
+                next += 1
+                group.addTask {
+                    await Self.loadCommentPage(
+                        noteId: noteId,
+                        token: token,
+                        source: source,
+                        cursor: cursor
+                    )
+                }
+            }
+
+            var outcome = CommentPageRace()
+            while let page = await group.next() {
+                if let items = page.items {
+                    group.cancelAll()
+                    outcome.source = page.source
+                    outcome.page = (items, page.next)
+                    return outcome
+                }
+                if let error = page.error, error.needLogin {
+                    group.cancelAll()
+                    outcome.loginError = error
+                    return outcome
+                }
+                outcome.error = page.error
+                if next < sources.count {
+                    let source = sources[next]
+                    next += 1
+                    group.addTask {
+                        await Self.loadCommentPage(
+                            noteId: noteId,
+                            token: token,
+                            source: source,
+                            cursor: cursor
+                        )
+                    }
+                }
+            }
+            return outcome
+        }
+    }
+
+    private static func loadDetailCandidate(
+        noteId: String,
+        token: String,
+        source: String,
+        timeout: TimeInterval
+    ) async -> (token: String, source: String, note: XhsNote?) {
+        do {
+            let note = try await XhsService.shared.note(
+                id: noteId,
+                xsecToken: token,
+                xsecSource: source,
+                timeout: timeout,
+                attempts: 1
+            )
+            return (token, source, note)
+        } catch {
+            return (token, source, nil)
+        }
+    }
+
+    /// 评论区换 token 时同样并发试来源，拿第一个成功的详情。
+    /// `requireUserID` 为 true 时（作者主页入口补 id），没有作者 id 的
+    /// 「成功」不算数：继续跑剩余候选，直到有一个带 id 或候选跑完。
+    private func raceFreshDetail(
+        noteId: String,
+        candidates: [(token: String, source: String)],
+        requireUserID: Bool = false
+    ) async -> (token: String, source: String, note: XhsNote)? {
+        // 最坏情况和改前一致：20 秒还没成功就不再起新一轮候选，
+        // 别让 6 个候选串成 30 秒以上的等待。
+        let deadline = Date().addingTimeInterval(20)
+        return await withTaskGroup(of: (token: String, source: String, note: XhsNote?).self) { group in
+            var next = 0
+            for _ in 0..<min(2, candidates.count) {
+                let candidate = candidates[next]
+                next += 1
+                let timeout = min(10, max(deadline.timeIntervalSinceNow, 1))
+                group.addTask {
+                    await Self.loadDetailCandidate(
+                        noteId: noteId,
+                        token: candidate.token,
+                        source: candidate.source,
+                        timeout: timeout
+                    )
+                }
+            }
+            while let outcome = await group.next() {
+                if let note = outcome.note,
+                   !requireUserID || !note.user.id.isEmpty {
+                    group.cancelAll()
+                    return (outcome.token, outcome.source, note)
+                }
+                let remaining = deadline.timeIntervalSinceNow
+                if remaining > 1, next < candidates.count {
+                    let candidate = candidates[next]
+                    next += 1
+                    group.addTask {
+                        await Self.loadDetailCandidate(
+                            noteId: noteId,
+                            token: candidate.token,
+                            source: candidate.source,
+                            timeout: min(10, remaining)
+                        )
+                    }
+                }
+            }
+            return nil
+        }
+    }
+
     func comments(note: XhsNote, cursor: String?) async throws -> (items: [XhsComment], next: String?) {
         var token = note.xsecToken
         var lastError: Error?
@@ -691,23 +875,6 @@ final class XhsStore: ObservableObject {
         var sources: [String] = []
         for candidate in [note.xsecSource, "pc_note", "pc_feed", "pc_user", "pc_search"] where !candidate.isEmpty {
             if !sources.contains(candidate) { sources.append(candidate) }
-        }
-
-        func attempt(_ token: String, _ source: String) async throws -> (items: [XhsComment], next: String?)? {
-            // 公开笔记的 token 可能本来就是空的：`XhsService` 只在非空时拼
-            // `xsec_token`，所以空 token 也是合法请求，别在这里直接放弃。
-            do {
-                return try await XhsService.shared.comments(
-                    noteId: note.id,
-                    xsecToken: token,
-                    cursor: cursor,
-                    xsecSource: source
-                )
-            } catch {
-                if let xhs = error as? XhsError, xhs.needLogin { throw error }
-                lastError = error
-                return nil
-            }
         }
 
         // 换到新 token 后写回列表：否则下次进评论区又拿旧 token 连试两次，
@@ -734,27 +901,29 @@ final class XhsStore: ObservableObject {
             }
         }
 
-        for source in sources {
-            if let page = try await attempt(token, source) {
-                // 第一轮就成功也要记来源：从用户主页进来的笔记，第一次是靠
-                // 枚举试出来的，不记下来下次还要再枚举一遍。
-                remember(token, source: source)
-                return page
-            }
+        let first = await raceCommentSources(
+            sources,
+            noteId: note.id,
+            token: token,
+            cursor: cursor
+        )
+        if let loginError = first.loginError { throw loginError }
+        if let page = first.page {
+            // 第一轮就成功也要记来源：从用户主页进来的笔记，第一次是靠
+            // 枚举试出来的，不记下来下次还要再枚举一遍。
+            remember(token, source: first.source)
+            return page
         }
+        lastError = first.error
 
         // 卡片上的 xsec_token 会过期。过期后服务端一律回「当前笔记暂时无法浏览」，
         // 这时用详情接口换一个新 token。详情接口本身也要选对来源。
-        for source in sources {
-            guard let fresh = try? await XhsService.shared.note(
-                id: note.id,
-                xsecToken: token,
-                xsecSource: source,
-                timeout: 10,
-                attempts: 1
-            ) else {
-                continue
-            }
+        if let freshResult = await raceFreshDetail(
+            noteId: note.id,
+            candidates: sources.map { (token, $0) }
+        ) {
+            let source = freshResult.source
+            let fresh = freshResult.note
 
             let refreshedToken = fresh.xsecToken
             let sourceChanged = !fresh.xsecSource.isEmpty && fresh.xsecSource != source
@@ -764,38 +933,45 @@ final class XhsStore: ObservableObject {
             // 以前这里用 `!fresh.xsecToken.isEmpty` 把这种成功结果直接丢掉，
             // 评论区永远停在第一轮的错误上。只要 token 或来源有变化，就用
             // 刷新后的组合再试一次；两样都没变就说明没有新组合可试了。
-            guard tokenChanged || sourceChanged else { break }
+            if tokenChanged || sourceChanged {
+                var retryTokens: [String] = []
+                if refreshedToken.isEmpty {
+                    // 旧 token 已经在第一轮把所有来源都试过了；只有详情回了
+                    // 不同来源时，旧 token + 新来源才是没试过的组合。
+                    if !token.isEmpty, sourceChanged { retryTokens.append(token) }
+                    // 详情说这条笔记可见，评论区却拒了旧 token：公开笔记用空
+                    // token 再试一次，和详情页的兜底保持一致。
+                    retryTokens.append("")
+                } else {
+                    token = refreshedToken
+                    retryTokens.append(token)
+                }
 
-            var retryTokens: [String] = []
-            if refreshedToken.isEmpty {
-                // 旧 token 已经在第一轮把所有来源都试过了；只有详情回了
-                // 不同来源时，旧 token + 新来源才是没试过的组合。
-                if !token.isEmpty, sourceChanged { retryTokens.append(token) }
-                // 详情说这条笔记可见，评论区却拒了旧 token：公开笔记用空
-                // token 再试一次，和详情页的兜底保持一致。
-                retryTokens.append("")
-            } else {
-                token = refreshedToken
-                retryTokens.append(token)
-            }
-
-            // 详情接口回的 token 自带来源：先按它自己的来，再退到本次请求
-            // 的来源。一次刷新只试这两个，不把五个来源再铺一遍。
-            var retries: [String] = []
-            for candidate in [fresh.xsecSource, source] where !candidate.isEmpty {
-                if !retries.contains(candidate) { retries.append(candidate) }
-            }
-            for retryToken in retryTokens {
-                for retrySource in retries {
-                    if let page = try await attempt(retryToken, retrySource) {
-                        remember(retryToken, source: retrySource)
-                        return page
+                // 详情接口回的 token 自带来源：先按它自己的来，再退到本次请求
+                // 的来源。一次刷新只试这两个，不把五个来源再铺一遍。
+                var retries: [String] = []
+                for candidate in [fresh.xsecSource, source] where !candidate.isEmpty {
+                    if !retries.contains(candidate) { retries.append(candidate) }
+                }
+                for retryToken in retryTokens {
+                    for retrySource in retries {
+                        let retry = await raceCommentSources(
+                            [retrySource],
+                            noteId: note.id,
+                            token: retryToken,
+                            cursor: cursor
+                        )
+                        if let loginError = retry.loginError { throw loginError }
+                        if let page = retry.page {
+                            remember(retryToken, source: retry.source ?? retrySource)
+                            return page
+                        }
+                        if let error = retry.error { lastError = error }
                     }
                 }
             }
             // 详情已经成功，这次重试就是拿它给的组合；再换来源刷详情只会
             // 多等 10 秒（最坏 5 次），不会有新的 token。
-            break
         }
 
         if let error = lastError { throw error }
@@ -830,9 +1006,39 @@ final class XhsStore: ObservableObject {
         try await XhsService.shared.userNotes(userId: userId, cursor: cursor)
     }
 
-    /// 卡片上缺作者 id 时补一次详情。首页 DOM 经常只给昵称，
-    /// 详情接口的 `note_card.user.userId` 才是主页接口要的 id。
-    func resolvedDetail(for note: XhsNote) async -> XhsNote? {
+    /// 详情页先查缓存：同一篇笔记刚看过时直接出正文和多图，不再等接口。
+    func cachedDetail(for noteId: String) -> XhsNote? {
+        guard let entry = detailCache[noteId] else { return nil }
+        guard Date().timeIntervalSince(entry.at) < detailCacheLifetime else {
+            detailCache[noteId] = nil
+            detailCacheOrder.removeAll { $0 == noteId }
+            return nil
+        }
+        return entry.note
+    }
+
+    func rememberDetail(_ note: XhsNote) {
+        detailCache[note.id] = (note, Date())
+        detailCacheOrder.removeAll { $0 == note.id }
+        detailCacheOrder.append(note.id)
+        // 只留最近 24 篇，每篇只是图片地址和文字，不占多少内存。
+        while detailCacheOrder.count > 24 {
+            let removed = detailCacheOrder.removeFirst()
+            detailCache[removed] = nil
+        }
+    }
+
+    /// 拉详情：并发试来源，成功一次就记进缓存。首页卡片 -> 详情页、
+    /// 评论换 token、作者 id 补齐都走这里，避免三条路径各自串行枚举。
+    func detail(
+        for note: XhsNote,
+        allowCache: Bool = true,
+        requireUserID: Bool = false
+    ) async -> XhsNote? {
+        if allowCache, let cached = cachedDetail(for: note.id),
+           !requireUserID || !cached.user.id.isEmpty {
+            return cached
+        }
         var candidates: [(token: String, source: String)] = [
             (note.xsecToken, note.xsecSource),
             (note.xsecToken, "pc_note"),
@@ -843,23 +1049,41 @@ final class XhsStore: ObservableObject {
         if !note.xsecToken.isEmpty {
             candidates.append(("", "pc_note"))
         }
-        let deadline = Date().addingTimeInterval(20)
-        for candidate in candidates {
-            let remaining = deadline.timeIntervalSinceNow
-            guard remaining > 1 else { break }
-            guard
-                let full = try? await XhsService.shared.note(
-                    id: note.id,
-                    xsecToken: candidate.token,
-                    xsecSource: candidate.source,
-                    timeout: min(8, remaining),
-                    attempts: 1
-                )
-            else { continue }
-            if !full.user.id.isEmpty {
-                self.merge([full])
-                return full
-            }
+        var seen = Set<String>()
+        candidates = candidates.filter {
+            seen.insert("\($0.token)|\($0.source)").inserted
+        }
+        guard
+            let result = await raceFreshDetail(
+                noteId: note.id,
+                candidates: candidates,
+                requireUserID: requireUserID
+            )
+        else { return nil }
+        // 详情只补全首页已有卡片：从作者主页/搜索进来的笔记不在首页流里，
+        // 不能因为看了详情就被追加进首页，也不能把 refresh 的加载状态提前收掉。
+        merge([result.note], appendUnknown: false, affectsFeedState: false)
+        // 缺作者 id 的结果不缓存，否则 5 分钟内重试都拿到同一份不完整数据。
+        if !requireUserID || !result.note.user.id.isEmpty {
+            rememberDetail(result.note)
+        }
+        return result.note
+    }
+
+    /// 卡片上缺作者 id 时补一次详情。首页 DOM 经常只给昵称，
+    /// 详情接口的 `note_card.user.userId` 才是主页接口要的 id。
+    func resolvedDetail(for note: XhsNote) async -> XhsNote? {
+        if let cached = cachedDetail(for: note.id), !cached.user.id.isEmpty {
+            return cached
+        }
+        guard let full = await detail(for: note, allowCache: false, requireUserID: true) else {
+            Self.profileLog.error(
+                "note \(note.id, privacy: .public) detail fetch failed while resolving author id"
+            )
+            return nil
+        }
+        if !full.user.id.isEmpty {
+            return full
         }
         Self.profileLog.error(
             "note \(note.id, privacy: .public) still has no author id after detail fetch"
@@ -878,15 +1102,23 @@ final class XhsStore: ObservableObject {
 
     // MARK: - 列表
 
-    private func merge(_ batch: [XhsNote], replace: Bool = false) {
+    private func merge(
+        _ batch: [XhsNote],
+        replace: Bool = false,
+        appendUnknown: Bool = true,
+        affectsFeedState: Bool = true
+    ) {
         let work: () -> Void = { [weak self] in
             guard let self = self else { return }
             var base = replace ? [XhsNote]() : self.notes
             var changed = false
             for note in batch {
                 guard let index = base.firstIndex(where: { $0.id == note.id }) else {
-                    base.append(note)
-                    changed = true
+                    // 详情路径只补全已有卡片，不把陌生笔记塞进首页流。
+                    if appendUnknown {
+                        base.append(note)
+                        changed = true
+                    }
                     continue
                 }
                 // 同一条笔记可能是「DOM 先到（无作者 id）→ 接口后到（有 id）」。
@@ -920,14 +1152,18 @@ final class XhsStore: ObservableObject {
             }
             if changed || replace {
                 self.notes = base
-                self.receivedAnything = true
-                self.emptyScrolls = 0
-                self.loaded = true
-                self.errorMessage = nil
-                self.isLoading = false
+                if affectsFeedState {
+                    self.receivedAnything = true
+                    self.emptyScrolls = 0
+                    self.loaded = true
+                    self.errorMessage = nil
+                    self.isLoading = false
+                }
             }
             // 不管有没有新内容，这一轮翻页都结束了，页脚必须收起来。
-            self.isLoadingMore = false
+            if affectsFeedState {
+                self.isLoadingMore = false
+            }
         }
         // `ingest` 在主线程，接口请求在后台；统一回主线程改 `@Published`。
         if Thread.isMainThread {

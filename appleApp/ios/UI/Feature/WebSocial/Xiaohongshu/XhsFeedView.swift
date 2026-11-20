@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import ImageIO
 
 /// 小红书首页：真·瀑布流。
 ///
@@ -373,7 +374,7 @@ struct XhsNoteCard: View {
             HStack(spacing: 6) {
                 Button(action: onUser) {
                     HStack(spacing: 4) {
-                        XhsImageView(url: note.user.avatar)
+                        XhsImageView(url: note.user.avatar, maxPixel: 96)
                             .frame(width: 14, height: 14)
                             .clipShape(Circle())
                         Text(note.user.name.isEmpty ? "小红书用户" : note.user.name)
@@ -432,9 +433,14 @@ struct XhsNoteCard: View {
         ZStack(alignment: .topTrailing) {
             if note.images.count > 1 {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 2) {
+                    // 多图卡片只实例化当前视口附近的子图；一次性创建整排
+                    // 1600px 图的请求会让 6S 在首页滑动时同时解码十几张。
+                    LazyHStack(spacing: 2) {
                         ForEach(Array(note.images.enumerated()), id: \.offset) { _, url in
-                            XhsImageView(url: url)
+                            XhsImageView(
+                                url: url,
+                                maxPixel: Int(cardWidth * UIScreen.main.scale)
+                            )
                                 .frame(width: cardWidth, height: mediaHeight)
                                 .clipped()
                         }
@@ -442,7 +448,10 @@ struct XhsNoteCard: View {
                 }
                 .frame(height: mediaHeight)
             } else {
-                XhsImageView(url: note.cover)
+                XhsImageView(
+                    url: note.cover,
+                    maxPixel: Int(cardWidth * UIScreen.main.scale)
+                )
                     .frame(width: cardWidth, height: mediaHeight)
                     .clipped()
             }
@@ -482,8 +491,17 @@ final class XhsImageCache {
     private let cache = NSCache<NSString, UIImage>()
     private var waiters: [String: [(UIImage?) -> Void]] = [:]
     private let session: URLSession
+    /// 全尺寸 `UIImage(data:)` 在主线程回调里解码时，滑动会直接掉帧。
+    /// 解码 + 降采样统一放后台队列，主线程只接手已经能画的图。
+    nonisolated private static let decodeQueue = DispatchQueue(
+        label: "dev.dimension.flare.xhs.image-decode",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
 
     private init() {
+        cache.totalCostLimit = 96 * 1024 * 1024
+        cache.countLimit = 240
         let configuration = URLSessionConfiguration.default
         configuration.requestCachePolicy = .returnCacheDataElseLoad
         configuration.urlCache = URLCache(
@@ -497,21 +515,30 @@ final class XhsImageCache {
         session = URLSession(configuration: configuration)
     }
 
-    func cached(_ url: String) -> UIImage? {
-        cache.object(forKey: url as NSString)
+    func cached(_ url: String, maxPixel: Int = 0) -> UIImage? {
+        cache.object(forKey: Self.cacheKey(url, maxPixel: maxPixel) as NSString)
     }
 
-    func image(for url: String, completion: @escaping (UIImage?) -> Void) {
-        if let cached = cache.object(forKey: url as NSString) {
+    func image(for url: String, maxPixel: Int = 0, completion: @escaping (UIImage?) -> Void) {
+        let key = Self.cacheKey(url, maxPixel: maxPixel)
+        if let cached = cache.object(forKey: key as NSString) {
             completion(cached)
             return
         }
-        if waiters[url] != nil {
-            waiters[url]?.append(completion)
+        if waiters[key] != nil {
+            waiters[key]?.append(completion)
             return
         }
-        waiters[url] = [completion]
-        load(Self.loadPlan(for: url), index: 0, original: url)
+        waiters[key] = [completion]
+        load(Self.loadPlan(for: url), index: 0, original: key, maxPixel: maxPixel)
+    }
+
+    /// 同一张图在头像（26pt）和详情（整屏宽）要的像素差很多：分开缓存，
+    /// 否则缩略图先到会把全屏看图也变成糊的。128 像素一档，减少重复下载。
+    private static func cacheKey(_ url: String, maxPixel: Int) -> String {
+        guard maxPixel > 0 else { return url }
+        let bucket = ((maxPixel + 127) / 128) * 128
+        return "\(url)|\(bucket)"
     }
 
     /// 一个请求组合：清晰度候选 + 鉴权方式。
@@ -564,7 +591,7 @@ final class XhsImageCache {
 
     /// `original` 是最初请求的 key：回退到原图后结果仍要交回原来的等待者，
     /// 否则 `finish` 找不到 waiter，界面就一直灰着。
-    private func load(_ steps: [LoadStep], index: Int, original: String) {
+    private func load(_ steps: [LoadStep], index: Int, original: String, maxPixel: Int) {
         guard index < steps.count else {
             finish(original, image: nil)
             return
@@ -575,7 +602,7 @@ final class XhsImageCache {
         if value.hasPrefix("//") { value = "https:" + value }
         if value.hasPrefix("http://") { value = "https://" + value.dropFirst(7) }
         guard let target = URL(string: value) else {
-            load(steps, index: index + 1, original: original)
+            load(steps, index: index + 1, original: original, maxPixel: maxPixel)
             return
         }
         var request = URLRequest(url: target)
@@ -598,23 +625,82 @@ final class XhsImageCache {
             }
         }
         session.dataTask(with: request) { [weak self] data, _, _ in
-            let image = data.flatMap { UIImage(data: $0) }
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if let image = image {
-                    self.finish(original, image: image, resolved: target.absoluteString)
-                } else {
-                    self.load(steps, index: index + 1, original: original)
+            guard let data = data else {
+                DispatchQueue.main.async {
+                    self?.load(steps, index: index + 1, original: original, maxPixel: maxPixel)
+                }
+                return
+            }
+            Self.decodeQueue.async {
+                let image = Self.decode(data, maxPixel: maxPixel)
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    if let image = image {
+                        self.finish(
+                            original,
+                            image: image,
+                            resolved: target.absoluteString,
+                            maxPixel: maxPixel
+                        )
+                    } else {
+                        self.load(
+                            steps,
+                            index: index + 1,
+                            original: original,
+                            maxPixel: maxPixel
+                        )
+                    }
                 }
             }
         }.resume()
     }
 
-    private func finish(_ url: String, image: UIImage?, resolved: String? = nil) {
+    nonisolated private static func decode(_ data: Data, maxPixel: Int) -> UIImage? {
+        guard
+            let source = CGImageSourceCreateWithData(
+                data as CFData,
+                [kCGImageSourceShouldCache: false] as CFDictionary
+            )
+        else { return nil }
+        if maxPixel > 0 {
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            ]
+            if let cgImage = CGImageSourceCreateThumbnailAtIndex(
+                source,
+                0,
+                options as CFDictionary
+            ) {
+                return UIImage(cgImage: cgImage)
+            }
+        }
+        let options: [CFString: Any] = [kCGImageSourceShouldCacheImmediately: true]
+        guard
+            let cgImage = CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary)
+        else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+
+    nonisolated private static func cost(of image: UIImage) -> Int {
+        guard let cgImage = image.cgImage else { return 1 }
+        return max(cgImage.bytesPerRow * cgImage.height, 1)
+    }
+
+    private func finish(
+        _ url: String,
+        image: UIImage?,
+        resolved: String? = nil,
+        maxPixel: Int = 0
+    ) {
         if let image = image {
-            cache.setObject(image, forKey: url as NSString)
+            let cost = Self.cost(of: image)
+            cache.setObject(image, forKey: url as NSString, cost: cost)
             if let resolved = resolved, resolved != url {
-                cache.setObject(image, forKey: resolved as NSString)
+                let key = Self.cacheKey(resolved, maxPixel: maxPixel)
+                cache.setObject(image, forKey: key as NSString, cost: cost)
             }
         }
         let list = waiters[url] ?? []
@@ -630,6 +716,9 @@ final class XhsImageCache {
 struct XhsImageView: View {
     let url: String?
     var fit: Bool = false
+    /// 0 = 原图（全屏看图）；卡片/头像传目标像素，避免把 1440 宽的图
+    /// 在主线程缩到 14pt。按 3x 屏估算，传点尺寸即可。
+    var maxPixel: Int = 0
 
     @State private var image: UIImage?
     @State private var retries = 0
@@ -670,12 +759,12 @@ struct XhsImageView: View {
             retries = 0
             return
         }
-        if let cached = XhsImageCache.shared.cached(url) {
+        if let cached = XhsImageCache.shared.cached(url, maxPixel: maxPixel) {
             image = cached
             retries = 0
             return
         }
-        XhsImageCache.shared.image(for: url) { loaded in
+        XhsImageCache.shared.image(for: url, maxPixel: maxPixel) { loaded in
             if let loaded = loaded {
                 self.image = loaded
                 self.retries = 0

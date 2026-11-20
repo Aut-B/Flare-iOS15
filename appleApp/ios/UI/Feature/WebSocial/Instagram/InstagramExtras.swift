@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import AVKit
 import UIKit
+import ImageIO
 import Combine
 import Drops
 import FlareAppleCore
@@ -387,8 +388,15 @@ final class IGImageCache {
     private let cache = NSCache<NSString, UIImage>()
     private var waiters: [String: [(UIImage?) -> Void]] = [:]
     private let session: URLSession
+    nonisolated private static let decodeQueue = DispatchQueue(
+        label: "dev.dimension.flare.ig.image-decode",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
 
     private init() {
+        cache.totalCostLimit = 96 * 1024 * 1024
+        cache.countLimit = 240
         let configuration = URLSessionConfiguration.default
         configuration.requestCachePolicy = .returnCacheDataElseLoad
         configuration.timeoutIntervalForRequest = 20
@@ -401,29 +409,36 @@ final class IGImageCache {
         session = URLSession(configuration: configuration)
     }
 
-    func cached(_ url: String) -> UIImage? {
-        cache.object(forKey: url as NSString)
+    func cached(_ url: String, maxPixel: Int = 0) -> UIImage? {
+        cache.object(forKey: Self.cacheKey(url, maxPixel: maxPixel) as NSString)
     }
 
-    func image(for url: String, completion: @escaping (UIImage?) -> Void) {
-        if let cached = cache.object(forKey: url as NSString) {
+    func image(for url: String, maxPixel: Int = 0, completion: @escaping (UIImage?) -> Void) {
+        let key = Self.cacheKey(url, maxPixel: maxPixel)
+        if let cached = cache.object(forKey: key as NSString) {
             completion(cached)
             return
         }
-        if waiters[url] != nil {
-            waiters[url]?.append(completion)
+        if waiters[key] != nil {
+            waiters[key]?.append(completion)
             return
         }
-        waiters[url] = [completion]
-        load(url, original: url, withCookie: false)
+        waiters[key] = [completion]
+        load(url, original: key, withCookie: false, maxPixel: maxPixel)
+    }
+
+    private static func cacheKey(_ url: String, maxPixel: Int) -> String {
+        guard maxPixel > 0 else { return url }
+        let bucket = ((maxPixel + 127) / 128) * 128
+        return "\(url)|\(bucket)"
     }
 
     /// 首屏先并发拉前几张封面。只预取封面、不预取轮播里的全部子图，
     /// 免得登录后刚拿到时间线就把 6S 的网络和图片解码占满。
-    func prefetch(_ urls: [String], limit: Int = 4) {
+    func prefetch(_ urls: [String], limit: Int = 4, maxPixel: Int = 1280) {
         for url in urls.prefix(limit) where !url.isEmpty {
-            if cache.object(forKey: url as NSString) == nil {
-                image(for: url) { _ in }
+            if cached(url, maxPixel: maxPixel) == nil {
+                image(for: url, maxPixel: maxPixel) { _ in }
             }
         }
     }
@@ -431,7 +446,7 @@ final class IGImageCache {
     /// 图床是带签名的 CDN 直链，通常不需要网页 cookie。以前先带整段
     /// Instagram cookie，6S 上经常会卡到超时才回落；现在先无 cookie 取，
     /// 失败再带 cookie 重试，私密账号的图仍然能显示。
-    private func load(_ raw: String, original: String, withCookie: Bool) {
+    private func load(_ raw: String, original: String, withCookie: Bool, maxPixel: Int) {
         var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if value.hasPrefix("//") { value = "https:" + value }
         if value.hasPrefix("http://") { value = "https://" + value.dropFirst(7) }
@@ -454,21 +469,68 @@ final class IGImageCache {
             }
         }
         session.dataTask(with: request) { [weak self] data, _, _ in
-            let image = data.flatMap { UIImage(data: $0) }
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if image == nil, !withCookie, !InstagramStore.shared.cookie.isEmpty {
-                    self.load(raw, original: original, withCookie: true)
-                    return
+            guard let data = data else {
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    if !withCookie, !InstagramStore.shared.cookie.isEmpty {
+                        self.load(raw, original: original, withCookie: true, maxPixel: maxPixel)
+                    } else {
+                        self.finish(original, image: nil)
+                    }
                 }
-                self.finish(original, image: image)
+                return
+            }
+            Self.decodeQueue.async {
+                let image = Self.decode(data, maxPixel: maxPixel)
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    if image == nil, !withCookie, !InstagramStore.shared.cookie.isEmpty {
+                        self.load(raw, original: original, withCookie: true, maxPixel: maxPixel)
+                        return
+                    }
+                    self.finish(original, image: image)
+                }
             }
         }.resume()
     }
 
+    nonisolated private static func decode(_ data: Data, maxPixel: Int) -> UIImage? {
+        guard
+            let source = CGImageSourceCreateWithData(
+                data as CFData,
+                [kCGImageSourceShouldCache: false] as CFDictionary
+            )
+        else { return nil }
+        if maxPixel > 0 {
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            ]
+            if let cgImage = CGImageSourceCreateThumbnailAtIndex(
+                source,
+                0,
+                options as CFDictionary
+            ) {
+                return UIImage(cgImage: cgImage)
+            }
+        }
+        let options: [CFString: Any] = [kCGImageSourceShouldCacheImmediately: true]
+        guard
+            let cgImage = CGImageSourceCreateImageAtIndex(source, 0, options as CFDictionary)
+        else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+
+    nonisolated private static func cost(of image: UIImage) -> Int {
+        guard let cgImage = image.cgImage else { return 1 }
+        return max(cgImage.bytesPerRow * cgImage.height, 1)
+    }
+
     private func finish(_ url: String, image: UIImage?) {
         if let image = image {
-            cache.setObject(image, forKey: url as NSString)
+            cache.setObject(image, forKey: url as NSString, cost: Self.cost(of: image))
         }
         let list = waiters[url] ?? []
         waiters[url] = nil

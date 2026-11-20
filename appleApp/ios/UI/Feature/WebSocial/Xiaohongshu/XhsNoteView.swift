@@ -217,7 +217,7 @@ struct XhsNoteView: View {
                 .aspectRatio(3.0 / 4.0, contentMode: .fit)
                 .frame(maxWidth: .infinity)
         } else if current.images.count == 1 {
-            XhsImageView(url: current.images[0], fit: true)
+            XhsImageView(url: current.images[0], fit: true, maxPixel: 1600)
                 .aspectRatio(mediaAspect, contentMode: .fit)
                 .frame(maxWidth: .infinity)
                 .clipped()
@@ -226,7 +226,7 @@ struct XhsNoteView: View {
         } else {
             TabView(selection: $page) {
                 ForEach(Array(current.images.enumerated()), id: \.offset) { index, url in
-                    XhsImageView(url: url, fit: true)
+                    XhsImageView(url: url, fit: true, maxPixel: 1600)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .clipped()
                         .contentShape(Rectangle())
@@ -365,7 +365,7 @@ struct XhsNoteView: View {
 
     private var authorRow: some View {
         HStack(spacing: 8) {
-            XhsImageView(url: current.user.avatar)
+            XhsImageView(url: current.user.avatar, maxPixel: 160)
                 .frame(width: 34, height: 34)
                 .clipShape(Circle())
             VStack(alignment: .leading, spacing: 1) {
@@ -595,89 +595,80 @@ struct XhsNoteView: View {
         guard !detailRequested else { return }
         detailRequested = true
 
+        // 刚看过同一篇：正文和多图直接出，不再等签名页和详情接口。
+        if let cached = XhsStore.shared.cachedDetail(for: note.id) {
+            let merged = mergedDetail(with: cached)
+            detail = merged
+            XhsStore.shared.rememberDetail(merged)
+            if page >= merged.images.count { page = 0 }
+            liked = merged.liked || liked
+            collected = merged.collected || collected
+            if !merged.likedCount.isEmpty { likeCount = merged.likedCount }
+            if !merged.commentCount.isEmpty { commentCount = merged.commentCount }
+            detailFailed = false
+            return
+        }
+
         // 同一个 xsec_token 在「笔记页来源」和「首页卡片来源」之间不一定通用：
         // 只试 pc_feed 的话，从关注流 / 搜索进来的笔记经常整条详情被拒，
         // 表现就是「只有封面一张图、正文和评论都出不来」。
-        var candidates: [(token: String, source: String)] = [
-            // 先按笔记自己带的来源试：从用户主页 / 搜索点进来的 token 是
-            // `pc_user` / `pc_search` 发的，只试下面两个固定值永远对不上。
-            (note.xsecToken, note.xsecSource),
-            (note.xsecToken, "pc_note"),
-            (note.xsecToken, "pc_feed"),
-            // 从用户主页、搜索、关注流进来的笔记，来源可能落在这些值上。
-            // 多试两种来源比重试同一个固定来源更容易拿到完整多图与评论。
-            (note.xsecToken, "pc_user"),
-            (note.xsecToken, "pc_search"),
-        ]
-        if !note.xsecToken.isEmpty {
-            // 令牌过期时，不带令牌再试一次：公开笔记有时仍然能拿到。
-            candidates.append(("", "pc_note"))
-        }
-
-        for candidate in candidates {
-            guard
-                let full = try? await XhsService.shared.note(
-                    id: note.id,
-                    xsecToken: candidate.token,
-                    xsecSource: candidate.source,
-                    timeout: 10,
-                    attempts: 1
-                )
-            else {
-                continue
-            }
+        guard let full = await XhsStore.shared.detail(for: note, allowCache: false) else {
+            // 所有来源全挂：给出「网页版打开」兜底，而不是留一个只剩封面的空页面。
+            Self.profileLog.error(
+                "detail failed for note \(note.id, privacy: .public); author id \(note.user.id, privacy: .public)"
+            )
             await MainActor.run {
-                var merged = full
-                // 详情偶尔只回正文，不带作者；卡片上已有 id 时不能把它覆盖掉。
-                if merged.user.id.isEmpty, !note.user.id.isEmpty {
-                    merged.user = XhsUser(
-                        id: note.user.id,
-                        name: merged.user.name.isEmpty ? note.user.name : merged.user.name,
-                        avatar: merged.user.avatar ?? note.user.avatar
-                    )
-                } else if merged.user.name.isEmpty, !note.user.name.isEmpty {
-                    merged.user = XhsUser(
-                        id: merged.user.id,
-                        name: note.user.name,
-                        avatar: merged.user.avatar ?? note.user.avatar
-                    )
-                }
-                // 详情接口偶尔只回一张图；首页卡片已经有多图时不要倒退。
-                // 反过来详情也可能比卡片更全，所以做并集：详情在前（token 更新、
-                // 地址更可信），卡片只补详情缺的那几张，不再整段覆盖。
-                var seen = Set<String>()
-                var mergedImages: [String] = []
-                for url in (full.images + note.images) where !url.isEmpty {
-                    if seen.insert(url).inserted { mergedImages.append(url) }
-                }
-                if !mergedImages.isEmpty {
-                    merged.images = mergedImages
-                }
-                detail = merged
-                // 详情里的图可能比首页卡片多：页码越界会直接显示空白。
-                if page >= merged.images.count { page = 0 }
-                liked = merged.liked || liked
-                collected = merged.collected || collected
-                if !merged.likedCount.isEmpty { likeCount = merged.likedCount }
-                if !merged.commentCount.isEmpty { commentCount = merged.commentCount }
-                detailFailed = false
-                // 评论是和详情并行发的，第一次多半还拿着卡片上的旧 token。
-                // 详情回来时 token 可能已经刷新，这里自动重试一次，
-                // 用户不用再手点「重新加载评论」。
-                if commentsError != nil, !commentsLoading {
-                    loadComments(reset: true)
-                }
+                detailFailed = true
             }
             return
         }
 
-        // 三个来源全挂：给出「网页版打开」兜底，而不是留一个只剩封面的空页面。
-        Self.profileLog.error(
-            "detail failed for note \(note.id, privacy: .public); author id \(note.user.id, privacy: .public)"
-        )
         await MainActor.run {
-            detailFailed = true
+            let merged = mergedDetail(with: full)
+            detail = merged
+            XhsStore.shared.rememberDetail(merged)
+            // 详情里的图可能比首页卡片多：页码越界会直接显示空白。
+            if page >= merged.images.count { page = 0 }
+            liked = merged.liked || liked
+            collected = merged.collected || collected
+            if !merged.likedCount.isEmpty { likeCount = merged.likedCount }
+            if !merged.commentCount.isEmpty { commentCount = merged.commentCount }
+            detailFailed = false
+            // 评论是和详情并行发的，第一次多半还拿着卡片上的旧 token。
+            // 详情回来时 token 可能已经刷新，这里自动重试一次，
+            // 用户不用再手点「重新加载评论」。
+            if commentsError != nil, !commentsLoading {
+                loadComments(reset: true)
+            }
         }
+    }
+
+    /// 详情偶尔只回正文或一张图；首页卡片上已有的作者 id / 多图不能倒退，
+    /// 但详情可能更全，所以做并集，详情在前。
+    private func mergedDetail(with full: XhsNote) -> XhsNote {
+        var merged = full
+        if merged.user.id.isEmpty, !note.user.id.isEmpty {
+            merged.user = XhsUser(
+                id: note.user.id,
+                name: merged.user.name.isEmpty ? note.user.name : merged.user.name,
+                avatar: merged.user.avatar ?? note.user.avatar
+            )
+        } else if merged.user.name.isEmpty, !note.user.name.isEmpty {
+            merged.user = XhsUser(
+                id: merged.user.id,
+                name: note.user.name,
+                avatar: merged.user.avatar ?? note.user.avatar
+            )
+        }
+        var seen = Set<String>()
+        var mergedImages: [String] = []
+        for url in (full.images + note.images) where !url.isEmpty {
+            if seen.insert(url).inserted { mergedImages.append(url) }
+        }
+        if !mergedImages.isEmpty {
+            merged.images = mergedImages
+        }
+        return merged
     }
 
     private func loadComments(reset: Bool) {
@@ -997,7 +988,7 @@ struct XhsCommentRow: View {
     }
 
     private var avatarImage: some View {
-        XhsImageView(url: comment.user.avatar)
+        XhsImageView(url: comment.user.avatar, maxPixel: 128)
             .frame(width: 26, height: 26)
             .clipShape(Circle())
     }
