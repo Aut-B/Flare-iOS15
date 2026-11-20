@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Instagram 网页版 v1 接口。
 ///
@@ -7,6 +8,10 @@ import Foundation
 /// 统一翻译成 `IGError.needLogin`。
 final class InstagramService {
     static let shared = InstagramService()
+    private static let profileLog = Logger(
+        subsystem: "dev.dimension.flare.instagram",
+        category: "profile"
+    )
 
     private let session: URLSession
 
@@ -107,9 +112,90 @@ final class InstagramService {
         }
         let connection = IGJSON.object(rawUser["edge_owner_to_timeline_media"])
         let edges = IGJSON.array(connection?["edges"])
-        let media = edges.compactMap { IGJSON.media($0["node"]) }
+        let media = edges.compactMap { edge -> IGMedia? in
+            guard let node = IGJSON.object(edge["node"]) else { return nil }
+            return Self.profileMedia(node: node, user: user)
+        }
         let next = IGJSON.string(IGJSON.object(connection?["page_info"])?["end_cursor"])
+        Self.profileLog.info(
+            "profile \(userName, privacy: .public): \(edges.count) edges, \(media.count) parsed"
+        )
+        if !edges.isEmpty, media.isEmpty {
+            Self.profileLog.error(
+                "profile \(userName, privacy: .public): all grid nodes failed to parse"
+            )
+        }
         return (user, media, next)
+    }
+
+    /// `web_profile_info` 的九宫格节点和首页/详情不是同一套字段：
+    /// 帖子 id 叫 `id` 而不是 `pk`，作者在 `owner` 而不是 `user`，
+    /// 图片只有 `display_url`，点赞/评论数是 `edge_*` 结构。
+    /// 直接丢给 `IGJSON.media` 会全部返回 nil，主页看起来就是「一条帖子都没有」。
+    private static func profileMedia(node: [String: Any], user: IGUser) -> IGMedia? {
+        var normalized = node
+        if IGJSON.identifier(normalized["pk"]) == nil {
+            if let id = IGJSON.identifier(normalized["id"]) {
+                normalized["pk"] = id
+            } else if let code = IGJSON.string(normalized["shortcode"]) {
+                normalized["pk"] = code
+            }
+        }
+        if IGJSON.user(normalized["user"]) == nil {
+            if let owner = IGJSON.object(normalized["owner"]),
+               IGJSON.user(owner) != nil {
+                normalized["user"] = owner
+            } else {
+                var synthesized: [String: Any] = [
+                    "pk": user.id,
+                    "username": user.userName,
+                ]
+                if let avatar = user.avatar { synthesized["profile_pic_url"] = avatar }
+                normalized["user"] = synthesized
+            }
+        }
+        if normalized["code"] == nil,
+           let shortcode = IGJSON.string(normalized["shortcode"]) {
+            normalized["code"] = shortcode
+        }
+        if normalized["taken_at"] == nil,
+           let stamp = normalized["taken_at_timestamp"] {
+            normalized["taken_at"] = stamp
+        }
+        if normalized["like_count"] == nil {
+            if let count = IGJSON.object(normalized["edge_liked_by"])?["count"] {
+                normalized["like_count"] = count
+            } else if let count = IGJSON.object(
+                normalized["edge_media_preview_like"]
+            )?["count"] {
+                normalized["like_count"] = count
+            }
+        }
+        if normalized["comment_count"] == nil {
+            normalized["comment_count"] =
+                IGJSON.object(normalized["edge_media_to_comment"])?["count"]
+        }
+        if normalized["caption"] == nil,
+           let edges = IGJSON.object(normalized["edge_media_to_caption"])?["edges"],
+           let first = IGJSON.array(edges).first,
+           let text = IGJSON.object(first["node"])?["text"] {
+            normalized["caption"] = ["text": text]
+        }
+        if normalized["media_type"] == nil {
+            normalized["media_type"] = (normalized["is_video"] as? Bool == true) ? 2 : 1
+        }
+        if normalized["video_versions"] == nil,
+           let video = IGJSON.string(normalized["video_url"]) {
+            normalized["video_versions"] = [["url": video]]
+        }
+        if normalized["carousel_media"] == nil,
+           let edges = IGJSON.object(normalized["edge_sidecar_to_children"])?["edges"] {
+            let children = IGJSON.array(edges).compactMap { IGJSON.object($0["node"]) }
+            if !children.isEmpty {
+                normalized["carousel_media"] = children
+            }
+        }
+        return IGJSON.media(normalized)
     }
 
     func userFeed(userId: String, cursor: String?) async throws -> (items: [IGMedia], next: String?) {

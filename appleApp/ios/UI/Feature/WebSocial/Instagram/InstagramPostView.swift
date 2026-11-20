@@ -1,10 +1,15 @@
 import SwiftUI
 import UIKit
+import os
 
 /// 帖子详情：正文不截断，多图纵向铺开，视频直接播。
 /// 底部带网页版那套交互：点赞、评论、转发、保存图片。
 struct InstagramPostView: View {
     let media: IGMedia
+    private static let profileLog = Logger(
+        subsystem: "dev.dimension.flare.instagram",
+        category: "profile"
+    )
 
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var store = InstagramStore.shared
@@ -91,7 +96,7 @@ struct InstagramPostView: View {
     private var userHeader: some View {
         HStack(spacing: 10) {
             Button {
-                profileTarget = IGProfileTarget(name: current.user.userName)
+                openProfile(current.user.userName)
             } label: {
                 HStack(spacing: 10) {
                     IGImageView(url: current.user.avatar)
@@ -246,9 +251,12 @@ struct InstagramPostView: View {
     }
 
     private func openProfile(_ userName: String) {
-        let trimmed = userName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        profileTarget = IGProfileTarget(name: trimmed)
+        let target = IGProfileTarget(name: userName)
+        guard !target.name.isEmpty else {
+            Self.profileLog.error("tap user with empty username")
+            return
+        }
+        profileTarget = target
     }
 
     /// 点赞 / 评论被风控拦下时的提示条：说清楚「登录没掉」，并给网页版入口。
@@ -333,10 +341,16 @@ struct InstagramPostView: View {
 /// 用户主页：头部信息 + 九宫格缩略图。
 struct InstagramProfileView: View {
     let userName: String
+    private static let profileLog = Logger(
+        subsystem: "dev.dimension.flare.instagram",
+        category: "profile"
+    )
 
     @Environment(\.dismiss) private var dismiss
     @State private var user: IGUser?
     @State private var media: [IGMedia] = []
+    @State private var next: String?
+    @State private var isLoadingMore = false
     @State private var isLoading = true
     @State private var errorText: String?
     @State private var selected: IGMedia?
@@ -425,7 +439,16 @@ struct InstagramProfileView: View {
                                         }
                                 }
                                 .buttonStyle(.plain)
+                                .onAppear {
+                                    guard item.id == media.last?.id else { return }
+                                    Task { await loadMore() }
+                                }
                             }
+                        }
+                        if isLoadingMore {
+                            ProgressView()
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
                         }
                     }
                     .padding(.bottom, 24)
@@ -495,12 +518,44 @@ struct InstagramProfileView: View {
             let result = try await InstagramService.shared.profile(userName: userName)
             user = result.user
             media = result.media
+            next = result.next
+            Self.profileLog.info(
+                "profile view @\(userName, privacy: .public) loaded \(result.media.count) posts"
+            )
             // 九宫格首屏同样先并发取前几张缩略图，避免逐张 onAppear 才发请求。
             DispatchQueue.main.async {
                 IGImageCache.shared.prefetch(result.media.prefix(6).compactMap(\.cover), limit: 6)
             }
         } catch {
+            Self.profileLog.error(
+                "profile view @\(userName, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
+            )
             errorText = error.localizedDescription
+        }
+    }
+
+    private func loadMore() async {
+        guard
+            let userId = user?.id,
+            !userId.isEmpty,
+            let cursor = next,
+            !cursor.isEmpty,
+            !isLoadingMore
+        else { return }
+        isLoadingMore = true
+        defer { isLoadingMore = false }
+        do {
+            let page = try await InstagramService.shared.userFeed(
+                userId: userId,
+                cursor: cursor
+            )
+            let known = Set(media.map(\.id))
+            media.append(contentsOf: page.items.filter { !known.contains($0.id) })
+            next = page.next
+        } catch {
+            Self.profileLog.error(
+                "profile view @\(userName, privacy: .public) load more failed: \(error.localizedDescription, privacy: .public)"
+            )
         }
     }
 

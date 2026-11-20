@@ -215,10 +215,7 @@ struct XhsFeedView: View {
                     note: note,
                     width: cardWidth,
                     onOpen: { selected = note },
-                    onUser: {
-                        guard !note.user.id.isEmpty else { return }
-                        userTarget = XhsUserTarget(id: note.user.id, name: note.user.name)
-                    },
+                    onUser: { openUser(note) },
                     onLike: { toggleLike(note) }
                 )
                 // 每列最后一张卡出现在屏幕上时再要下一页。
@@ -231,6 +228,29 @@ struct XhsFeedView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    /// 卡片上的作者。首页 DOM 给的卡片常常没有 userId；以前按钮被
+    /// `.disabled` 掉，点名字只会落到整卡的 `onTapGesture` 上打开笔记。
+    /// 现在缺 id 时先补一次详情，再打开主页。
+    private func openUser(_ note: XhsNote) {
+        if !note.user.id.isEmpty {
+            userTarget = XhsUserTarget(id: note.user.id, name: note.user.name)
+            return
+        }
+        Task {
+            let full = await store.resolvedDetail(for: note)
+            await MainActor.run {
+                if let full = full, !full.user.id.isEmpty {
+                    userTarget = XhsUserTarget(
+                        id: full.user.id,
+                        name: full.user.name.isEmpty ? note.user.name : full.user.name
+                    )
+                } else {
+                    actionError = "没拿到作者的主页 id，先点进笔记再试一次"
+                }
+            }
+        }
     }
 
     /// 卡片上的心：先乐观地翻状态，失败再翻回来并提示。
@@ -364,7 +384,6 @@ struct XhsNoteCard: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(note.user.id.isEmpty)
 
                 Spacer(minLength: 0)
 

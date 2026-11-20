@@ -30,7 +30,8 @@ struct XhsNote: Identifiable, Hashable {
     let id: String
     let title: String
     let desc: String
-    let user: XhsUser
+    /// 首页 DOM 兜底先回来时经常只有作者名、没有 id；详情/接口后到时要能补上。
+    var user: XhsUser
     /// 详情接口偶尔只回一张图，这里允许把首页卡片上更完整的图片列表补回来。
     var images: [String]
     var likedCount: String
@@ -223,14 +224,14 @@ enum XhsJSON {
 
     static func user(_ value: Any?) -> XhsUser? {
         guard let object = object(value) else { return nil }
-        guard let id = string(object["userId"]) ?? string(object["user_id"]) ?? string(object["id"]) else {
-            return nil
-        }
-        return XhsUser(
-            id: id,
-            name: string(object["nickname"]) ?? string(object["nick_name"]) ?? string(object["name"]) ?? "",
-            avatar: string(object["avatar"]) ?? string(object["image"]) ?? string(object["images"])
-        )
+        // 不少首页卡片只给昵称/头像，没有 userId。以前这里直接返回 nil，
+        // 整个作者被降级成 `XhsUser.empty`，作者名就再也点不进去了。
+        // id 先留空，等详情接口回来后再补；只要还有名字或头像就保留。
+        let id = string(object["userId"]) ?? string(object["user_id"]) ?? string(object["id"]) ?? ""
+        let name = string(object["nickname"]) ?? string(object["nick_name"]) ?? string(object["name"]) ?? ""
+        let avatar = string(object["avatar"]) ?? string(object["image"]) ?? string(object["images"])
+        guard !id.isEmpty || !name.isEmpty || avatar != nil else { return nil }
+        return XhsUser(id: id, name: name, avatar: avatar)
     }
 
     /// 图片地址藏在好几层里，挨个试。

@@ -1,10 +1,17 @@
 import SwiftUI
 import UIKit
+import os
 
 /// 点帖子里的头像 / 用户名时，用这个包一层用户名给 `sheet(item:)` 用。
 struct IGProfileTarget: Identifiable {
     let name: String
     var id: String { name }
+
+    init(name: String) {
+        var value = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix("@") { value.removeFirst() }
+        self.name = value
+    }
 }
 
 /// Instagram 首页。
@@ -12,6 +19,11 @@ struct IGProfileTarget: Identifiable {
 /// 版式照 Instagram 自己的来：头像 + 用户名一行，下面是图（轮播可以左右滑），
 /// 再下面是互动数和正文。点赞走 `InstagramStore` 的乐观更新，评论在详情页里发。
 struct InstagramFeedView: View {
+    private static let profileLog = Logger(
+        subsystem: "dev.dimension.flare.instagram",
+        category: "profile"
+    )
+
     @ObservedObject private var store = InstagramStore.shared
     @State private var showLogin = false
     @State private var showSearch = false
@@ -126,7 +138,7 @@ struct InstagramFeedView: View {
                         IGMediaCard(
                             media: media,
                             onOpen: { selected = media },
-                            onOpenUser: { profileTarget = IGProfileTarget(name: $0) }
+                            onOpenUser: { openProfile($0) }
                         )
                         Divider()
                     }
@@ -163,6 +175,15 @@ struct InstagramFeedView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(Color.orange.opacity(0.08))
+    }
+
+    private func openProfile(_ userName: String) {
+        let target = IGProfileTarget(name: userName)
+        guard !target.name.isEmpty else {
+            Self.profileLog.error("tap user with empty username")
+            return
+        }
+        profileTarget = target
     }
 
     @ViewBuilder

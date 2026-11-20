@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import os
 
 /// 打开某个用户主页时传的东西（`sheet(item:)` 需要 `Identifiable`）。
 struct XhsUserTarget: Identifiable {
@@ -16,6 +17,10 @@ struct XhsUserView: View {
     let name: String
     /// 直接当 sheet 根页打开时给一个「关闭」；从笔记里 NavigationLink 推进来时不用。
     let showsClose: Bool
+    private static let profileLog = Logger(
+        subsystem: "dev.dimension.flare.xiaohongshu",
+        category: "profile"
+    )
 
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var store = XhsStore.shared
@@ -270,6 +275,9 @@ struct XhsUserView: View {
     private func loadNotes(reset: Bool) async {
         let owner = profile?.id ?? userId
         guard !owner.isEmpty else {
+            Self.profileLog.error(
+                "cannot load user notes: empty user id (name \(name, privacy: .public))"
+            )
             await MainActor.run {
                 if error == nil { error = "没拿到用户 id，稍后重试" }
             }

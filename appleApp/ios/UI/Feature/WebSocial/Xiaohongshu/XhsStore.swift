@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import WebKit
+import os
 
 /// 小红书的登录态与首页流。
 ///
@@ -13,6 +14,10 @@ import WebKit
 /// 直接把页面里已经渲染出来的卡片 DOM 抄回来。两条路谁先到用谁。
 final class XhsStore: ObservableObject {
     static let shared = XhsStore()
+    private static let profileLog = Logger(
+        subsystem: "dev.dimension.flare.xiaohongshu",
+        category: "profile"
+    )
 
     @Published private(set) var isLoggedIn: Bool
     @Published private(set) var notes: [XhsNote] = []
@@ -639,6 +644,43 @@ final class XhsStore: ObservableObject {
         try await XhsService.shared.userNotes(userId: userId, cursor: cursor)
     }
 
+    /// 卡片上缺作者 id 时补一次详情。首页 DOM 经常只给昵称，
+    /// 详情接口的 `note_card.user.userId` 才是主页接口要的 id。
+    func resolvedDetail(for note: XhsNote) async -> XhsNote? {
+        var candidates: [(token: String, source: String)] = [
+            (note.xsecToken, note.xsecSource),
+            (note.xsecToken, "pc_note"),
+            (note.xsecToken, "pc_feed"),
+            (note.xsecToken, "pc_user"),
+            (note.xsecToken, "pc_search"),
+        ]
+        if !note.xsecToken.isEmpty {
+            candidates.append(("", "pc_note"))
+        }
+        let deadline = Date().addingTimeInterval(20)
+        for candidate in candidates {
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 1 else { break }
+            guard
+                let full = try? await XhsService.shared.note(
+                    id: note.id,
+                    xsecToken: candidate.token,
+                    xsecSource: candidate.source,
+                    timeout: min(8, remaining),
+                    attempts: 1
+                )
+            else { continue }
+            if !full.user.id.isEmpty {
+                self.merge([full])
+                return full
+            }
+        }
+        Self.profileLog.error(
+            "note \(note.id, privacy: .public) still has no author id after detail fetch"
+        )
+        return nil
+    }
+
     /// 把错误翻成一句能显示的话；掉登录就顺手退回登录页。
     func message(for error: Error) -> String {
         if let xhs = error as? XhsError {
@@ -654,18 +696,48 @@ final class XhsStore: ObservableObject {
         let work: () -> Void = { [weak self] in
             guard let self = self else { return }
             var base = replace ? [XhsNote]() : self.notes
-            let known = Set(base.map { $0.id })
-            let fresh = batch.filter { !known.contains($0.id) }
-            if !fresh.isEmpty {
-                base.append(contentsOf: fresh)
+            var changed = false
+            for note in batch {
+                guard let index = base.firstIndex(where: { $0.id == note.id }) else {
+                    base.append(note)
+                    changed = true
+                    continue
+                }
+                // 同一条笔记可能是「DOM 先到（无作者 id）→ 接口后到（有 id）」。
+                // 以前只认新 id，后到的完整版本会被当成重复项丢掉，作者名
+                // 就永远停在不可点的状态。这里把缺的字段补进已有卡片。
+                var existing = base[index]
+                var enriched = false
+                if existing.user.id.isEmpty, !note.user.id.isEmpty {
+                    existing.user = XhsUser(
+                        id: note.user.id,
+                        name: existing.user.name.isEmpty ? note.user.name : existing.user.name,
+                        avatar: existing.user.avatar ?? note.user.avatar
+                    )
+                    enriched = true
+                } else if existing.user.name.isEmpty, !note.user.name.isEmpty {
+                    existing.user = XhsUser(
+                        id: existing.user.id,
+                        name: note.user.name,
+                        avatar: existing.user.avatar ?? note.user.avatar
+                    )
+                    enriched = true
+                }
+                if existing.xsecToken.isEmpty, !note.xsecToken.isEmpty {
+                    existing.xsecToken = note.xsecToken
+                    enriched = true
+                }
+                if enriched {
+                    base[index] = existing
+                    changed = true
+                }
+            }
+            if changed || replace {
                 self.notes = base
                 self.receivedAnything = true
                 self.emptyScrolls = 0
                 self.loaded = true
                 self.errorMessage = nil
-                self.isLoading = false
-            }
-            if !fresh.isEmpty || replace {
                 self.isLoading = false
             }
             // 不管有没有新内容，这一轮翻页都结束了，页脚必须收起来。
@@ -694,6 +766,11 @@ final class XhsStore: ObservableObject {
         // DOM 脚本已经从卡片里的 <a href> 把它们抠出来了。
         let uid = (item["uid"] as? String) ?? ""
         let token = (item["token"] as? String) ?? ""
+        if uid.isEmpty, !author.isEmpty {
+            Self.profileLog.info(
+                "DOM note \(id, privacy: .public) has author \(author, privacy: .public) but no user id"
+            )
+        }
         var images: [String] = []
         for value in (item["images"] as? [String]) ?? [] where !value.isEmpty {
             if !images.contains(value) { images.append(value) }

@@ -2,10 +2,15 @@ import SwiftUI
 import UIKit
 import AVFoundation
 import AVKit
+import os
 
 /// 笔记详情：多图横滑、点开全屏、点赞 / 收藏 / 评论，作者和评论者都能点进主页。
 struct XhsNoteView: View {
     let note: XhsNote
+    private static let profileLog = Logger(
+        subsystem: "dev.dimension.flare.xiaohongshu",
+        category: "profile"
+    )
 
     @Environment(\.dismiss) private var dismiss
 
@@ -23,6 +28,7 @@ struct XhsNoteView: View {
     @State private var videoError: String?
     @State private var showShare = false
     @State private var profileTarget: XhsUserTarget?
+    @State private var resolvingAuthor = false
     @State private var detailFailed = false
 
     @State private var comments: [XhsComment] = []
@@ -307,15 +313,53 @@ struct XhsNoteView: View {
 
     @ViewBuilder
     private var authorLink: some View {
-        if current.user.id.isEmpty {
+        if current.user.id.isEmpty, current.user.name.isEmpty, current.user.avatar == nil {
             authorRow
         } else {
             Button {
-                profileTarget = XhsUserTarget(id: current.user.id, name: current.user.name)
+                openAuthorProfile()
             } label: {
                 authorRow
             }
             .buttonStyle(.plain)
+        }
+    }
+
+    /// 详情接口没回来之前，首页卡片可能只有作者名。先按已有 id 打开；
+    /// 没 id 就补一次详情，拿到 `user.userId` 再弹主页，而不是让整行不可点。
+    private func openAuthorProfile() {
+        let author = current.user
+        if !author.id.isEmpty {
+            profileTarget = XhsUserTarget(id: author.id, name: author.name)
+            return
+        }
+        guard !resolvingAuthor else { return }
+        let requestNote = current
+        resolvingAuthor = true
+        Task {
+            var resolved: XhsUser? = nil
+            if let detail = detail, !detail.user.id.isEmpty {
+                resolved = detail.user
+            }
+            if resolved == nil,
+               let full = await XhsStore.shared.resolvedDetail(for: requestNote),
+               !full.user.id.isEmpty {
+                resolved = full.user
+            }
+            await MainActor.run {
+                resolvingAuthor = false
+                if let resolved = resolved {
+                    profileTarget = XhsUserTarget(
+                        id: resolved.id,
+                        name: resolved.name.isEmpty ? author.name : resolved.name
+                    )
+                } else {
+                    Self.profileLog.error(
+                        "author id missing for note \(requestNote.id, privacy: .public), name \(author.name, privacy: .public)"
+                    )
+                    actionError = "没拿到作者的主页 id，稍后再试；也可以先点「网页版」查看"
+                }
+            }
         }
     }
 
@@ -584,6 +628,20 @@ struct XhsNoteView: View {
             }
             await MainActor.run {
                 var merged = full
+                // 详情偶尔只回正文，不带作者；卡片上已有 id 时不能把它覆盖掉。
+                if merged.user.id.isEmpty, !note.user.id.isEmpty {
+                    merged.user = XhsUser(
+                        id: note.user.id,
+                        name: merged.user.name.isEmpty ? note.user.name : merged.user.name,
+                        avatar: merged.user.avatar ?? note.user.avatar
+                    )
+                } else if merged.user.name.isEmpty, !note.user.name.isEmpty {
+                    merged.user = XhsUser(
+                        id: merged.user.id,
+                        name: note.user.name,
+                        avatar: merged.user.avatar ?? note.user.avatar
+                    )
+                }
                 // 详情接口偶尔只回一张图；首页卡片已经有多图时不要倒退。
                 // 反过来详情也可能比卡片更全，所以做并集：详情在前（token 更新、
                 // 地址更可信），卡片只补详情缺的那几张，不再整段覆盖。
@@ -614,6 +672,9 @@ struct XhsNoteView: View {
         }
 
         // 三个来源全挂：给出「网页版打开」兜底，而不是留一个只剩封面的空页面。
+        Self.profileLog.error(
+            "detail failed for note \(note.id, privacy: .public); author id \(note.user.id, privacy: .public)"
+        )
         await MainActor.run {
             detailFailed = true
         }
