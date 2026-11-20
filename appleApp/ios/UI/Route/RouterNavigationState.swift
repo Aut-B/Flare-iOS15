@@ -14,6 +14,7 @@ final class RouterNavigationState: ObservableObject {
     @Published var backStack: [Route] = []
     @Published var sheet: Route?
     @Published var cover: Route?
+    @Published var pendingRoute: Route?
 
     func goBack() {
         if !backStack.isEmpty {
@@ -27,5 +28,15 @@ final class RouterNavigationState: ObservableObject {
 
     func dismissCover() {
         cover = nil
+    }
+
+    /// 更多菜单里的目标页要等 sheet 完全收起后再 push。
+    /// iOS 15 上在 dismiss 动画期间同步修改 backStack，目标页会被丢掉。
+    func flushPendingRoute() {
+        guard let route = pendingRoute else { return }
+        pendingRoute = nil
+        if backStack.last != route {
+            backStack.append(route)
+        }
     }
 }

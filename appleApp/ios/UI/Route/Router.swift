@@ -45,7 +45,7 @@ struct Router<Root: View>: View {
             }
         }
         .environment(\.timelineMediaActionHandler, IOSTimelineMediaActions.handler)
-        .sheet(item: $navigation.sheet) { route in
+        .sheet(item: $navigation.sheet, onDismiss: { navigation.flushPendingRoute() }) { route in
             if #available(iOS 18.0, *) {
                 NBNavigationStack {
                     route.view(
@@ -111,13 +111,20 @@ struct Router<Root: View>: View {
         if route.alertTitle != nil {
             alertRoute = route
         } else if isSheetRoute(route: route) {
+            navigation.pendingRoute = nil
             navigation.sheet = route
         } else if isFullScreenCover(route: route) {
             navigation.cover = route
         } else if navigation.backStack.last != route {
-            navigation.backStack.append(route)
-            navigation.sheet = nil
-            navigation.cover = nil
+            if navigation.sheet != nil {
+                // 直接从更多菜单里点「设置」时，sheet 还盖在导航栈上。
+                // 先记下目标并收起 sheet，等 onDismiss 后再 push。
+                navigation.pendingRoute = route
+                navigation.sheet = nil
+            } else {
+                navigation.backStack.append(route)
+                navigation.cover = nil
+            }
         }
     }
     

@@ -120,13 +120,7 @@ struct HomeTimelineScreen: View {
                 if tabs.isEmpty {
                     BackportContentUnavailableView("tab_settings_title", systemImage: "square.grid.2x2")
                         .toolbar {
-                            ToolbarItem(placement: .navigationBarLeading) {
-                                Image(fontAwesome: .gear)
-                                    .onTapGesture {
-                                        toSecondaryMenu()
-                                    }
-                                    .accessibilityLabel(Text("open_navigation_menu"))
-                            }
+                            leadingToolbarContent
                             ToolbarItem(placement: .primaryAction) {
                                 Button {
                                     toTabSetting()
@@ -331,30 +325,35 @@ struct HomeTimelineScreen: View {
         ToolbarItem(placement: .navigationBarLeading) {
             // 以前这里用 `onTapGesture` 挂在 `StateView` 上：头像一旦加载出来，
             // `AvatarView` 内部的图片会把点击吃掉，工具栏就再也点不动了。
-            // 换成 `Button` 并让内容不参与命中测试，整个 24x24 区域都能点。
+            // 现在换成 `Button`，只让头像/齿轮这层视觉内容不参与命中测试。
+            // 不能对 Button 的整个 label 关掉命中测试：那样按钮没有任何可点区域，
+            // 6S(iOS 15) 上就表现为左上角点了没反应，进不去设置。
             Button {
                 toSecondaryMenu()
             } label: {
-                StateView(state: activeAccountPresenter.state.user) { user in
-                    if user.avatar == nil {
-                        Image(fontAwesome: .gear)
-                    } else {
-                        if #available(iOS 26.0, *) {
-                            AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                ZStack {
+                    // 透明底负责撑出整个可点区域，视觉内容浮在它上面。
+                    Color.clear
+                        .frame(width: 30, height: 30)
+                    StateView(state: activeAccountPresenter.state.user) { user in
+                        if user.avatar == nil {
+                            Image(fontAwesome: .gear)
                         } else {
-                            AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
-                                .frame(width: 24, height: 24)
+                            if #available(iOS 26.0, *) {
+                                AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                            } else {
+                                AvatarView(data: user.avatar?.url, customHeader: user.avatar?.customHeaders)
+                                    .frame(width: 24, height: 24)
+                            }
                         }
+                    } errorContent: { _ in
+                        Image(fontAwesome: .gear)
+                    } loadingContent: {
+                        Image(fontAwesome: .gear)
                     }
-                } errorContent: { _ in
-                    Image(fontAwesome: .gear)
-                } loadingContent: {
-                    Image(fontAwesome: .gear)
+                    // 只让头像/齿轮本身不接收触摸，外层的透明底仍然可点。
+                    .allowsHitTesting(false)
                 }
-                // 头像/齿轮本身不参与命中测试，整块交给外层 Button。
-                // 之前即使包了 Button，AvatarView 内部的异步图片仍可能吞掉点击，
-                // 左上角看起来有按钮却点不动；这里彻底让内容不接收触摸。
-                .allowsHitTesting(false)
                 .frame(width: 30, height: 30)
                 .contentShape(Rectangle())
             }
