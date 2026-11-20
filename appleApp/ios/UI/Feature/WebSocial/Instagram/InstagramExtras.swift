@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import AVKit
 import UIKit
+import Combine
 import Drops
 import FlareAppleCore
 import FlareAppleUI
@@ -26,7 +27,9 @@ enum IGVideoFactory {
             url: url,
             options: ["AVURLAssetHTTPHeaderFieldsKey": headers]
         )
-        return AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        let player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        player.isMuted = false
+        return player
     }
 }
 
@@ -172,6 +175,67 @@ private struct IGTranslatedText: View {
     }
 }
 
+/// 内联 IG 视频的音频会话持有者。
+///
+/// App 启动时 `FlareApp` 把会话固定为 `.ambient`（尊重静音拨片、可与其他
+/// App 混音）。只有视频真正开始播放时才通过 `AudioSessionManager` 的引用
+/// 计数切到 `.playback`，暂停 / 离场 / 交给全屏播放器时立刻归还，避免 IG
+/// 把整个 App 永久留在 `.playback` 并掐断后台音乐。
+@MainActor
+final class IGVideoAudioController: ObservableObject {
+    private var subscription: AnyCancellable?
+    private var holdsSession = false
+    private var suspendedForFullscreen = false
+    private var lastPlaying = false
+
+    func watch(_ player: AVPlayer) {
+        subscription = player.publisher(for: \.timeControlStatus, options: [.initial])
+            .sink { @Sendable [weak self] status in
+                let playing = status != .paused
+                Task { @MainActor [weak self] in
+                    self?.update(playing: playing)
+                }
+            }
+    }
+
+    /// 全屏播放器接管前调用：先归还会话，全屏期间忽略内联播放器状态。
+    func suspendForFullscreen(_ player: AVPlayer) {
+        suspendedForFullscreen = true
+        player.pause()
+        lastPlaying = false
+        setHolding(false)
+    }
+
+    /// 全屏退出后恢复观察，内联播放器仍保持暂停。
+    func resumeAfterFullscreen() {
+        suspendedForFullscreen = false
+        setHolding(lastPlaying)
+    }
+
+    func stop(_ player: AVPlayer) {
+        subscription = nil
+        suspendedForFullscreen = false
+        player.pause()
+        setHolding(false)
+    }
+
+    private func update(playing: Bool) {
+        lastPlaying = playing
+        guard !suspendedForFullscreen else { return }
+        setHolding(playing)
+    }
+
+    private func setHolding(_ holding: Bool) {
+        guard holding != holdsSession else { return }
+        holdsSession = holding
+        if holding {
+            AudioSessionManager.shared.beginPlayback()
+        } else {
+            AudioSessionManager.shared.endPlayback()
+        }
+    }
+}
+
 /// 视频播放。`VideoPlayer` 自带播放 / 进度 / 全屏控件，够用。
 struct IGVideoPlayer: View {
     let url: String
@@ -180,10 +244,10 @@ struct IGVideoPlayer: View {
     var showsFullscreenButton: Bool = true
 
     @State private var player: AVPlayer?
-    @State private var fullscreen = false
+    @StateObject private var audio = IGVideoAudioController()
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .topLeading) {
             Color.black
             if let player = player {
                 VideoPlayer(player: player)
@@ -191,13 +255,20 @@ struct IGVideoPlayer: View {
                 ProgressView()
                     .tint(.white)
             }
-        }
-        .overlay(alignment: .topLeading) {
             if showsFullscreenButton {
                 Button {
                     // 全屏那个播放器会自己播，这里先停掉，免得两路声音叠在一起。
-                    player?.pause()
-                    fullscreen = true
+                    let position = player?.currentTime().seconds ?? 0
+                    if let player {
+                        audio.suspendForFullscreen(player)
+                    }
+                    let presented = IGFullscreenVideoPresenter.present(url: url, from: position) { [weak audio] in
+                        audio?.resumeAfterFullscreen()
+                    }
+                    if !presented {
+                        // 没弹出来就别把内联播放器挂起，否则用户点播放也不会有声音。
+                        audio.resumeAfterFullscreen()
+                    }
                 } label: {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                         .font(.system(size: 13, weight: .semibold))
@@ -211,71 +282,98 @@ struct IGVideoPlayer: View {
                 .accessibilityLabel("全屏播放")
             }
         }
-        .fullScreenCover(isPresented: $fullscreen, onDismiss: {
-            if autoPlay {
-                player?.play()
-            }
-        }) {
-            IGFullscreenVideo(url: url)
-        }
         .onAppear {
             guard player == nil, let created = IGVideoFactory.player(for: url) else { return }
+            audio.watch(created)
             player = created
             if autoPlay {
                 created.play()
             }
         }
         .onDisappear {
-            player?.pause()
+            if let player {
+                audio.stop(player)
+            }
             player = nil
         }
     }
 }
 
-/// 全屏播放：铺一个系统 `AVPlayerViewController`，进度条 / 音量 / 画中画都在。
-struct IGFullscreenVideo: View {
-    let url: String
+/// 直接铺一个系统全屏播放器。
+///
+/// 帖子详情本身就在 sheet 里，再叠 SwiftUI 的 `fullScreenCover` 在 iOS 15
+/// 上有概率点了不弹（或被父级 presentation 吃掉）。这里改成从当前最上层
+/// controller 直接 present，绕开 SwiftUI 的 presentation 链。
+/// 全屏播放器在真正出现时申请音频会话，消失时归还；
+/// 这样 presentation 失败也不会留下孤立的 `.playback` 持有。
+@MainActor
+private final class IGFullscreenPlayerViewController: AVPlayerViewController {
+    var onFinish: (@MainActor () -> Void)?
+    private var holdsSession = false
+    private var didFinish = false
 
-    @Environment(\.dismiss) private var dismiss
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard !holdsSession else { return }
+        holdsSession = true
+        AudioSessionManager.shared.beginPlayback()
+        player?.play()
+    }
 
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            Color.black.ignoresSafeArea()
-            IGPlayerControllerView(url: url)
-                .ignoresSafeArea()
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(10)
-                    .background(Color.black.opacity(0.45))
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .padding(16)
-            .accessibilityLabel("关闭")
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if holdsSession {
+            holdsSession = false
+            player?.pause()
+            AudioSessionManager.shared.endPlayback()
         }
-        .preferredColorScheme(.dark)
+        guard !didFinish else { return }
+        didFinish = true
+        onFinish?()
     }
 }
 
-private struct IGPlayerControllerView: UIViewControllerRepresentable {
-    let url: String
-
-    func makeUIViewController(context: Context) -> AVPlayerViewController {
-        let controller = AVPlayerViewController()
-        if let player = IGVideoFactory.player(for: url) {
-            controller.player = player
-            player.play()
+@MainActor
+enum IGFullscreenVideoPresenter {
+    @discardableResult
+    static func present(url: String, from seconds: Double, onFinish: (@MainActor () -> Void)? = nil) -> Bool {
+        guard let host = topViewController() else {
+            print("IG fullscreen: no foreground view controller")
+            return false
         }
+        guard let player = IGVideoFactory.player(for: url) else {
+            print("IG fullscreen: invalid video url")
+            return false
+        }
+        let controller = IGFullscreenPlayerViewController()
+        controller.player = player
         controller.showsPlaybackControls = true
         controller.videoGravity = .resizeAspect
-        return controller
+        controller.modalPresentationStyle = .fullScreen
+        controller.onFinish = onFinish
+        if seconds.isFinite, seconds > 0 {
+            player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
+        }
+        host.present(controller, animated: true)
+        return true
     }
 
-    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {}
+    private static func topViewController() -> UIViewController? {
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        var controller = scene?.windows.first { $0.isKeyWindow }?.rootViewController
+        while let presented = controller?.presentedViewController {
+            controller = presented
+        }
+        if let navigation = controller as? UINavigationController {
+            controller = navigation.visibleViewController ?? navigation
+        }
+        if let tabs = controller as? UITabBarController {
+            controller = tabs.selectedViewController ?? tabs
+        }
+        return controller
+    }
 }
 
 /// Instagram 图片缓存。

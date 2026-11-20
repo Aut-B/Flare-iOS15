@@ -19,6 +19,7 @@ struct FlareRoot: View {
     @StateObject private var notificationBadgePresenter = KotlinPresenter(presenter: AllNotificationBadgePresenter())
     @StateObject private var secondaryTabsPresenter = KotlinPresenter(presenter: SecondaryTabsPresenter())
     @StateObject private var aiAgentEnabledPresenter = KotlinPresenter(presenter: AiAgentEnabledPresenter())
+    @ObservedObject private var instagramStore = InstagramStore.shared
     @State private var inAppNotification = SwiftInAppNotification.shared
     @State var selectedTab: String?
     @State private var reloginRoute: Route?
@@ -41,6 +42,20 @@ struct FlareRoot: View {
                         .adaptiveLabelStyle(globalAppearance.showBottomBarLabels || horizontalSizeClass == .regular)
                     }
                     .badge(homeTabRoute(tab) == .notification ? Int(notificationBadgePresenter.state.count) : 0)
+                }
+                if showsInstagramMainTab {
+                    Tab(value: "route:instagram") {
+                        Router { onNavigate in
+                            Route.instagram.view(onNavigate: onNavigate, goBack: {})
+                        }
+                    } label: {
+                        Label {
+                            Text("Instagram")
+                        } icon: {
+                            Image(fontAwesome: .photoFilm)
+                        }
+                        .adaptiveLabelStyle(globalAppearance.showBottomBarLabels || horizontalSizeClass == .regular)
+                    }
                 }
                 // iPhone Duo also has a regular width when unfolded; these shortcuts are iPad-only.
                 if UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular {
@@ -97,6 +112,23 @@ struct FlareRoot: View {
         }
     }
 
+    /// Instagram 账号是 SecondaryTabsPresenter 里的快捷入口，不在 Kotlin
+    /// HomeTabsPresenter 的三态枚举里。这里只在真的有 Instagram 账号时补一个
+    /// 主 tab，避免没登录的用户看到空页面。
+    private var hasInstagramAccount: Bool {
+        // 侧栏进 IG 网页登录只写原生 Store，不建 Kotlin 账号；两条路都要认。
+        if instagramStore.isLoggedIn { return true }
+        guard case .success(let data) = onEnum(of: secondaryTabsPresenter.state.items) else { return false }
+        let items = data.data.cast(SecondaryTabsPresenter.Item.self)
+        return items.contains { $0.accountKey.host == "instagram.com" }
+    }
+
+    /// iPad 常规宽度已经有副栏入口，不再重复加 tab。
+    private var showsInstagramMainTab: Bool {
+        guard hasInstagramAccount else { return false }
+        return !(UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular)
+    }
+
     @TabContentBuilder<String?>
     private func secondarySidebarShortcut(_ tab: SecondaryTabsPresenter.Tab, route: Route) -> some TabContent<String?> {
         Tab(value: "secondary:\(tab.hashValue)") {
@@ -140,6 +172,8 @@ struct BackportFlareRoot: View {
     @Environment(\.globalAppearance) private var globalAppearance
     @StateObject private var homeTabsPresenter = KotlinPresenter(presenter: HomeTabsPresenter())
     @StateObject private var notificationBadgePresenter = KotlinPresenter(presenter: AllNotificationBadgePresenter())
+    @StateObject private var secondaryTabsPresenter = KotlinPresenter(presenter: SecondaryTabsPresenter())
+    @ObservedObject private var instagramStore = InstagramStore.shared
     @State private var inAppNotification = SwiftInAppNotification.shared
     @State var selectedTab: String?
     @State private var reloginRoute: Route?
@@ -169,6 +203,20 @@ struct BackportFlareRoot: View {
                     .badge(homeTabRoute(tab) == .notification ? Int(notificationBadgePresenter.state.count) : 0)
                     .tag(homeTabKey(tab))
                 }
+                if showsInstagramMainTab {
+                    Router { onNavigate in
+                        Route.instagram.view(onNavigate: onNavigate, goBack: {})
+                    }
+                    .tabItem {
+                        Label {
+                            Text("Instagram")
+                        } icon: {
+                            Image(systemName: "camera")
+                        }
+                        .adaptiveLabelStyle(globalAppearance.showBottomBarLabels)
+                    }
+                    .tag("route:instagram")
+                }
             }
             .modifier(TabBarDoubleTapModifier {
                 NotificationCenter.default.post(name: .tabDoubleTapped, object: selectedTab)
@@ -190,6 +238,19 @@ struct BackportFlareRoot: View {
         } loadingContent: {
             SplashScreen()
         }
+    }
+
+    private var hasInstagramAccount: Bool {
+        if instagramStore.isLoggedIn { return true }
+        guard case .success(let data) = onEnum(of: secondaryTabsPresenter.state.items) else { return false }
+        let items = data.data.cast(SecondaryTabsPresenter.Item.self)
+        return items.contains { $0.accountKey.host == "instagram.com" }
+    }
+
+    /// iPad 常规宽度已经有副栏入口，不再重复加 tab。
+    private var showsInstagramMainTab: Bool {
+        guard hasInstagramAccount else { return false }
+        return !(UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular)
     }
 }
 

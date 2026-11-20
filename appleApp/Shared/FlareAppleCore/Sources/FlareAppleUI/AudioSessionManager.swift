@@ -19,14 +19,19 @@ public final class AudioSessionManager {
         }
     }
 
-    func beginPlayback() {
+    /// Called when a surface starts audible playback. Reference counted so
+    /// overlapping players (detail video, Instagram video) do not fight over
+    /// the category; the session stays active with the category set at launch.
+    public func beginPlayback() {
         playbackRequestCount += 1
         if playbackRequestCount == 1 {
             applyCategory(.playback)
         }
     }
 
-    func endPlayback() {
+    /// Releases one playback hold and restores `.ambient` when nobody else
+    /// needs the audio route.
+    public func endPlayback() {
         guard playbackRequestCount > 0 else { return }
         playbackRequestCount -= 1
         if playbackRequestCount == 0 {
