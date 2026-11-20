@@ -27,7 +27,6 @@ class VVOWriteRequestTest {
         assertNull(UiTimelineV2.Post.Visibility.Public.toVvoVisible())
         assertEquals("1", UiTimelineV2.Post.Visibility.SelfOnly.toVvoVisible())
         assertEquals("6", UiTimelineV2.Post.Visibility.Friends.toVvoVisible())
-        assertEquals("10", UiTimelineV2.Post.Visibility.Followers.toVvoVisible())
     }
 
     @Test
@@ -61,27 +60,6 @@ class VVOWriteRequestTest {
             )
 
             assertEquals("1", requireNotNull(form).formData["visible"])
-        }
-
-    @Test
-    fun freshConfigBypassesCachedStForEveryWrite() =
-        runTest {
-            var configCalls = 0
-            val configSts = mutableListOf("st-1", "st-2", "st-3")
-            val service =
-                writeService(
-                    credentialFlow = MutableStateFlow(VVoCredential(chocolate = "MLOGIN=1; SUB=test-sub")),
-                    nextConfigSt = { configSts.removeAt(0) },
-                ) { request ->
-                    if (request.url.encodedPath == "/api/config") {
-                        configCalls += 1
-                    }
-                }
-
-            assertEquals("st-1", service.freshConfig().data?.st)
-            assertEquals("st-2", service.freshConfig().data?.st)
-            assertEquals("st-3", service.freshConfig().data?.st)
-            assertEquals(3, configCalls)
         }
 
     private fun writeService(

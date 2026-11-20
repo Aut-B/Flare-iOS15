@@ -11,6 +11,7 @@ import io.ktor.client.request.HttpResponseData
 import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -20,6 +21,7 @@ import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -514,12 +516,14 @@ class VVOCookieRefreshTest {
         }
 
     @Test
-    fun concurrentConfigRequestsReuseSingleConfigAndRefresh() =
+    fun concurrentLoggedOutConfigRequestsReuseSingleRefresh() =
         runTest {
             val oldCookie = "MLOGIN=1; SUB=old-sub"
             val refreshedCookie = "MLOGIN=1; SUB=new-sub"
             val credentialFlow = MutableStateFlow(VVoCredential(chocolate = oldCookie))
+            val bothLoggedOutReached = CompletableDeferred<Unit>()
             val requestStateMutex = Mutex()
+            var oldConfigCalls = 0
             var refreshCalls = 0
             val refreshCookies = mutableListOf<String?>()
             val configCookies = mutableListOf<String?>()
@@ -553,10 +557,38 @@ class VVOCookieRefreshTest {
 
                                 "/api/config" -> {
                                     val cookie = request.headers[HttpHeaders.Cookie]
-                                    requestStateMutex.withLock { configCookies += cookie }
+                                    val oldConfigCallIndex =
+                                        requestStateMutex.withLock {
+                                            configCookies += cookie
+                                            if (cookie == oldCookie) {
+                                                ++oldConfigCalls
+                                            } else {
+                                                null
+                                            }
+                                        }
                                     when (cookie) {
-                                        oldCookie -> configResponse(login = false)
-                                        refreshedCookie -> configResponse(login = true)
+                                        oldCookie -> {
+                                            when (oldConfigCallIndex) {
+                                                1 -> {
+                                                    withTimeout(5_000) {
+                                                        bothLoggedOutReached.await()
+                                                    }
+                                                }
+
+                                                2 -> {
+                                                    bothLoggedOutReached.complete(Unit)
+                                                }
+
+                                                else -> {
+                                                    error("Unexpected old config call count: $oldConfigCallIndex")
+                                                }
+                                            }
+                                            configResponse(login = false)
+                                        }
+
+                                        refreshedCookie -> {
+                                            configResponse(login = true)
+                                        }
 
                                         else -> {
                                             error("Unexpected config cookie: $cookie")
@@ -590,6 +622,8 @@ class VVOCookieRefreshTest {
             assertEquals(
                 listOf<String?>(
                     oldCookie,
+                    oldCookie,
+                    refreshedCookie,
                     refreshedCookie,
                 ),
                 configCookies,

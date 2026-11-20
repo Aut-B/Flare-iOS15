@@ -791,7 +791,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         )
         let accountType = data.accountType
         let statusKey = data.statusKey
-        // 置顶 / 改可见范围是微博的接口，毛象和 Misskey 上点了一定报错，
+        // 置顶是微博的接口，毛象和 Misskey 上点了一定报错，
         // 干脆按平台分菜单，别让用户点了才发现不支持。
         let isWeibo = data.platformId.lowercased() == "vvo"
 
@@ -830,50 +830,6 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
                     }
                 }
             )
-            sheet.addAction(
-                UIAlertAction(title: String(localized: "status_manage_visibility_public"), style: .default) { _ in
-                    StatusManageActions.shared.updateVisibility(
-                        accountType: accountType,
-                        statusKey: statusKey,
-                        visibility: .`public`
-                    ) { error in
-                        Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
-                    }
-                }
-            )
-            sheet.addAction(
-                UIAlertAction(title: String(localized: "status_manage_visibility_mutual"), style: .default) { _ in
-                    StatusManageActions.shared.updateVisibility(
-                        accountType: accountType,
-                        statusKey: statusKey,
-                        visibility: .friends
-                    ) { error in
-                        Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
-                    }
-                }
-            )
-            sheet.addAction(
-                UIAlertAction(title: String(localized: "status_manage_visibility_followers"), style: .default) { _ in
-                    StatusManageActions.shared.updateVisibility(
-                        accountType: accountType,
-                        statusKey: statusKey,
-                        visibility: .followers
-                    ) { error in
-                        Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
-                    }
-                }
-            )
-            sheet.addAction(
-                UIAlertAction(title: String(localized: "status_manage_visibility_private"), style: .default) { _ in
-                    StatusManageActions.shared.updateVisibility(
-                        accountType: accountType,
-                        statusKey: statusKey,
-                        visibility: .selfOnly
-                    ) { error in
-                        Self.showManageResult(error, success: String(localized: "status_manage_done_visibility"))
-                    }
-                }
-            )
         }
         sheet.addAction(
             UIAlertAction(title: String(localized: "delete"), style: .destructive) { [weak self] _ in
@@ -888,7 +844,7 @@ final class StatusUIKitView: UIView, UIGestureRecognizerDelegate, ManualLayoutMe
         host.present(sheet, animated: true)
     }
 
-    /// 置顶 / 改可见范围都是网络请求，成败都要让用户看见：
+    /// 置顶都是网络请求，成败都要让用户看见：
     /// 成功给个轻提示（列表要下拉刷新才会变），失败把微博返回的原因原样带出来。
     private static func showManageResult(_ error: String?, success: String) {
         DispatchQueue.main.async {

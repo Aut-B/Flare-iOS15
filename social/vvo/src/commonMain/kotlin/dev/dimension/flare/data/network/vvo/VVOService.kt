@@ -44,13 +44,11 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
-import kotlin.time.Duration.Companion.seconds
 
 private val baseUrl = "https://$vvoHost/"
 
@@ -62,9 +60,6 @@ private const val CONFIG_LOGIN_RETRY_LIMIT = 5
 
 // m.weibo.cn bounces an expired SUB through passport.weibo.cn to re-sign it.
 private const val REFRESH_REDIRECT_LIMIT = 5
-
-// 写操作前续签的最小间隔：连点/连发时不会每次都多跑一跳跳转链。
-private val writeCredentialRefreshInterval = 2.minutes
 
 private typealias VVOHttpClientFactory = (HttpClientConfig<*>.() -> Unit) -> HttpClient
 
@@ -173,32 +168,6 @@ internal class VVOService private constructor(
 
         return response
     }
-
-    /**
-     * 写操作（发博 / 转发 / 评论 / 点赞 / 关注 / 置顶）前续签 Cookie。
-     *
-     * 微博的 SUB 只在 passport 的 SSO 跳转链里才会被重新签名。读接口对旧 SUB 很宽容，
-     * 写接口则会直接判成异常请求返回「转发频繁」/「操作频繁」—— 这就是「同一篇贴文，
-     * 官方客户端立刻能转，这里一直失败」的由来。
-     *
-     * 两分钟内已经续签过就跳过，避免连续点赞/连续转发时每次多跑一跳跳转链。
-     */
-    suspend fun refreshCredentialForWrite() {
-        val now = Clock.System.now().toEpochMilliseconds()
-        val lastRefresh = currentCredential()?.lastCookieRefreshEpochMillis
-        if (lastRefresh != null && now - lastRefresh < writeCredentialRefreshInterval.inWholeMilliseconds) {
-            return
-        }
-        runCatching {
-            // 续签只是写操作的准备动作，链路卡住时不能把转发/评论一起拖死。
-            withTimeoutOrNull(8.seconds) {
-                refreshChocolate(refreshedAtEpochMillis = now, refreshOnlyWhenStale = false)
-            }
-        }
-    }
-
-    /** 写操作每次重新取 st；读接口继续走 [config]。 */
-    suspend fun freshConfig(): VVOResponse<Config> = config()
 
     suspend fun getUid(screenName: String): String? {
         val response =
@@ -348,32 +317,25 @@ internal class VVOService private constructor(
     ): String {
         var cookieHeader = initialCookieHeader
         var url = startUrl
-        // 整条链共用一个 client，chocolateProvider 每跳读取最新的 cookieHeader；
-        // 用完即关，避免每次续签都泄漏 HttpClient。
-        val client =
-            httpClientFactory {
-                followRedirects = false
-                install(VVOHeaderPlugin) {
-                    chocolateProvider = { cookieHeader }
-                }
+        repeat(REFRESH_REDIRECT_LIMIT + 1) {
+            val response =
+                httpClientFactory {
+                    followRedirects = false
+                    install(VVOHeaderPlugin) {
+                        chocolateProvider = { cookieHeader }
+                    }
+                }.get(url)
+            mergeVvoCookieHeader(
+                currentCookieHeader = cookieHeader,
+                setCookieHeaders = response.headers.getAll(HttpHeaders.SetCookie).orEmpty(),
+            )?.let { cookieHeader = it }
+            val location = response.headers[HttpHeaders.Location]
+            if (!isRefreshRedirect(response.status.value, location)) {
+                return cookieHeader
             }
-        try {
-            repeat(REFRESH_REDIRECT_LIMIT + 1) {
-                val response = client.get(url)
-                mergeVvoCookieHeader(
-                    currentCookieHeader = cookieHeader,
-                    setCookieHeaders = response.headers.getAll(HttpHeaders.SetCookie).orEmpty(),
-                )?.let { cookieHeader = it }
-                val location = response.headers[HttpHeaders.Location]
-                if (!isRefreshRedirect(response.status.value, location)) {
-                    return cookieHeader
-                }
-                url = resolveRefreshRedirectUrl(current = url, location = location!!) ?: return cookieHeader
-            }
-            return cookieHeader
-        } finally {
-            client.close()
+            url = resolveRefreshRedirectUrl(current = url, location = location!!) ?: return cookieHeader
         }
+        return cookieHeader
     }
 
     private suspend fun currentCredential(): VVoCredential? = credentialFlow.firstOrNull()
@@ -589,6 +551,6 @@ private val VVOHeaderPlugin =
                     request.headers.append("Cookie", chocolate)
                 }
             }
-            if (request.headers["Referer"] == null) request.headers.append("Referer", "https://$vvoHost/")
+            request.headers.append("Referer", "https://$vvoHost/")
         }
     }

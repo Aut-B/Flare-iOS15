@@ -39,8 +39,8 @@ import dev.dimension.flare.data.model.ProxyRef
 import dev.dimension.flare.data.model.tab.ShortcutSpec
 import dev.dimension.flare.data.model.tab.TimelineSpec
 import dev.dimension.flare.data.network.vvo.VVOService
-import dev.dimension.flare.data.network.vvo.model.VVOResponse
 import dev.dimension.flare.data.network.vvo.model.StatusDetailItem
+import dev.dimension.flare.data.network.vvo.model.VVOResponse
 import dev.dimension.flare.data.platform.CommonTimelineSpecs
 import dev.dimension.flare.data.platform.VVO_PLATFORM_ID
 import dev.dimension.flare.data.platform.VVoCredential
@@ -81,7 +81,6 @@ internal fun ComposeType.vvoVisibility(): ComposeConfig.Visibility? =
                     UiTimelineV2.Post.Visibility.Public,
                     UiTimelineV2.Post.Visibility.Friends,
                     UiTimelineV2.Post.Visibility.SelfOnly,
-                    UiTimelineV2.Post.Visibility.Followers,
                 ),
         )
     } else {
@@ -91,7 +90,6 @@ internal fun ComposeType.vvoVisibility(): ComposeConfig.Visibility? =
 internal fun UiTimelineV2.Post.Visibility.toVvoVisible(): String? =
     when (this) {
         UiTimelineV2.Post.Visibility.Public -> null
-        UiTimelineV2.Post.Visibility.Followers -> "10"
         UiTimelineV2.Post.Visibility.Friends -> "6"
         UiTimelineV2.Post.Visibility.SelfOnly -> "1"
         else -> error("Unsupported Weibo visibility: $this")
@@ -469,7 +467,7 @@ internal class VVODataSource(
         // 评论（Reply）没有可见范围概念，composeConfig 不会给可见度，这里必须容忍 null，
         // 否则每次发评论都会在 requireNotNull 上直接崩掉。
         val visible = data.visibility?.toVvoVisible()
-        val st = ensureWriteLogin()
+        val st = ensureLogin()
 
         val mediaIds =
             data.medias.mapIndexed { index, (it, _) ->
@@ -541,7 +539,7 @@ internal class VVODataSource(
         )
 
     private suspend fun like(event: PostEvent.VVO.Like) {
-        val st = ensureWriteLogin()
+        val st = ensureLogin()
         if (event.liked) {
             service.unlikeStatus(id = event.postKey.id, st = st)
         } else {
@@ -550,7 +548,7 @@ internal class VVODataSource(
     }
 
     private suspend fun likeComment(event: PostEvent.VVO.LikeComment) {
-        val st = ensureWriteLogin()
+        val st = ensureLogin()
         if (event.liked) {
             service.likesDestroy(id = event.postKey.id, st = st)
         } else {
@@ -559,7 +557,7 @@ internal class VVODataSource(
     }
 
     private suspend fun favorite(event: PostEvent.VVO.Favorite) {
-        val st = ensureWriteLogin()
+        val st = ensureLogin()
         if (event.favorited) {
             service.unfavoriteStatus(id = event.postKey.id, st = st)
         } else {
@@ -660,18 +658,8 @@ internal class VVODataSource(
         return response.picID ?: throw Exception("upload failed")
     }
 
-    /**
-     * 写操作专用：先续签 Cookie 再取 st。
-     * 微博的 SUB 只在 passport 的 SSO 跳转链里重新签名，旧 SUB 读接口还能用，
-     * 写接口会被风控直接拦下（「转发频繁」/「操作频繁」）。
-     */
-    private suspend fun ensureWriteLogin(): String {
-        service.refreshCredentialForWrite()
-        return ensureLogin(freshConfig = true)
-    }
-
-    private suspend fun ensureLogin(freshConfig: Boolean = false): String {
-        val config = if (freshConfig) service.freshConfig() else service.config()
+    private suspend fun ensureLogin(): String {
+        val config = service.config()
         if (config.data?.login != true) {
             throw LoginExpiredException(
                 accountKey = accountKey,

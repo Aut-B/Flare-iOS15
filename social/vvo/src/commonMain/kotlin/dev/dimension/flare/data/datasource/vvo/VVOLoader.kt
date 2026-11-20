@@ -74,7 +74,7 @@ internal class VVOLoader(
     }
 
     override suspend fun follow(userKey: MicroBlogKey) {
-        val st = ensureWriteLogin()
+        val st = ensureLogin()
         service.follow(
             st = st,
             uid = userKey.id,
@@ -82,7 +82,7 @@ internal class VVOLoader(
     }
 
     override suspend fun unfollow(userKey: MicroBlogKey) {
-        val st = ensureWriteLogin()
+        val st = ensureLogin()
         service.unfollow(
             st = st,
             uid = userKey.id,
@@ -149,7 +149,7 @@ internal class VVOLoader(
     }
 
     override suspend fun deleteStatus(statusKey: MicroBlogKey) {
-        val st = ensureWriteLogin()
+        val st = ensureLogin()
         val response =
             service.deleteStatus(
                 mid = statusKey.id,
@@ -173,7 +173,7 @@ internal class VVOLoader(
         statusKey: MicroBlogKey,
         pinned: Boolean,
     ) {
-        val st = ensureWriteLogin()
+        val st = ensureLogin()
         val response =
             try {
                 service.setTopStatus(
@@ -191,41 +191,8 @@ internal class VVOLoader(
         }
     }
 
-    override suspend fun updateStatusVisibility(
-        statusKey: MicroBlogKey,
-        visibility: UiTimelineV2.Post.Visibility,
-    ) {
-        val st = ensureWriteLogin()
-        val response =
-            try {
-                service.updateVisibility(
-                    id = statusKey.id,
-                    visibility = visibility.toVvoVisible() ?: "0",
-                    st = st,
-                )
-            } catch (throwable: Throwable) {
-                throw Exception(
-                    "修改可见范围失败（statuses/updateVisibility）：${throwable.message ?: "网络异常"}",
-                    throwable,
-                )
-            }
-        if ((response.ok ?: 0L) == 0L) {
-            throw Exception("修改可见范围失败：${response.msg ?: response.httpCode ?: "微博没有返回原因"}")
-        }
-    }
-
-    /**
-     * 写操作专用：先强制续签 Cookie 再取 st。
-     * 微博的 SUB 只在 passport 的 SSO 跳转链里重新签名，旧 SUB 读接口还能用，
-     * 写接口会被风控直接拦下（「转发频繁」/「操作频繁」）。
-     */
-    private suspend fun ensureWriteLogin(): String {
-        service.refreshCredentialForWrite()
-        return ensureLogin(freshConfig = true)
-    }
-
-    private suspend fun ensureLogin(freshConfig: Boolean = false): String {
-        val config = if (freshConfig) service.freshConfig() else service.config()
+    private suspend fun ensureLogin(): String {
+        val config = service.config()
         if (config.data?.login != true) {
             throw LoginExpiredException(
                 accountKey = accountKey,

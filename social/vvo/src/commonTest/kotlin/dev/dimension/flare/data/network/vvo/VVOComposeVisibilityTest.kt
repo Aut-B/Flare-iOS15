@@ -26,14 +26,7 @@ class VVOComposeVisibilityTest {
     fun originalAndRepostUseTheOfficialVisibilityFormFields() =
         runTest {
             for (type in listOf(ComposeType.New, ComposeType.Quote)) {
-                for ((visibility, expected) in
-                    listOf(
-                        Visibility.Public to null,
-                        Visibility.Friends to "6",
-                        Visibility.SelfOnly to "1",
-                        Visibility.Followers to "10",
-                    )
-                ) {
+                for ((visibility, expected) in listOf(Visibility.Public to null, Visibility.Friends to "6", Visibility.SelfOnly to "1")) {
                     val expectedPath = if (type == ComposeType.New) "/api/statuses/update" else "/api/statuses/repost"
                     val service =
                         VVOService(
@@ -68,10 +61,10 @@ class VVOComposeVisibilityTest {
         }
 
     @Test
-    fun onlyOriginalAndRepostOfferTheFourAudiences() {
+    fun onlyOriginalAndRepostOfferTheThreeAudiences() {
         for (type in listOf(ComposeType.New, ComposeType.Quote)) {
             assertEquals(
-                listOf(Visibility.Public, Visibility.Friends, Visibility.SelfOnly, Visibility.Followers),
+                listOf(Visibility.Public, Visibility.Friends, Visibility.SelfOnly),
                 type.vvoVisibility()?.allVisibilities?.toList(),
             )
             assertEquals(Visibility.Public, type.vvoVisibility()?.defaultVisibility)

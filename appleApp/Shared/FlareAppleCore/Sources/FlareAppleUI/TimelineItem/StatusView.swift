@@ -63,7 +63,7 @@ public struct StatusView: View {
         }
     }
 
-    /// 置顶 / 改可见范围是微博的接口，别的平台点了一定报错，按平台分菜单。
+    /// 置顶是微博的接口，别的平台点了一定报错，按平台分菜单。
     private var isWeibo: Bool {
         data.platformId.lowercased() == "vvo"
     }
@@ -145,7 +145,6 @@ public struct StatusView: View {
         let quoteItems = self.quotes
         let hasQuotes = !quoteItems.isEmpty
         let sourceChannelName = data.sourceChannel?.name
-        let ipLocation = data.ipLocation.flatMap { $0.isEmpty ? nil : $0 }
         let emojiReactions = Array(data.emojiReactions)
         let hasEmojiReactions = showEmojiReactions && !emojiReactions.isEmpty
         let visibility = data.visibility
@@ -226,7 +225,6 @@ public struct StatusView: View {
                                             translationDisplayState: translationDisplayState,
                                             platformIcon: data.platformIcon,
                                             platformId: data.platformId,
-                                            ipLocation: ipLocation,
                                             createdAt: createdAt,
                                             accountType: accountType,
                                             statusKey: statusKey
@@ -241,7 +239,6 @@ public struct StatusView: View {
                                             translationDisplayState: translationDisplayState,
                                             platformIcon: data.platformIcon,
                                             platformId: data.platformId,
-                                            ipLocation: ipLocation,
                                             createdAt: createdAt,
                                             accountType: accountType,
                                             statusKey: statusKey
@@ -256,7 +253,6 @@ public struct StatusView: View {
                                             translationDisplayState: translationDisplayState,
                                             platformIcon: data.platformIcon,
                                             platformId: data.platformId,
-                                            ipLocation: ipLocation,
                                             createdAt: createdAt,
                                             accountType: accountType,
                                             statusKey: statusKey
@@ -558,46 +554,6 @@ public struct StatusView: View {
                 } label: {
                     Text("status_manage_unpin", bundle: FlareAppleUILocalization.bundle)
                 }
-                Button {
-                    StatusManageActions.shared.updateVisibility(
-                        accountType: data.accountType,
-                        statusKey: data.statusKey,
-                        visibility: .`public`,
-                        onResult: { _ in }
-                    )
-                } label: {
-                    Text("status_manage_visibility_public", bundle: FlareAppleUILocalization.bundle)
-                }
-                Button {
-                    StatusManageActions.shared.updateVisibility(
-                        accountType: data.accountType,
-                        statusKey: data.statusKey,
-                        visibility: .friends,
-                        onResult: { _ in }
-                    )
-                } label: {
-                    Text("status_manage_visibility_mutual", bundle: FlareAppleUILocalization.bundle)
-                }
-                Button {
-                    StatusManageActions.shared.updateVisibility(
-                        accountType: data.accountType,
-                        statusKey: data.statusKey,
-                        visibility: .followers,
-                        onResult: { _ in }
-                    )
-                } label: {
-                    Text("status_manage_visibility_followers", bundle: FlareAppleUILocalization.bundle)
-                }
-                Button {
-                    StatusManageActions.shared.updateVisibility(
-                        accountType: data.accountType,
-                        statusKey: data.statusKey,
-                        visibility: .selfOnly,
-                        onResult: { _ in }
-                    )
-                } label: {
-                    Text("status_manage_visibility_private", bundle: FlareAppleUILocalization.bundle)
-                }
             }
             Button(role: .destructive) {
                 showDeleteConfirm = true
@@ -645,7 +601,6 @@ public struct StatusView: View {
         translationDisplayState: TranslationDisplayState,
         platformIcon: IconType,
         platformId: String,
-        ipLocation: String?,
         createdAt: UiDateTime,
         accountType: AccountType,
         statusKey: MicroBlogKey
@@ -661,32 +616,21 @@ public struct StatusView: View {
                     .font(.caption)
                     .flareSecondaryText()
             }
-            if showPlatformLogo || ipLocation != nil {
-                // 平台图标下方放 IP 属地，只显示地名（如「北京」）；关掉平台图标时属地仍单独显示。
-                VStack(alignment: .trailing, spacing: 0) {
-                    if showPlatformLogo {
-                        TabIcon(icon: platformIcon, size: 14)
-                            .font(.caption)
-                            .flareSecondaryText()
-                            .accessibilityLabel(
-                                Text(
-                                    verbatim: String(
-                                        format: FlareAppleUILocalization.string(
-                                            "status_platform",
-                                            fallback: "Platform: %@"
-                                        ),
-                                        platformId
-                                    )
-                                )
+            if showPlatformLogo {
+                TabIcon(icon: platformIcon, size: 14)
+                    .font(.caption)
+                    .flareSecondaryText()
+                    .accessibilityLabel(
+                        Text(
+                            verbatim: String(
+                                format: FlareAppleUILocalization.string(
+                                    "status_platform",
+                                    fallback: "Platform: %@"
+                                ),
+                                platformId
                             )
-                    }
-                    if let ipLocation {
-                        Text(ipLocation)
-                            .font(.caption2)
-                            .flareSecondaryText()
-                            .lineLimit(1)
-                    }
-                }
+                        )
+                    )
             }
             if !isDetail {
                 DateTimeText(data: createdAt)
