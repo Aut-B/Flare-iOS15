@@ -116,9 +116,17 @@ final class XhsSigner: HiddenWebViewOwner {
         }
     }
 
-    /// 重新加载页面，签名脚本崩了的时候用。
-    func reset() {
+    /// 重新加载页面，签名脚本崩了 / 会话被判未登录的时候用。
+    ///
+    /// `cookie` 非空时先把最新登录态写进页面：签名页可能还停在匿名会话上，
+    /// 只 reload 会继续拿匿名 cookie 去请求，401 / -100 永远恢复不了。
+    func reset(cookie: String = "") {
+        let normalized = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
         DispatchQueue.main.async {
+            if !normalized.isEmpty {
+                self.cookieHeader = normalized
+                self.appliedCookieHeader = normalized
+            }
             guard let view = self.webView else { return }
             let cookies = Self.cookies(fromHeader: self.cookieHeader)
             if cookies.isEmpty {

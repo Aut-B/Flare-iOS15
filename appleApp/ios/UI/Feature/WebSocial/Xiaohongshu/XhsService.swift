@@ -70,9 +70,14 @@ final class XhsService {
             "image_formats": ["jpg", "webp"],
             "extra": ["need_body_topic": "1"],
         ]
+        // `xsec_source` 和 `xsec_token` 是两回事：公开笔记的 token 可以为空，
+        // 但详情接口仍需要来源，否则服务端会按「来源不明」拒绝，
+        // 评论刷新 token 的那一步也会跟着失败。
+        if !xsecSource.isEmpty {
+            payload["xsec_source"] = xsecSource
+        }
         if !xsecToken.isEmpty {
             payload["xsec_token"] = xsecToken
-            payload["xsec_source"] = xsecSource
         }
         let json = try await post("/api/sns/web/v1/feed", payload: payload, timeout: timeout, attempts: attempts)
         let data = XhsJSON.object(json["data"]) ?? [:]
@@ -264,6 +269,7 @@ final class XhsService {
         attempts: Int = 2
     ) async throws -> [String: Any] {
         var attempt = 0
+        var authRetried = false
         while true {
             let result: XhsSigner.PageResult
             do {
@@ -284,6 +290,11 @@ final class XhsService {
             }
 
             if result.status == 401 {
+                if !authRetried {
+                    authRetried = true
+                    await recoverSession()
+                    continue
+                }
                 throw XhsError.notLoggedIn
             }
             guard
@@ -305,17 +316,34 @@ final class XhsService {
             // 300013 = 签名过期。重算一次通常就好，别把用户踢回登录页。
             if XhsJSON.int(json["code"]) == 300013, attempt == 0 {
                 attempt += 1
-                XhsSigner.shared.reset()
+                XhsSigner.shared.reset(cookie: cookie)
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 continue
             }
 
-            try check(json)
+            do {
+                try check(json)
+            } catch let error as XhsError where error.needLogin {
+                // 第一次 -100 可能只是隐藏页还拿着旧 cookie / 刚重建完。
+                // 先把当前登录态重新灌进去再试一次，第二次才认定真的掉登录。
+                if !authRetried {
+                    authRetried = true
+                    await recoverSession()
+                    continue
+                }
+                throw error
+            }
             guard (200..<300).contains(result.status) else {
                 throw XhsError(message: "请求失败（HTTP \(result.status)）", needLogin: false)
             }
             return json
         }
+    }
+
+    /// 401 / code -100 的恢复：把最新 cookie 写回隐藏页并重载一次。
+    private func recoverSession() async {
+        XhsSigner.shared.reset(cookie: cookie)
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
     }
 
     private func check(_ json: [String: Any]) throws {
@@ -335,7 +363,7 @@ final class XhsService {
             throw XhsError.notLoggedIn
         }
         if code == 300013 {
-            XhsSigner.shared.reset()
+            XhsSigner.shared.reset(cookie: cookie)
             throw XhsError(message: "小红书签名失效，已自动刷新，请再点一次重试", needLogin: false)
         }
         if code == 461 {

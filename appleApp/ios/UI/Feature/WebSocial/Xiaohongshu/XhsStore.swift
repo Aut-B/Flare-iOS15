@@ -528,8 +528,9 @@ final class XhsStore: ObservableObject {
         //
         // 定义必须排在第一次调用之前：Swift 的局部函数不做提升。
         func remember(_ value: String, source: String? = nil) {
-            guard !value.isEmpty else { return }
-            let tokenChanged = value != note.xsecToken
+            // token 可能本来就是空的（公开笔记），但来源仍然值得记下来：
+            // 不记的话下次从同一个入口进来还要把 pc_note / pc_feed 全试一遍。
+            let tokenChanged = !value.isEmpty && value != note.xsecToken
             let sourceChanged = source.map { !$0.isEmpty && $0 != note.xsecSource } ?? false
             guard tokenChanged || sourceChanged else { return }
             DispatchQueue.main.async {
@@ -554,30 +555,55 @@ final class XhsStore: ObservableObject {
         // 卡片上的 xsec_token 会过期。过期后服务端一律回「当前笔记暂时无法浏览」，
         // 这时用详情接口换一个新 token。详情接口本身也要选对来源。
         for source in sources {
-            guard
-                let fresh = try? await XhsService.shared.note(
-                    id: note.id,
-                    xsecToken: token,
-                    xsecSource: source,
-                    timeout: 10,
-                    attempts: 1
-                ),
-                !fresh.xsecToken.isEmpty
-            else {
+            guard let fresh = try? await XhsService.shared.note(
+                id: note.id,
+                xsecToken: token,
+                xsecSource: source,
+                timeout: 10,
+                attempts: 1
+            ) else {
                 continue
             }
-            token = fresh.xsecToken
-            // 详情接口回的 token 自带来源，优先按它自己的来，其次才是别的。
+
+            let refreshedToken = fresh.xsecToken
+            let sourceChanged = !fresh.xsecSource.isEmpty && fresh.xsecSource != source
+            let tokenChanged =
+                refreshedToken.isEmpty ? !token.isEmpty : refreshedToken != token
+            // 详情成功但没给新 token 是常见的（公开笔记本来就没有 token）。
+            // 以前这里用 `!fresh.xsecToken.isEmpty` 把这种成功结果直接丢掉，
+            // 评论区永远停在第一轮的错误上。只要 token 或来源有变化，就用
+            // 刷新后的组合再试一次；两样都没变就说明没有新组合可试了。
+            guard tokenChanged || sourceChanged else { break }
+
+            var retryTokens: [String] = []
+            if refreshedToken.isEmpty {
+                // 旧 token 已经在第一轮把所有来源都试过了；只有详情回了
+                // 不同来源时，旧 token + 新来源才是没试过的组合。
+                if !token.isEmpty, sourceChanged { retryTokens.append(token) }
+                // 详情说这条笔记可见，评论区却拒了旧 token：公开笔记用空
+                // token 再试一次，和详情页的兜底保持一致。
+                retryTokens.append("")
+            } else {
+                token = refreshedToken
+                retryTokens.append(token)
+            }
+
+            // 详情接口回的 token 自带来源：先按它自己的来，再退到本次请求
+            // 的来源。一次刷新只试这两个，不把五个来源再铺一遍。
             var retries: [String] = []
-            for candidate in [fresh.xsecSource, source] + sources where !candidate.isEmpty {
+            for candidate in [fresh.xsecSource, source] where !candidate.isEmpty {
                 if !retries.contains(candidate) { retries.append(candidate) }
             }
-            for retrySource in retries {
-                if let page = try await attempt(token, retrySource) {
-                    remember(token, source: retrySource)
-                    return page
+            for retryToken in retryTokens {
+                for retrySource in retries {
+                    if let page = try await attempt(retryToken, retrySource) {
+                        remember(retryToken, source: retrySource)
+                        return page
+                    }
                 }
             }
+            // 详情已经成功，这次重试就是拿它给的组合；再换来源刷详情只会
+            // 多等 10 秒（最坏 5 次），不会有新的 token。
             break
         }
 
