@@ -504,6 +504,9 @@ final class WereadService: @unchecked Sendable {
         let entries = json["data"] as? [[String: Any]] ?? []
         let target = entries.first { ($0["bookId"] as? String) == bookId } ?? entries.first
         let updated = target?["updated"] as? [[String: Any]] ?? []
+        // 屏幕诊断：解析出了几章、顶层有哪些键。章节为空是「按钮全灰+报错」的最常见原因。
+        let topKeys = json.keys.sorted().prefix(8).joined(separator: ",")
+        Self.screenDiag("目录解析: entries=\(entries.count) target=\(target != nil) updated=\(updated.count) keys=\(topKeys)")
 
         return updated.compactMap { item in
             guard let uid = intValue(item["chapterUid"]) else { return nil }
@@ -904,21 +907,48 @@ final class WereadService: @unchecked Sendable {
 
     // MARK: - 工具
 
+    // MARK: - 屏幕诊断（无需 Mac / 系统日志，直接在报错页显示）
+    // Windows 上 syslog_relay 抓不到 App 自定义 subsystem 的 os_log，
+    // 所以把关键请求的状态码和返回体开头同时攒到这里，报错页读出来给用户截图。
+    private static let diagLock = NSLock()
+    private static var diagLines: [String] = []
+
+    /// 追加一行屏幕诊断（最多留 40 行，自动去掉最旧的）。
+    static func screenDiag(_ line: String) {
+        diagLock.lock()
+        defer { diagLock.unlock() }
+        diagLines.append(line)
+        if diagLines.count > 40 { diagLines.removeFirst(diagLines.count - 40) }
+    }
+
+    /// 报错页读取当前诊断快照。
+    static func takeScreenDiag() -> String {
+        diagLock.lock()
+        defer { diagLock.unlock() }
+        return diagLines.joined(separator: "\n")
+    }
+
+    /// 开始一次新的诊断会话（点重试时清掉上一轮）。
+    static func resetScreenDiag() {
+        diagLock.lock()
+        defer { diagLock.unlock() }
+        diagLines.removeAll()
+    }
+
     private func send(_ request: URLRequest) async throws -> Data {
         let (data, response) = try await session.data(for: request)
         let path = request.url?.path ?? ""
-        // 诊断用：正文/阅读器这两类请求把状态码和返回体开头打到系统日志（Notice 级，
-        // 只有这样才不会被 iOS 过滤掉），用来判断到底是签名被拒、还是登录态/重定向问题。
-        // 只截前 120 字节，不含 cookie。
-        if path.contains("/web/book/chapter") || path.contains("/web/reader") {
-            var status = -1
-            if let http = response as? HTTPURLResponse { status = http.statusCode }
-            let head = String(decoding: data.prefix(120), as: UTF8.self)
-                .replacingOccurrences(of: "\n", with: " ")
-            log.notice(
-                "weread diag: path=\(path, privacy: .public) status=\(status, privacy: .public) bytes=\(data.count, privacy: .public) head=\(head, privacy: .public)"
-            )
-        }
+        var status = -1
+        if let http = response as? HTTPURLResponse { status = http.statusCode }
+        // 所有微读请求都记录到屏幕诊断（章节目录、正文分片、阅读器页面），
+        // 只截前 180 字节、不含 cookie，避免泄露登录态。
+        let head = String(decoding: data.prefix(180), as: UTF8.self)
+            .replacingOccurrences(of: "\n", with: " ")
+        Self.screenDiag("\(path) → \(status) · \(data.count)B · \(head)")
+        // 系统日志保留（有 Mac 时仍可用控制台读）。
+        log.notice(
+            "weread diag: path=\(path, privacy: .public) status=\(status, privacy: .public) bytes=\(data.count, privacy: .public) head=\(head, privacy: .public)"
+        )
         if let http = response as? HTTPURLResponse {
             if http.statusCode == 401 || http.statusCode == 403 {
                 throw WereadError.notLoggedIn

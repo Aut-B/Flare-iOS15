@@ -274,6 +274,7 @@ struct WereadNativeReaderView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 30)
             Button("重试") {
+                WereadService.resetScreenDiag()
                 Task { await load(force: true) }
             }
             .buttonStyle(.borderedProminent)
@@ -281,6 +282,29 @@ struct WereadNativeReaderView: View {
                 showWeb = true
             }
             .font(.footnote)
+
+            // 屏幕诊断：Windows 读不到 App 的 os_log，把关键请求结果直接显示出来，
+            // 用户截图即可定位。只含状态码/字节数/返回体开头，不含 cookie。
+            let diag = WereadService.takeScreenDiag()
+            if !diag.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("诊断（请截图给开发者）").font(.caption2).foregroundStyle(.secondary)
+                    ScrollView {
+                        Text(diag)
+                            .font(.system(size: 9, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 150)
+                    Button("复制诊断") {
+                        UIPasteboard.general.string = diag
+                    }
+                    .font(.caption2)
+                }
+                .padding(8)
+                .background(Color(.secondarySystemBackground))
+                .cornerRadius(8)
+            }
         }
         .padding(30)
     }
@@ -327,6 +351,7 @@ struct WereadNativeReaderView: View {
     @MainActor
     private func load(force: Bool = false) async {
         if !force, !chapters.isEmpty { return }
+        WereadService.resetScreenDiag()
         loadToken += 1
         let token = loadToken
         loading = true
