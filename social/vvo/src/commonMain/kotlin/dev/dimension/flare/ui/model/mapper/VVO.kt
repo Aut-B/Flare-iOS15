@@ -47,7 +47,12 @@ import kotlin.time.Clock
 
 internal fun Status.render(accountKey: MicroBlogKey): UiTimelineV2 = renderStatusV2(accountKey)
 
-internal fun Comment.render(accountKey: MicroBlogKey): UiTimelineV2 = renderStatusV2(accountKey)
+internal fun Comment.render(
+    accountKey: MicroBlogKey,
+    // 评论列表属于哪条微博。评论 JSON 里不一定带 status，靠这个才能保证
+    // 「转发评论」发出去的是原微博的 id，而不是评论自己的 mid。
+    parentStatusKey: MicroBlogKey? = null,
+): UiTimelineV2 = renderStatusV2(accountKey, parentStatusKey)
 
 internal fun Attitude.render(accountKey: MicroBlogKey): UiTimelineV2 {
     val content = status?.renderStatusV2(accountKey)?.contentPostOrNull()
@@ -345,7 +350,10 @@ private fun Status.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
     }
 }
 
-private fun Comment.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
+private fun Comment.renderStatusV2(
+    accountKey: MicroBlogKey,
+    parentStatusKey: MicroBlogKey? = null,
+): UiTimelineV2 {
     val statusKey = MicroBlogKey(id = id, host = accountKey.host)
     val statusMid =
         status?.mid ?: analysis_extra
@@ -408,21 +416,29 @@ private fun Comment.renderStatusV2(accountKey: MicroBlogKey): UiTimelineV2 {
             sourceLanguages = persistentListOf("zh-CN"),
         )
     // 转发评论：微博的「转发」是把原微博转出来，同时把这条评论以
-    // 「//@作者：评论内容」的形式带进文案。原微博 id 优先取 status.id，
-    // 拿不到时退回 analysis_extra 里的 mid。
-    val parentStatusId = status?.id ?: statusMid
-    val quoteCommentText =
-        parentStatusId?.let {
-            buildString {
-                append("//@")
-                append(user?.name?.innerText.orEmpty())
-                append("：")
-                append(commentRichText.innerText)
-            }.takeIf { it.length > 3 }
-        }
+    // 「//@作者：评论内容」的形式带进文案。
+    //
+    // 原微博 id 只认两个来源：评论自带的 status，或列表所属的那条微博。
+    // 不能用 analysis_extra 里的 mid —— 那是评论自己的 mid，拿去转发会
+    // 被服务端判成非法请求，表现就是「转发频繁 / 转发失败」。
     val quoteCommentStatusKey =
-        parentStatusId?.let {
-            MicroBlogKey(id = it, host = accountKey.host)
+        status?.let { MicroBlogKey(id = it.id, host = accountKey.host) } ?: parentStatusKey
+    // 微博转发理由有 140 字上限，预填文案超了会被服务端直接拒绝，
+    // 所以在这里就截断，宁可少带几个字，也不要发出去就失败。
+    val quoteCommentText =
+        quoteCommentStatusKey?.let {
+            val full =
+                buildString {
+                    append("//@")
+                    append(user?.name?.innerText.orEmpty())
+                    append("：")
+                    append(commentRichText.innerText)
+                }
+            if (full.length > 3) {
+                if (full.length > 140) full.take(139) + "…" else full
+            } else {
+                null
+            }
         }
 
     val post =

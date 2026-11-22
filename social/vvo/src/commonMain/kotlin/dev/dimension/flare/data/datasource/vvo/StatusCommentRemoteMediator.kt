@@ -62,7 +62,9 @@ internal class StatusCommentRemoteMediator(
             response.data
                 ?.data
                 .orEmpty()
-                .map { it.render(accountKey) }
+                // 带上这条微博的 key：评论 JSON 里不一定有 status，
+                // 「转发评论」需要它才能转发到正确的原微博。
+                .map { it.render(accountKey, parentStatusKey = statusKey) }
         onRendered(items)
         return PagingResult(
             endOfPaginationReached = maxId == null,

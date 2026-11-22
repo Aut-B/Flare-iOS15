@@ -366,8 +366,48 @@ class VVORenderTest {
         assertEquals("//@commenter：都是生意", route.text)
     }
 
+    /**
+     * 评论 JSON 不带 status 时，转发必须用「列表所属的那条微博」的 id。
+     * 绝不能退回 analysis_extra 里的 mid —— 那是评论自己的 mid，拿去转发
+     * 会被服务端判成非法请求，表现就是「转发频繁 / 转发失败」。
+     */
     @Test
-    fun commentWithoutParentStatusHasNoQuoteAction() {
+    fun commentQuoteUsesParentStatusKeyInsteadOfCommentMid() {
+        val user = createUser(1L, "commenter")
+        val comment =
+            JSON.decodeFromString<Comment>(
+                """{"id":"comment-3","mid":"5000000000000001","analysis_extra":"mid:5000000000000001","text":"都是生意"}""",
+            ).copy(user = user)
+
+        val parent = MicroBlogKey(id = "post-9", host = accountKey.host)
+        val post = assertNotNull(comment.render(accountKey, parentStatusKey = parent).contentPostOrNull())
+        val quote = post.actions.filterIsInstance<ActionMenu.Item>().single { it.actionFamily == PostActionFamily.Quote }
+        val event = assertIs<ClickEvent.Deeplink>(quote.clickEvent)
+        val route = assertIs<DeeplinkRoute.Compose.Quote>(DeeplinkRoute.parse(event.url))
+
+        assertEquals("post-9", route.statusKey.id)
+        assertTrue(route.statusKey.id != "5000000000000001")
+    }
+
+    @Test
+    fun commentQuotePrefillStaysWithinWeiboRepostLimit() {
+        val user = createUser(1L, "commenter")
+        val longText = "很长的评论".repeat(60)
+        val comment =
+            JSON.decodeFromString<Comment>(
+                """{"id":"comment-4","text":"$longText","status":{"id":"status-2","text":"original post"}}""",
+            ).copy(user = user)
+
+        val post = assertNotNull(comment.render(accountKey).contentPostOrNull())
+        val quote = post.actions.filterIsInstance<ActionMenu.Item>().single { it.actionFamily == PostActionFamily.Quote }
+        val event = assertIs<ClickEvent.Deeplink>(quote.clickEvent)
+        val route = assertIs<DeeplinkRoute.Compose.Quote>(DeeplinkRoute.parse(event.url))
+
+        assertTrue(route.text.orEmpty().length <= 140)
+    }
+
+    @Test
+    fun commentWithoutKnownParentStatusHasNoQuoteAction() {
         val comment = JSON.decodeFromString<Comment>("""{"id":"comment-2","text":"no parent"}""")
 
         val post = assertNotNull(comment.render(accountKey).contentPostOrNull())
