@@ -602,7 +602,7 @@ internal class VVODataSource(
         MemCacheable("vvo_comment_${accountKey}_$statusKey") {
             service
                 .getHotFlowChild(statusKey.id)
-                .rootComment
+                .rootComments
                 ?.firstOrNull()
                 ?.render(accountKey)
                 ?: throw Exception("status not found")

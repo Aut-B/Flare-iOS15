@@ -17,6 +17,7 @@ import dev.dimension.flare.data.network.vvo.model.User
 import dev.dimension.flare.model.MicroBlogKey
 import dev.dimension.flare.model.vvoHostShort
 import dev.dimension.flare.ui.humanizer.PlatformFormatter
+import dev.dimension.flare.ui.model.ClickEvent
 import dev.dimension.flare.ui.model.UiMedia
 import dev.dimension.flare.ui.model.UiTimelineV2
 import dev.dimension.flare.ui.model.contentPostOrNull
@@ -38,6 +39,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Instant
@@ -345,6 +347,32 @@ class VVORenderTest {
             actions.filterNot { it == quote },
             post.actions.applyPostActionLayout(hiddenConfig),
         )
+    }
+
+    @Test
+    fun commentExposesQuoteActionThatPrefillsCommentText() {
+        val user = createUser(1L, "commenter")
+        val comment =
+            JSON.decodeFromString<Comment>(
+                """{"id":"comment-1","text":"都是生意","status":{"id":"status-1","text":"original post"}}""",
+            ).copy(user = user)
+
+        val post = assertNotNull(comment.render(accountKey).contentPostOrNull())
+        val quote = post.actions.filterIsInstance<ActionMenu.Item>().single { it.actionFamily == PostActionFamily.Quote }
+        val event = assertIs<ClickEvent.Deeplink>(quote.clickEvent)
+        val route = assertIs<DeeplinkRoute.Compose.Quote>(DeeplinkRoute.parse(event.url))
+
+        assertEquals("status-1", route.statusKey.id)
+        assertEquals("//@commenter：都是生意", route.text)
+    }
+
+    @Test
+    fun commentWithoutParentStatusHasNoQuoteAction() {
+        val comment = JSON.decodeFromString<Comment>("""{"id":"comment-2","text":"no parent"}""")
+
+        val post = assertNotNull(comment.render(accountKey).contentPostOrNull())
+
+        assertTrue(post.actions.none { it is ActionMenu.Item && it.actionFamily == PostActionFamily.Quote })
     }
 
     private fun createStatus(

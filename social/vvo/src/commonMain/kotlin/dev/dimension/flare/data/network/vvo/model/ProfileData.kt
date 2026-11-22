@@ -1,7 +1,12 @@
 package dev.dimension.flare.data.network.vvo.model
 
+import dev.dimension.flare.common.JSON
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.decodeFromJsonElement
 
 @Serializable
 internal data class ProfileData(
@@ -174,5 +179,19 @@ internal data class HotflowChildData(
     @SerialName("max_id_type")
     val maxIDType: Long? = null,
     val max: Long? = null,
+    // 微博返回的是 snake_case 的 root_comment，上游这里漏了 @SerialName，
+    // 于是 rootComment 永远是 null，评论详情页一进去就报「重试」。
+    // 用 JsonElement 收，数组/单对象两种形态都能吃，解析失败也不会
+    // 把整个 hotFlowChild 请求带崩（评论列表走的是同一个响应类型）。
+    @SerialName("root_comment")
+    val rootCommentRaw: JsonElement? = null,
     val rootComment: List<Comment>? = null,
-)
+) {
+    val rootComments: List<Comment>?
+        get() =
+            when (val raw = rootCommentRaw) {
+                is JsonArray -> runCatching { JSON.decodeFromJsonElement<List<Comment>>(raw) }.getOrNull()
+                is JsonObject -> runCatching { listOf(JSON.decodeFromJsonElement<Comment>(raw)) }.getOrNull()
+                else -> null
+            } ?: rootComment
+}
