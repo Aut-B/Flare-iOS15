@@ -101,28 +101,37 @@ final class WereadService: @unchecked Sendable {
 
         do {
             let (data, response) = try await self.session.data(for: request)
+            var readerStatus = -1
+            if let http = response as? HTTPURLResponse { readerStatus = http.statusCode }
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                log.info("weread: reader page HTTP \(http.statusCode, privacy: .public)")
+                log.notice("weread diag: reader page HTTP \(http.statusCode, privacy: .public)")
                 return nil
             }
             guard let html = String(data: data, encoding: .utf8) else {
-                log.info("weread: reader page not utf8")
+                log.notice("weread diag: reader page not utf8")
                 return nil
             }
+            let hasMarker = html.contains("__INITIAL_STATE__")
+            log.notice(
+                "weread diag: reader page status=\(readerStatus, privacy: .public) len=\(html.count, privacy: .public) hasInitialState=\(hasMarker, privacy: .public)"
+            )
             guard let parsed = WereadReaderSessionParser.session(from: html) else {
-                log.info("weread: reader page has no session beacon")
+                log.notice("weread diag: reader page has no session beacon")
                 return nil
             }
             // 只解析出 token、没有 `psvts`/`pclts` 的页面没法拿来取正文，
             // 当没信标处理，让调用方直接走旧版请求。
             guard !parsed.isEmpty else {
-                log.info("weread: reader page session beacon is empty")
+                log.notice("weread diag: reader page session beacon is empty")
                 return nil
             }
+            log.notice(
+                "weread diag: reader session ok psvts=\(parsed.psvts.count, privacy: .public) pclts=\(parsed.pclts.count, privacy: .public) defaultPs=\(!parsed.defaultPs.isEmpty, privacy: .public)"
+            )
             storeSession(parsed, for: cacheKey)
             return parsed
         } catch {
-            log.info("weread: reader page fetch failed: \(String(describing: error), privacy: .public)")
+            log.notice("weread diag: reader page fetch failed: \(String(describing: error), privacy: .public)")
             return nil
         }
     }
@@ -880,7 +889,11 @@ final class WereadService: @unchecked Sendable {
         } else {
             unwrapped = text
         }
-        return WereadCrypto.chk(unwrapped)
+        let shard = WereadCrypto.chk(unwrapped)
+        log.notice(
+            "weread diag: shard \(path, privacy: .public) raw=\(unwrapped.count, privacy: .public) decoded=\(shard.count, privacy: .public) rawHead=\(String(unwrapped.prefix(80)).replacingOccurrences(of: "\n", with: " "), privacy: .public)"
+        )
+        return shard
     }
 
     /// 拿不到会话信标时的兜底 ps（沿用历史上能过签的占位串）。
@@ -892,6 +905,19 @@ final class WereadService: @unchecked Sendable {
 
     private func send(_ request: URLRequest) async throws -> Data {
         let (data, response) = try await session.data(for: request)
+        let path = request.url?.path ?? ""
+        // 诊断用：正文/阅读器这两类请求把状态码和返回体开头打到系统日志（Notice 级，
+        // 只有这样才不会被 iOS 过滤掉），用来判断到底是签名被拒、还是登录态/重定向问题。
+        // 只截前 120 字节，不含 cookie。
+        if path.contains("/web/book/chapter") || path.contains("/web/reader") {
+            var status = -1
+            if let http = response as? HTTPURLResponse { status = http.statusCode }
+            let head = String(decoding: data.prefix(120), as: UTF8.self)
+                .replacingOccurrences(of: "\n", with: " ")
+            log.notice(
+                "weread diag: path=\(path, privacy: .public) status=\(status, privacy: .public) bytes=\(data.count, privacy: .public) head=\(head, privacy: .public)"
+            )
+        }
         if let http = response as? HTTPURLResponse {
             if http.statusCode == 401 || http.statusCode == 403 {
                 throw WereadError.notLoggedIn
