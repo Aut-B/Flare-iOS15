@@ -521,12 +521,11 @@ final class WereadService: @unchecked Sendable {
 
     /// 返回一章的 HTML。epub 书要拼 4 个分片，txt 书拼 2 个。
     ///
-    /// 取正文的优先级（从「新」到「旧」）：
-    /// 1. 阅读器页面信标可用 → 真实 `ps`/`pc` + `sc=1`；
-    /// 2. 信标请求回 `{}` → 退回旧版「直接正文请求」：固定 `ps`/`pc`，
-    ///    不带 `sc` / `prevChapter`。书架里的已购书走这条老路一直是通的，
-    ///    reader-session 改动把这条回退路径漏掉了；
-    /// 3. 直接请求也空 → 丢掉缓存信标、重抓一次页面，再试一次；
+    /// 取正文的优先级（从「旧」到「新」）：
+    /// 1. 旧版直接正文请求：固定 `ps`/`pc`，不带 `sc` / `prevChapter`。
+    ///    107 版就靠这条路径正常看书，所以放第一位；
+    /// 2. 旧版回 `{}` → 再试阅读器页面信标：真实 `ps`/`pc` + `sc=1`（epub 书需要）；
+    /// 3. 还是空 → 丢掉缓存信标、重抓一次页面，再试一次；
     /// 4. 回 `-2012`（登录超时）→ 交给 Store 串行续期、切换会话后重试。
     func content(bookId: String, chapterUid: Int, cookie: String) async throws -> String {
         do {
@@ -544,31 +543,33 @@ final class WereadService: @unchecked Sendable {
         }
     }
 
-    /// 先按会话信标取正文，失败再退回旧版直接请求。
+    /// 取正文顺序：**先旧版直连，再阅读器会话信标**。
     ///
-    /// 真机上的书架书（已购）以前直接带着固定 `ps`/`pc` 就能取到；
-    /// 新版把固定参数换成了 `_e(ct)` 并追加 `prevChapter`，信标又不一定
-    /// 抓得到，结果两边都不通。这里保证「信标失败 → 旧版请求」这条退路存在。
+    /// 107 版（能正常看书的版本）就是直接带固定 `ps`/`pc` 直连，书架里的书
+    /// 一直能取到。后来为了 epub 书加了「阅读器会话信标」，却把它放在了最前面：
+    /// 只要抓到信标，就改用页面里的 `ps` 并追加 `sc` / `prevChapter`，
+    /// 反而把原本能用的旧版请求挤掉了 —— 这就是「做完选文段之后反而看不了书」。
+    ///
+    /// 所以顺序改回去：旧版直连优先（恢复 107 行为），空了再试信标（给 epub 书留路）。
     private func fetchChapterWithFallback(
         bookId: String,
         chapterUid: Int,
         cookie: String
     ) async throws -> String {
-        var beacon = await readerSession(bookId: bookId, chapterUid: chapterUid, cookie: cookie)
-        // 只认能给出本章 ps 的信标；否则和没有一样。
-        if beacon?.ps(for: chapterUid) == nil { beacon = nil }
-        let usedSession = beacon != nil
-
+        // 1. 旧版直连：与 107 完全一致，不带信标、不带 sc/prevChapter。
         do {
             return try await fetchChapter(
                 bookId: bookId,
                 chapterUid: chapterUid,
                 cookie: cookie,
-                beacon: beacon
+                beacon: nil
             )
         } catch WereadError.empty {
-            guard usedSession else {
-                // 第一遍已经是不依赖会话的旧版请求，先把信标刷新再试。
+            // 2. 旧版拿不到，再尝试这一章的阅读器会话信标（epub 书需要）。
+            var beacon = await readerSession(bookId: bookId, chapterUid: chapterUid, cookie: cookie)
+            if beacon?.ps(for: chapterUid) == nil { beacon = nil }
+            guard let beaconValue = beacon else {
+                // 没有信标可用：只能刷新一次再试旧版。
                 return try await fetchWithRefreshedSession(
                     bookId: bookId,
                     chapterUid: chapterUid,
@@ -576,20 +577,20 @@ final class WereadService: @unchecked Sendable {
                     previous: nil
                 )
             }
-            log.info("weread: content empty with reader session, retrying legacy direct request")
+            log.notice("weread diag: legacy direct request empty, retrying with reader session beacon")
             do {
                 return try await fetchChapter(
                     bookId: bookId,
                     chapterUid: chapterUid,
                     cookie: cookie,
-                    beacon: nil
+                    beacon: beaconValue
                 )
             } catch WereadError.empty {
                 return try await fetchWithRefreshedSession(
                     bookId: bookId,
                     chapterUid: chapterUid,
                     cookie: cookie,
-                    previous: beacon
+                    previous: beaconValue
                 )
             }
         }
