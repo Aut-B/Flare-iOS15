@@ -4,6 +4,31 @@ import Drops
 import Foundation
 import SwiftUI
 
+/// 微博写操作（转发 / 评论 / 发博）的最近一次时间，用于诊断「操作频繁」。
+/// 服务端限频是按时间间隔判的，报告里带上「距上次 X 秒」就能一眼确认是不是
+/// 短时间连续转发触发的风控，而不是客户端一次点击发了两次请求。
+private final class WeiboWriteTiming {
+    static let shared = WeiboWriteTiming()
+    private let lock = NSLock()
+    private var last: Date?
+    func mark() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        let now = Date()
+        let gap: String
+        if let last {
+            gap = String(format: "距上次 %.1f 秒", now.timeIntervalSince(last))
+        } else {
+            gap = "本轮首次"
+        }
+        last = now
+        return gap
+    }
+    func reset() {
+        lock.lock(); last = nil; lock.unlock()
+    }
+}
+
 struct LoginExpiredToast: Identifiable {
     let id = UUID()
     let accountKey: MicroBlogKey
@@ -23,6 +48,11 @@ final class SwiftInAppNotification: InAppNotification {
                 // 把微博/服务端返回的真实原因带出来（比如「重复转发」「操作频繁」），
                 // 否则用户只看到「发送失败」，无法判断是客户端还是账号被限流。
                 let detail = throwable.message?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let gap = WeiboWriteTiming.shared.mark()
+                FlareDiagnostics.shared.record(
+                    .weibo, "ERR",
+                    "写操作失败 · \(gap) · 原因: \(detail ?? "(无信息)")"
+                )
                 Drops.show(
                     .init(
                         title: .init(localized: "notification_compose_error"),
@@ -76,6 +106,8 @@ final class SwiftInAppNotification: InAppNotification {
         DispatchQueue.main.async {
             switch message {
             case .compose:
+                let gap = WeiboWriteTiming.shared.mark()
+                FlareDiagnostics.shared.record(.weibo, "RES", "写操作成功 · \(gap)")
                 Drops.show(
                     .init(
                         title: .init(localized: "notification_compose_success"),

@@ -914,11 +914,13 @@ final class WereadService: @unchecked Sendable {
     private static var diagLines: [String] = []
 
     /// 追加一行屏幕诊断（最多留 40 行，自动去掉最旧的）。
+    /// 同时写入全局诊断中心，供设置页一键导出的完整报告使用。
     static func screenDiag(_ line: String) {
         diagLock.lock()
         defer { diagLock.unlock() }
         diagLines.append(line)
         if diagLines.count > 40 { diagLines.removeFirst(diagLines.count - 40) }
+        FlareDiagnostics.shared.record(.weread, "STATE", line)
     }
 
     /// 报错页读取当前诊断快照。
@@ -945,6 +947,11 @@ final class WereadService: @unchecked Sendable {
         let head = String(decoding: data.prefix(180), as: UTF8.self)
             .replacingOccurrences(of: "\n", with: " ")
         Self.screenDiag("\(path) → \(status) · \(data.count)B · \(head)")
+        FlareDiagnostics.shared.record(
+            .weread,
+            status >= 400 ? "ERR" : "RES",
+            "\(request.httpMethod ?? "?") \(path) → \(status) · \(data.count)B · \(head)"
+        )
         // 系统日志保留（有 Mac 时仍可用控制台读）。
         log.notice(
             "weread diag: path=\(path, privacy: .public) status=\(status, privacy: .public) bytes=\(data.count, privacy: .public) head=\(head, privacy: .public)"

@@ -319,10 +319,28 @@ final class XhsService {
                     attempts: attempts
                 )
             } catch let error as XhsError {
+                FlareDiagnostics.shared.record(
+                    .xhs, "ERR",
+                    "\(method) \(path) 签名/网络失败: \(error.message) · cookie=\(cookie.isEmpty ? "空" : "\(cookie.count)字符")"
+                )
                 throw error
             } catch {
+                FlareDiagnostics.shared.record(.xhs, "ERR", "\(method) \(path) 签名异常: \(error.localizedDescription)")
                 throw XhsError.signFailed
             }
+
+            let head = String(result.text.prefix(200)).replacingOccurrences(of: "\n", with: " ")
+            FlareDiagnostics.shared.record(
+                .xhs,
+                result.status >= 400 ? "ERR" : "RES",
+                "\(method) \(path) → \(result.status) · \(result.text.count)字符 · \(head)"
+            )
+            // 把这次请求实际用的登录态指纹记下来：cookie 为空 / xsec 缺失都能看出来。
+            let hasXsec = result.text.contains("xsec") || query?.contains("xsec") == true
+            FlareDiagnostics.shared.record(
+                .xhs, "STATE",
+                "cookie=\(cookie.isEmpty ? "空" : "\(cookie.count)字符") · xsec=\(hasXsec ? "有" : "无")"
+            )
 
             if result.status == 401 {
                 if !authRetried {

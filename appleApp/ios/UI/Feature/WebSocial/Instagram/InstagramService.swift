@@ -369,6 +369,18 @@ final class InstagramService {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let looksLikeHTML = trimmed.hasPrefix("<")
 
+        let shortURL = url.split(separator: "?").first.map(String.init) ?? url
+        let head = String(text.prefix(200)).replacingOccurrences(of: "\n", with: " ")
+        FlareDiagnostics.shared.record(
+            .instagram,
+            status >= 400 ? "ERR" : "RES",
+            "\(method) \(shortURL) → \(status) · \(data.count)B · interaction=\(interaction) · \(head)"
+        )
+        FlareDiagnostics.shared.record(
+            .instagram, "STATE",
+            "cookie=\(cookie.isEmpty ? "空" : "\(cookie.count)字符") · csrf=\(csrfToken.isEmpty ? "空" : "有")"
+        )
+
         // 401 才是明确的未登录；403 不一定是掉登录 —— POST 少了 csrftoken、
         // 或者被风控拦一下都会 403。先看 body，只有登录页 / login_required
         // 才判定失效，其它 403 交给上层重试 GET。

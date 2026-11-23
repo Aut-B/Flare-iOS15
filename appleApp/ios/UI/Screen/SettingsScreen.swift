@@ -148,6 +148,14 @@ struct SettingsScreen: View {
             }
 
             Section {
+                NavigationLink { DiagnosticsScreen() } label: {
+                    Label {
+                        Text("诊断报告")
+                        Text("一次导出小红书 / 微信读书 / Instagram / 微博转发的问题")
+                    } icon: {
+                        Image(systemName: "ladybug.fill")
+                    }
+                }
                 NBNavigationLink(value: Route.about) {
                     Label {
                         Text("about_title")
