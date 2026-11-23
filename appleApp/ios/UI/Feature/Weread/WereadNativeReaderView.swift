@@ -38,6 +38,13 @@ struct WereadNativeReaderView: View {
     /// iPhone 6s 只有 2GB，翻到后面容易被系统杀掉。
     @State private var cacheOrder: [Int] = []
     @State private var highlights: [Int: [WereadHighlight]] = [:]
+    /// 服务端同步的划线/想法，按 chapterUid 分组。和本地划线分开存，
+    /// 避免用户新增一条本地划线时把服务端笔记一并写回 UserDefaults。
+    @State private var serverNotes: [Int: [WereadBookmark]] = [:]
+    @State private var notesToken = 0
+    @State private var notesLoading = false
+    @State private var notesError: String?
+    @State private var showNotes = false
     @State private var scrollFraction: Double = 0
     /// 进章后要跳到的章内比例（0~1）。只在「打开这本书」时用一次，
     /// 翻章/重载都不该复用 —— 那些场景本来就要从头看。
@@ -57,7 +64,63 @@ struct WereadNativeReaderView: View {
 
     private var currentHighlights: [WereadHighlight] {
         guard let current else { return [] }
-        return highlights[current.uid] ?? []
+        var merged = highlights[current.uid] ?? []
+        var indexByText: [String: Int] = [:]
+        for (position, item) in merged.enumerated() {
+            let key = normalizedText(item.text)
+            if !key.isEmpty { indexByText[key] = position }
+        }
+        for bookmark in serverNotes[current.uid] ?? [] where !bookmark.markText.isEmpty {
+            let key = normalizedText(bookmark.markText)
+            if let position = indexByText[key] {
+                let item = merged[position]
+                if item.note.isEmpty, !bookmark.note.isEmpty {
+                    merged[position] = WereadHighlight(
+                        id: item.id,
+                        text: item.text,
+                        note: bookmark.note
+                    )
+                }
+                continue
+            }
+            indexByText[key] = merged.count
+            merged.append(
+                WereadHighlight(id: bookmark.id, text: bookmark.markText, note: bookmark.note)
+            )
+        }
+        return merged
+    }
+
+    /// 本章能展示的笔记列表：本地 + 服务端，按 markText 去重。
+    /// 同一条划线本地没写想法、服务端有，就补上服务端的想法。
+    private var currentNoteEntries: [WereadHighlight] {
+        guard let current else { return [] }
+        var result = highlights[current.uid] ?? []
+        var indexByText: [String: Int] = [:]
+        for (position, item) in result.enumerated() {
+            let key = normalizedText(item.text)
+            if !key.isEmpty { indexByText[key] = position }
+        }
+        for bookmark in serverNotes[current.uid] ?? [] {
+            let key = normalizedText(bookmark.markText)
+            if !key.isEmpty, let position = indexByText[key] {
+                if result[position].note.isEmpty, !bookmark.note.isEmpty {
+                    let item = result[position]
+                    result[position] = WereadHighlight(id: item.id, text: item.text, note: bookmark.note)
+                }
+                continue
+            }
+            guard !key.isEmpty || !bookmark.note.isEmpty else { continue }
+            if !key.isEmpty { indexByText[key] = result.count }
+            result.append(
+                WereadHighlight(id: bookmark.id, text: bookmark.markText, note: bookmark.note)
+            )
+        }
+        return result
+    }
+
+    private func normalizedText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
@@ -86,6 +149,9 @@ struct WereadNativeReaderView: View {
         .task { await load() }
         .sheet(isPresented: $showChapters) {
             chapterList
+        }
+        .sheet(isPresented: $showNotes) {
+            notesSheet
         }
         .fullScreenCover(isPresented: $showWeb) {
             WereadReaderView(
@@ -185,6 +251,11 @@ struct WereadNativeReaderView: View {
                     showWeb = true
                 } label: {
                     Label("网页版阅读器", systemImage: "safari")
+                }
+                Button {
+                    showNotes = true
+                } label: {
+                    Label("本章笔记（\(currentNoteEntries.count)）", systemImage: "text.quote")
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -346,6 +417,85 @@ struct WereadNativeReaderView: View {
         }
     }
 
+    private var notesSheet: some View {
+        NavigationView {
+            Group {
+                if notesLoading, currentNoteEntries.isEmpty {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("正在同步微读笔记…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let notesError, currentNoteEntries.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.circle")
+                            .font(.system(size: 30))
+                            .foregroundStyle(.secondary)
+                        Text("笔记加载失败")
+                            .font(.footnote)
+                        Text(notesError)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 30)
+                        Button("重试") { retryBookmarks() }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if currentNoteEntries.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "text.quote")
+                            .font(.system(size: 30))
+                            .foregroundStyle(.secondary)
+                        Text("本章还没有同步的笔记")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Text("在微读官方 App 或网页里做的划线和想法，会同步到这里")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 30)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(currentNoteEntries) { item in
+                            VStack(alignment: .leading, spacing: 6) {
+                                if !item.text.isEmpty {
+                                    Text(item.text)
+                                        .font(.system(size: 15))
+                                        .textSelection(.enabled)
+                                }
+                                if !item.note.isEmpty {
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Image(systemName: "text.bubble")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        Text(item.note)
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                    .listStyle(.plain)
+                }
+            }
+            .navigationTitle(current?.title.isEmpty == false ? "本章笔记" : "笔记")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") { showNotes = false }
+                }
+            }
+        }
+    }
+
     // MARK: - 加载
 
     @MainActor
@@ -354,6 +504,10 @@ struct WereadNativeReaderView: View {
         WereadService.resetScreenDiag()
         loadToken += 1
         let token = loadToken
+        notesToken += 1
+        let bookmarkToken = notesToken
+        if force { serverNotes = [:] }
+        notesError = nil
         loading = true
         errorMessage = nil
         html = ""
@@ -363,6 +517,7 @@ struct WereadNativeReaderView: View {
             let service = WereadService.shared
             let bookId = target.book.id
             let cookie = store.cookie
+            Task { await loadBookmarks(bookId: bookId, cookie: cookie, token: bookmarkToken) }
             async let progressTask = service.progress(bookId: bookId, cookie: cookie)
             let list = try await store.chapters(for: target.book.id)
             guard token == loadToken else { return }
@@ -396,6 +551,43 @@ struct WereadNativeReaderView: View {
             guard token == loadToken else { return }
             loading = false
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// 服务端笔记单独拉：慢或失败都不能挡住正文。
+    @MainActor
+    private func loadBookmarks(bookId: String, cookie: String, token: Int) async {
+        guard token == notesToken else { return }
+        notesLoading = true
+        guard !cookie.isEmpty else {
+            notesLoading = false
+            notesError = WereadError.notLoggedIn.localizedDescription
+            return
+        }
+        do {
+            let list = try await WereadService.shared.bookmarks(bookId: bookId, cookie: cookie)
+            guard token == notesToken else { return }
+            serverNotes = Dictionary(grouping: list) { $0.chapterUid }
+            notesError = nil
+            notesLoading = false
+        } catch {
+            guard token == notesToken else { return }
+            notesLoading = false
+            notesError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func retryBookmarks() {
+        notesToken += 1
+        let token = notesToken
+        notesError = nil
+        Task {
+            await loadBookmarks(
+                bookId: target.book.id,
+                cookie: store.cookie,
+                token: token
+            )
         }
     }
 

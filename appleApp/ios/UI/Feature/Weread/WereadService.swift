@@ -807,6 +807,185 @@ final class WereadService: @unchecked Sendable {
         _ = try? await send(request)
     }
 
+    // MARK: - 服务端笔记
+
+    /// 一条「想法」。接口返回的是 review 列表，和划线按 `range` 关联。
+    private struct ServerThought {
+        let id: String
+        let chapterUid: Int
+        let range: String
+        let content: String
+        let createTime: TimeInterval
+    }
+
+    /// 拉取用户在这本书里同步到微读服务端的划线，并把「想法」挂到对应划线上。
+    ///
+    /// 对照 wereadx `web_book_bookmarklist`：GET `/web/book/bookmarklist?bookId=`
+    /// 带 cookie。`updated[]` 只有划线字段（`bookmarkId / chapterUid /
+    /// markText / range / createTime`），**没有 `note`**；想法来自
+    /// `/web/review/list?listType=11&mine=1`，按 `range` 对齐
+    /// （与 obsidian-weread-plugin `parseHighlights` 的做法一致）。
+    ///
+    /// 想法接口失败不影响划线：只降级成「没有想法」，不阻断阅读。
+    func bookmarks(bookId: String, cookie: String) async throws -> [WereadBookmark] {
+        guard !cookie.isEmpty else { throw WereadError.notLoggedIn }
+        var components = URLComponents(string: "\(base)/web/book/bookmarklist")
+        components?.queryItems = [URLQueryItem(name: "bookId", value: bookId)]
+        guard let url = components?.url else {
+            throw WereadError.server("笔记接口地址无效")
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        let data = try await send(request)
+        let json = try parseObject(data)
+        try checkError(json)
+
+        guard let updated = json["updated"] as? [[String: Any]] else {
+            Self.screenDiag("bookmarklist book=\(bookId) 响应缺少 updated[]")
+            FlareDiagnostics.shared.record(
+                .weread,
+                "ERR",
+                "bookmarklist book=\(bookId) 响应缺少 updated[]"
+            )
+            throw WereadError.decodeFailed
+        }
+        let thoughts = await fetchThoughts(bookId: bookId, cookie: cookie)
+        // `range` 是章内字符偏移，不同章节会重复，必须带上 chapterUid 才能对齐。
+        var thoughtsByLocation: [String: [ServerThought]] = [:]
+        var usedThoughtIds = Set<String>()
+        for thought in thoughts where !thought.range.isEmpty {
+            let key = thoughtLocation(chapterUid: thought.chapterUid, range: thought.range)
+            thoughtsByLocation[key, default: []].append(thought)
+        }
+
+        var result: [WereadBookmark] = []
+        var seen = Set<String>()
+        for (index, item) in updated.enumerated() {
+            guard let chapterUid = intValue(item["chapterUid"]) else { continue }
+            let markText = ((item["markText"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !markText.isEmpty else { continue }
+
+            let range = (item["range"] as? String) ?? ""
+            let rawId = ((item["bookmarkId"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let id = rawId.isEmpty ? "bookmark-\(chapterUid)-\(range)-\(index)" : rawId
+            guard seen.insert(id).inserted else { continue }
+
+            var notes: [String] = []
+            if let inlineNote = item["note"] as? String, !inlineNote.isEmpty {
+                notes.append(inlineNote)
+            }
+            let location = thoughtLocation(chapterUid: chapterUid, range: range)
+            if let matched = thoughtsByLocation[location] {
+                for thought in matched {
+                    usedThoughtIds.insert(thought.id)
+                    if !thought.content.isEmpty, !notes.contains(thought.content) {
+                        notes.append(thought.content)
+                    }
+                }
+            }
+
+            result.append(
+                WereadBookmark(
+                    id: id,
+                    chapterUid: chapterUid,
+                    markText: markText,
+                    note: notes.joined(separator: "\n\n"),
+                    range: range,
+                    createTime: TimeInterval(intValue(item["createTime"]) ?? 0)
+                )
+            )
+        }
+
+        // 没有对应划线的想法（整章想法、或划线已被删除）也要能看到。
+        for thought in thoughts where !usedThoughtIds.contains(thought.id) {
+            guard !thought.content.isEmpty else { continue }
+            result.append(
+                WereadBookmark(
+                    id: thought.id,
+                    chapterUid: thought.chapterUid,
+                    markText: "",
+                    note: thought.content,
+                    range: thought.range,
+                    createTime: thought.createTime
+                )
+            )
+        }
+
+        let summary =
+            "bookmarklist book=\(bookId) updated=\(updated.count) thoughts=\(thoughts.count) parsed=\(result.count)"
+        Self.screenDiag(summary)
+        FlareDiagnostics.shared.record(.weread, "RES", summary)
+        return result
+    }
+
+    private func thoughtLocation(chapterUid: Int, range: String) -> String {
+        "\(chapterUid)|\(range)"
+    }
+
+    /// 拉取自己的「想法」。失败只记日志并返回空数组，不影响划线。
+    private func fetchThoughts(bookId: String, cookie: String) async -> [ServerThought] {
+        var components = URLComponents(string: "\(base)/web/review/list")
+        components?.queryItems = [
+            URLQueryItem(name: "bookId", value: bookId),
+            URLQueryItem(name: "listType", value: "11"),
+            URLQueryItem(name: "mine", value: "1"),
+            URLQueryItem(name: "synckey", value: "0"),
+        ]
+        guard let url = components?.url else { return [] }
+
+        var request = URLRequest(url: url)
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        do {
+            let data = try await send(request)
+            let json = try parseObject(data)
+            try checkError(json)
+            let reviews = json["reviews"] as? [[String: Any]] ?? []
+            var result: [ServerThought] = []
+            for (index, item) in reviews.enumerated() {
+                guard
+                    let review = item["review"] as? [String: Any],
+                    intValue(review["type"]) == 1,
+                    let chapterUid = intValue(review["chapterUid"])
+                else {
+                    continue
+                }
+                let content = ((review["content"] as? String) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !content.isEmpty else { continue }
+                let range =
+                    (review["range"] as? String)
+                    ?? (review["range"] as? NSNumber)?.stringValue
+                    ?? ""
+                let rawId = ((review["reviewId"] as? String) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let id = rawId.isEmpty ? "thought-\(chapterUid)-\(range)-\(index)" : rawId
+                result.append(
+                    ServerThought(
+                        id: id,
+                        chapterUid: chapterUid,
+                        range: range,
+                        content: content,
+                        createTime: TimeInterval(intValue(review["createTime"]) ?? 0)
+                    )
+                )
+            }
+            return result
+        } catch {
+            log.notice(
+                "weread diag: review/list failed: \(String(describing: error), privacy: .public)"
+            )
+            FlareDiagnostics.shared.record(
+                .weread,
+                "ERR",
+                "review/list book=\(bookId) 失败: \(error.localizedDescription)"
+            )
+            return []
+        }
+    }
+
     // MARK: - 网页阅读器地址
 
     /// 网页阅读器地址：`/web/reader/{_e(bookId)}k{_e(chapterUid)}`。
@@ -1003,8 +1182,14 @@ final class WereadService: @unchecked Sendable {
     }
 
     private func checkError(_ json: [String: Any]) throws {
-        guard let code = intValue(json["errCode"]), code != 0 else { return }
-        let message = json["errMsg"] as? String ?? "请求失败"
+        // 微读不同接口的大小写不一致，两种都认。
+        guard let code = intValue(json["errCode"]) ?? intValue(json["errcode"]), code != 0 else {
+            return
+        }
+        let message =
+            (json["errMsg"] as? String)
+            ?? (json["errmsg"] as? String)
+            ?? "请求失败"
         if code == -2010 || code == -2012 {
             throw WereadError.notLoggedIn
         }

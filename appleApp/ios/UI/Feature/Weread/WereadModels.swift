@@ -35,6 +35,21 @@ struct WereadProgress: Hashable {
     let percent: Int
 }
 
+/// 微读服务端同步下来的一条划线，可能带着用户写的想法。
+///
+/// 字段来源是 `/web/book/bookmarklist` 的 `updated[]`：
+/// `bookmarkId / chapterUid / markText / range / createTime`。
+/// 想法不在这个接口里，由 `/web/review/list` 按 `range` 关联（见
+/// `WereadService.bookmarks(bookId:cookie:)`）。
+struct WereadBookmark: Identifiable, Hashable {
+    let id: String
+    let chapterUid: Int
+    let markText: String
+    let note: String
+    let range: String
+    let createTime: TimeInterval
+}
+
 enum WereadError: LocalizedError {
     case notLoggedIn
     case http(Int)
