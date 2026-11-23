@@ -140,7 +140,14 @@ struct WereadNativeReaderView: View {
             // 章节 WebView 必须常驻：一旦从视图树里拿掉，WKWebView 就被销毁，
             // 再挂回来又要重新加载一次 HTML，白屏时间翻倍。
             if isPDF {
-                pdfView
+                // PDF 会自动进入官方阅读页（load() 里设 showWeb=true），这里只做
+                // 全屏页弹出前的过渡；不再显示"点按钮跳转"的提示页。
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("正在打开《\(target.book.title)》…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             } else {
                 if !html.isEmpty {
                     reader
@@ -376,33 +383,6 @@ struct WereadNativeReaderView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(32)
-    }
-
-    private var pdfView: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "doc.richtext")
-                .font(.system(size: 40))
-                .foregroundStyle(.secondary)
-            Text("《\(target.book.title)》是 PDF 书")
-                .font(.headline)
-                .multilineTextAlignment(.center)
-            Text("原生阅读器只支持 EPUB/TXT 的章节分片，PDF 直接读会空白或排版错乱。网页版会打开微读官方的 PDF 阅读页。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Button {
-                showWeb = true
-            } label: {
-                Label("打开网页版 PDF 阅读器", systemImage: "safari")
-                    .font(.system(size: 15, weight: .semibold))
-            }
-            .buttonStyle(.borderedProminent)
-            Text("需要微读登录态；网页版打不开时请回书架检查登录。")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .padding(30)
     }
 
     /// 正文已到、WebView 还在排版时的过渡层。
@@ -664,6 +644,9 @@ struct WereadNativeReaderView: View {
             isPDF = true
             loading = false
             errorMessage = nil
+            // PDF 直接用微读官方阅读页打开：那个页面原生支持高亮 / 写想法 /
+            // 服务端笔记（用户真机已确认能正常读）。不再显示中间提示页拦一道。
+            showWeb = true
             return
         }
         isPDF = false
