@@ -490,25 +490,49 @@ final class WereadService: @unchecked Sendable {
         }
     }
 
+    /// 目录主用现行 `/web/book/chapterInfos`；新接口返回空时回退老
+    /// `/web/book/publicchapterInfos` 一次，兼容只认老接口的会话。
     private func fetchChapters(bookId: String, cookie: String) async throws -> [WereadChapter] {
-        var request = URLRequest(url: URL(string: "\(base)/web/book/publicchapterInfos")!)
+        let primary = try await fetchChapterList(
+            api: "chapterInfos",
+            bookId: bookId,
+            cookie: cookie
+        )
+        guard primary.isEmpty else { return primary }
+
+        Self.screenDiag("目录 chapterInfos chapters=0，回退 publicchapterInfos")
+        let fallback = try await fetchChapterList(
+            api: "publicchapterInfos",
+            bookId: bookId,
+            cookie: cookie
+        )
+        return fallback
+    }
+
+    private func fetchChapterList(
+        api: String,
+        bookId: String,
+        cookie: String
+    ) async throws -> [WereadChapter] {
+        var request = URLRequest(url: URL(string: "\(base)/web/book/\(api)")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(cookie, forHTTPHeaderField: "Cookie")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["bookIds": [bookId]])
 
-        let data = try await send(request)
+        let (data, status) = try await sendWithStatus(request)
         let json = try parseObject(data)
         try checkError(json)
 
         let entries = json["data"] as? [[String: Any]] ?? []
         let target = entries.first { ($0["bookId"] as? String) == bookId } ?? entries.first
         let updated = target?["updated"] as? [[String: Any]] ?? []
-        // 屏幕诊断：解析出了几章、顶层有哪些键。章节为空是「按钮全灰+报错」的最常见原因。
         let topKeys = json.keys.sorted().prefix(8).joined(separator: ",")
-        Self.screenDiag("目录解析: entries=\(entries.count) target=\(target != nil) updated=\(updated.count) keys=\(topKeys)")
+        Self.screenDiag(
+            "目录接口 /web/book/\(api) → \(status) → updated=\(updated.count) entries=\(entries.count) target=\(target != nil) keys=\(topKeys)"
+        )
 
-        return updated.compactMap { item in
+        return updated.compactMap { item -> WereadChapter? in
             guard let uid = intValue(item["chapterUid"]) else { return nil }
             return WereadChapter(
                 uid: uid,
@@ -938,6 +962,10 @@ final class WereadService: @unchecked Sendable {
     }
 
     private func send(_ request: URLRequest) async throws -> Data {
+        try await sendWithStatus(request).0
+    }
+
+    private func sendWithStatus(_ request: URLRequest) async throws -> (Data, Int) {
         let (data, response) = try await session.data(for: request)
         let path = request.url?.path ?? ""
         var status = -1
@@ -964,7 +992,7 @@ final class WereadService: @unchecked Sendable {
                 throw WereadError.http(http.statusCode)
             }
         }
-        return data
+        return (data, status)
     }
 
     private func parseObject(_ data: Data) throws -> [String: Any] {
