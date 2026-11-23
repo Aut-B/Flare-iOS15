@@ -53,6 +53,14 @@ struct WereadNativeReaderView: View {
     /// 发完立刻清空；用「值变化」驱动而不是闭包，避免 WebView 重建后请求丢失。
     @State private var scrollRequest: Double?
     @State private var loadToken = 0
+    /// JS 点「想法」后发起的输入请求。走 SwiftUI 浮层而不是 `window.prompt`，
+    /// 不依赖 WKUIDelegate 的 UIKit 弹窗回调链。
+    @State private var noteRequest: WereadNoteRequest?
+    @State private var noteDraft = ""
+    /// 回传给 JS 的想法内容；`text == nil` 表示取消。
+    @State private var noteReply: WereadNoteReply?
+    @State private var noteReplyToken = 0
+    @FocusState private var noteDraftFocused: Bool
 
     /// 正文缓存最多留几章。一章 HTML 通常几十到几百 KB，留 3 章既能覆盖
     /// 「来回翻两页」，又不会在 2GB 设备上把内存顶满。
@@ -145,6 +153,11 @@ struct WereadNativeReaderView: View {
         }
         .safeAreaInset(edge: .top, spacing: 0) { topBar }
         .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
+        .overlay {
+            if let request = noteRequest {
+                noteEditor(request)
+            }
+        }
         .statusBar(hidden: true)
         .task { await load() }
         .sheet(isPresented: $showChapters) {
@@ -172,6 +185,7 @@ struct WereadNativeReaderView: View {
         // 记住生成这个 reader 时的加载代次；`onReady` 是 escaping 闭包，
         // 会晚于翻章触发，代次不一致就说明是上一章的渲染完成。
         let token = loadToken
+        let reply = noteReply
         return WereadChapterWebView(
             html: html,
             baseURL: URL(string: "https://weread.qq.com/"),
@@ -190,6 +204,16 @@ struct WereadNativeReaderView: View {
             },
             onScroll: { value in
                 scrollFraction = min(max(value, 0), 1)
+            },
+            noteReply: reply,
+            onNoteRequest: { text in
+                // 浮层已经开着时忽略重复请求，避免 JS 的待处理选区被覆盖。
+                guard noteRequest == nil, !text.isEmpty else { return }
+                noteDraft = ""
+                noteRequest = WereadNoteRequest(text: text)
+            },
+            onNoteReplyApplied: {
+                if noteReply != nil { noteReply = nil }
             },
             scrollRequest: scrollRequest,
             onScrollApplied: {
@@ -496,6 +520,69 @@ struct WereadNativeReaderView: View {
         }
     }
 
+    // MARK: - 写想法
+
+    /// 原生输入浮层：JS 只负责上报「用户点了想法 + 选中的文字」，
+    /// 输入和回传都在 SwiftUI 里完成，不再走 `window.prompt`。
+    private func noteEditor(_ request: WereadNoteRequest) -> some View {
+        ZStack {
+            Color.black.opacity(0.35)
+                .ignoresSafeArea()
+                .onTapGesture { cancelNote() }
+            VStack(alignment: .leading, spacing: 12) {
+                Text("写想法")
+                    .font(.headline)
+                Text(request.text)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                TextEditor(text: $noteDraft)
+                    .font(.system(size: 15))
+                    .frame(height: 110)
+                    .padding(6)
+                    .background(Color(.secondarySystemBackground))
+                    .cornerRadius(8)
+                    .focused($noteDraftFocused)
+                HStack {
+                    Button("取消") { cancelNote() }
+                    Spacer(minLength: 12)
+                    Button("保存") { saveNote() }
+                        .disabled(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .font(.system(size: 15, weight: .medium))
+            }
+            .padding(18)
+            .background(Color(.systemBackground))
+            .cornerRadius(16)
+            .shadow(color: .black.opacity(0.18), radius: 18)
+            .padding(.horizontal, 24)
+        }
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                noteDraftFocused = true
+            }
+        }
+    }
+
+    private func saveNote() {
+        let text = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        noteReplyToken += 1
+        noteReply = WereadNoteReply(id: noteReplyToken, text: text)
+        noteRequest = nil
+        noteDraft = ""
+        noteDraftFocused = false
+    }
+
+    private func cancelNote() {
+        guard noteRequest != nil else { return }
+        noteReplyToken += 1
+        noteReply = WereadNoteReply(id: noteReplyToken, text: nil)
+        noteRequest = nil
+        noteDraft = ""
+        noteDraftFocused = false
+    }
+
     // MARK: - 加载
 
     @MainActor
@@ -619,6 +706,10 @@ struct WereadNativeReaderView: View {
         scrollFraction = 0
         loading = true
         errorMessage = nil
+        // 换章时上一章的待处理想法必须丢掉，否则会包到新章的文本上。
+        noteRequest = nil
+        noteReply = nil
+        noteDraft = ""
         // 先清掉上一章正文：否则请求期间标题已经换成新章，正文还是旧章，
         // 看起来像「点进去内容不对」。
         html = ""
@@ -761,6 +852,18 @@ enum WereadHighlightStore {
     }
 }
 
+/// JS 发起的一次「写想法」请求：只带选中的文字，原始 Range 留在 JS 侧。
+private struct WereadNoteRequest: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
+/// SwiftUI 回传给 JS 的结果；`text == nil` 表示取消。
+private struct WereadNoteReply: Equatable {
+    let id: Int
+    let text: String?
+}
+
 // MARK: - 章节 WebView
 
 private struct WereadChapterWebView: UIViewRepresentable {
@@ -770,6 +873,9 @@ private struct WereadChapterWebView: UIViewRepresentable {
     let highlights: [WereadHighlight]
     let onHighlight: (WereadHighlight) -> Void
     let onScroll: (Double) -> Void
+    let noteReply: WereadNoteReply?
+    let onNoteRequest: (String) -> Void
+    let onNoteReplyApplied: () -> Void
     /// 待执行的章内滚动比例。非 nil 时在页面 ready 之后滚过去。
     let scrollRequest: Double?
     /// 滚动请求已经处理（无论成功失败都要回调，否则会一直重试）。
@@ -804,6 +910,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
         context.coordinator.parent = self
         context.coordinator.load(html, in: webView, baseURL: baseURL, cookie: cookie)
         context.coordinator.apply(highlights, in: webView)
+        context.coordinator.applyNoteReply(noteReply, in: webView)
         context.coordinator.requestScroll(scrollRequest, in: webView)
     }
 
@@ -819,6 +926,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
         var parent: WereadChapterWebView
         private var lastHTML = ""
         private var lastHighlights = ""
+        private var lastNoteReplyID: Int?
         private var loaded = false
         /// 页面还没 ready 时收到的滚动请求，等 `markReady` 再补执行。
         private var pendingScroll: Double?
@@ -975,6 +1083,12 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 DispatchQueue.main.async {
                     self.parent.onHighlight(WereadHighlight(id: id, text: text, note: note))
                 }
+            case "noteRequest":
+                let text = (body["text"] as? String) ?? ""
+                guard !text.isEmpty else { return }
+                DispatchQueue.main.async {
+                    self.parent.onNoteRequest(text)
+                }
             case "scroll":
                 let value = (body["value"] as? NSNumber)?.doubleValue ?? 0
                 DispatchQueue.main.async {
@@ -982,6 +1096,37 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 }
             default:
                 break
+            }
+        }
+
+        /// 把 SwiftUI 浮层里的想法（或取消）回传给 JS。
+        ///
+        /// 用「值 + token」而不是闭包，和 `scrollRequest` 一样能扛住
+        /// WKWebView 重建；每条结果只应用一次。
+        func applyNoteReply(_ reply: WereadNoteReply?, in webView: WKWebView) {
+            guard let reply = reply, reply.id != lastNoteReplyID else { return }
+            lastNoteReplyID = reply.id
+            let script: String
+            if let text = reply.text {
+                let payload = ["note": text]
+                guard
+                    let data = try? JSONSerialization.data(withJSONObject: payload),
+                    let json = String(data: data, encoding: .utf8)
+                else {
+                    DispatchQueue.main.async { self.parent.onNoteReplyApplied() }
+                    return
+                }
+                script = "window.__wrApplyNote(\(Self.javaScriptStringLiteral(json)).note);"
+            } else {
+                script = "window.__wrApplyNote(null);"
+            }
+            webView.evaluateJavaScript(script) { _, error in
+                if let error = error {
+                    Self.log.error(
+                        "weread apply note failed: \(String(describing: error), privacy: .public)"
+                    )
+                }
+                DispatchQueue.main.async { self.parent.onNoteReplyApplied() }
             }
         }
 
@@ -1003,7 +1148,16 @@ private struct WereadChapterWebView: UIViewRepresentable {
             alert.addAction(UIAlertAction(title: "保存", style: .default) { _ in
                 completionHandler(alert.textFields?.first?.text ?? "")
             })
-            topViewController()?.present(alert, animated: true)
+            // 找不到 presenter 时必须回调，否则 `window.prompt` 永远不返回，
+            // 整个页面的 JS 会卡住。原生输入浮层已不走这里，这里只做兜底。
+            guard let presenter = topViewController() else {
+                Self.log.error("weread prompt has no presenter")
+                completionHandler(nil)
+                return
+            }
+            presenter.present(alert, animated: true) {
+                alert.textFields?.first?.becomeFirstResponder()
+            }
         }
 
         private func topViewController() -> UIViewController? {
@@ -1196,9 +1350,9 @@ enum WereadReaderHTML {
                 }, 120);
             });
 
-            function wrapSelection(note) {
-                var current = selectedText();
-                var range = current ? current.range : savedRange;
+            function wrapSelection(note, rangeOverride) {
+                var current = rangeOverride ? null : selectedText();
+                var range = rangeOverride || (current ? current.range : savedRange);
                 if (!range) return;
                 var text = String(range.toString() || '').trim();
                 if (!text) return;
@@ -1223,7 +1377,8 @@ enum WereadReaderHTML {
                     text: text,
                     note: note || ''
                 });
-                if (current) current.selection.removeAllRanges();
+                var selection = window.getSelection();
+                if (selection) selection.removeAllRanges();
                 hideTools();
                 savedRange = null;
             }
@@ -1251,12 +1406,40 @@ enum WereadReaderHTML {
                 wrapSelection('');
             });
 
+            // 「想法」不再调用 window.prompt：WKWebView 的 prompt 依赖
+            // WKUIDelegate 的 UIKit 弹窗回调，presenter 找不到时 JS 会一直挂起，
+            // 表现就是「点了没反应」。这里把选区和文字留在 JS，交给 Swift
+            // 原生浮层输入，结果通过 __wrApplyNote 回传。
+            var pendingNoteRange = null;
+
             document.getElementById('wr-note').addEventListener('click', function (event) {
                 event.preventDefault();
-                var note = window.prompt('写想法', '');
-                if (note === null) return;
-                wrapSelection(note);
+                if (pendingNoteRange) return;
+                var current = selectedText();
+                var range = current ? current.range.cloneRange() : savedRange;
+                if (!range) return;
+                var text = String(range.toString() || '').trim();
+                if (!text) return;
+                pendingNoteRange = range;
+                window.webkit.messageHandlers.weread.postMessage({
+                    type: 'noteRequest',
+                    text: text
+                });
             });
+
+            window.__wrApplyNote = function (note) {
+                var range = pendingNoteRange;
+                pendingNoteRange = null;
+                if (!range) return;
+                if (note === null || note === undefined || String(note).trim() === '') {
+                    var selection = window.getSelection();
+                    if (selection) selection.removeAllRanges();
+                    savedRange = null;
+                    hideTools();
+                    return;
+                }
+                wrapSelection(String(note), range);
+            };
 
             window.__wrRestore = function (list) {
                 if (!list || !list.length) return;
