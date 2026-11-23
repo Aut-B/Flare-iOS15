@@ -30,6 +30,8 @@ struct WereadNativeReaderView: View {
     @State private var html = ""
     @State private var loading = true
     @State private var errorMessage: String?
+    /// PDF 不能走原生 chapter 分片；置 true 后只显示跳转网页版的提示页。
+    @State private var isPDF = false
     @State private var showChapters = false
     @State private var showWeb = false
     @State private var cache: [Int: String] = [:]
@@ -137,22 +139,28 @@ struct WereadNativeReaderView: View {
 
             // 章节 WebView 必须常驻：一旦从视图树里拿掉，WKWebView 就被销毁，
             // 再挂回来又要重新加载一次 HTML，白屏时间翻倍。
-            if !html.isEmpty {
-                reader
-            }
+            if isPDF {
+                pdfView
+            } else {
+                if !html.isEmpty {
+                    reader
+                }
 
-            if loading, html.isEmpty {
-                loadingView
-            } else if loading {
-                // 正文已经拿到、WebView 还在排版时盖一层加载提示，
-                // 不要让用户对着一片白屏等。
-                loadingOverlay
-            } else if let errorMessage, html.isEmpty {
-                errorView(errorMessage)
+                if loading, html.isEmpty {
+                    loadingView
+                } else if loading {
+                    // 正文已经拿到、WebView 还在排版时盖一层加载提示，
+                    // 不要让用户对着一片白屏等。
+                    loadingOverlay
+                } else if let errorMessage, html.isEmpty {
+                    errorView(errorMessage)
+                }
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) { topBar }
-        .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !isPDF { bottomBar }
+        }
         .overlay {
             if let request = noteRequest {
                 noteEditor(request)
@@ -167,16 +175,31 @@ struct WereadNativeReaderView: View {
             notesSheet
         }
         .fullScreenCover(isPresented: $showWeb) {
-            WereadReaderView(
-                target: WereadReaderTarget(
-                    url: "https://weread.qq.com/web/shelf",
-                    title: target.book.title,
-                    bookId: target.book.id,
-                    needsJump: true
-                )
-            )
+            WereadReaderView(target: webReaderTarget)
         }
         .onDisappear { saveProgress() }
+    }
+
+    /// PDF 直接给官方 `/web/reader/<hash>`，不再先落到网页书架自动点书。
+    /// 非 PDF 保持原来的书架兜底，避免改掉已有的阅读器地址处理逻辑。
+    private var webReaderTarget: WereadReaderTarget {
+        if isPDF,
+           let url = WereadService.shared.readerURLString(bookId: target.book.id)
+        {
+            return WereadReaderTarget(
+                url: url,
+                title: target.book.title,
+                bookId: target.book.id,
+                needsJump: false,
+                isPDF: true
+            )
+        }
+        return WereadReaderTarget(
+            url: "https://weread.qq.com/web/shelf",
+            title: target.book.title,
+            bookId: target.book.id,
+            needsJump: true
+        )
     }
 
     // MARK: - 页面
@@ -247,47 +270,60 @@ struct WereadNativeReaderView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Text(current?.title ?? "正在打开…")
+                Text(isPDF ? "PDF · 网页版阅读" : (current?.title ?? "正在打开…"))
                     .font(.system(size: 14, weight: .semibold))
                     .lineLimit(1)
             }
 
             Spacer(minLength: 4)
 
-            Button {
-                showChapters = true
-            } label: {
-                Image(systemName: "list.bullet")
-                    .font(.system(size: 15, weight: .semibold))
-                    .frame(width: 36, height: 36)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("目录")
-
-            Menu {
-                Button {
-                    Task { await reloadChapter() }
-                } label: {
-                    Label("重新加载本章", systemImage: "arrow.clockwise")
-                }
+            if isPDF {
                 Button {
                     showWeb = true
                 } label: {
-                    Label("网页版阅读器", systemImage: "safari")
+                    Image(systemName: "safari")
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("网页版阅读器")
+            } else {
                 Button {
-                    showNotes = true
+                    showChapters = true
                 } label: {
-                    Label("本章笔记（\(currentNoteEntries.count)）", systemImage: "text.quote")
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
                 }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 16, weight: .semibold))
-                    .frame(width: 36, height: 36)
-                    .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .accessibilityLabel("目录")
+
+                Menu {
+                    Button {
+                        Task { await reloadChapter() }
+                    } label: {
+                        Label("重新加载本章", systemImage: "arrow.clockwise")
+                    }
+                    Button {
+                        showWeb = true
+                    } label: {
+                        Label("网页版阅读器", systemImage: "safari")
+                    }
+                    Button {
+                        showNotes = true
+                    } label: {
+                        Label("本章笔记（\(currentNoteEntries.count)）", systemImage: "text.quote")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
@@ -340,6 +376,33 @@ struct WereadNativeReaderView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(32)
+    }
+
+    private var pdfView: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "doc.richtext")
+                .font(.system(size: 40))
+                .foregroundStyle(.secondary)
+            Text("《\(target.book.title)》是 PDF 书")
+                .font(.headline)
+                .multilineTextAlignment(.center)
+            Text("原生阅读器只支持 EPUB/TXT 的章节分片，PDF 直接读会空白或排版错乱。网页版会打开微读官方的 PDF 阅读页。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            Button {
+                showWeb = true
+            } label: {
+                Label("打开网页版 PDF 阅读器", systemImage: "safari")
+                    .font(.system(size: 15, weight: .semibold))
+            }
+            .buttonStyle(.borderedProminent)
+            Text("需要微读登录态；网页版打不开时请回书架检查登录。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(30)
     }
 
     /// 正文已到、WebView 还在排版时的过渡层。
@@ -588,6 +651,22 @@ struct WereadNativeReaderView: View {
     @MainActor
     private func load(force: Bool = false) async {
         if !force, !chapters.isEmpty { return }
+        let service = WereadService.shared
+        if service.isPDFBook(id: target.book.id) {
+            loadToken += 1
+            notesToken += 1
+            chapters = []
+            html = ""
+            cache = [:]
+            cacheOrder = []
+            highlights = [:]
+            serverNotes = [:]
+            isPDF = true
+            loading = false
+            errorMessage = nil
+            return
+        }
+        isPDF = false
         WereadService.resetScreenDiag()
         loadToken += 1
         let token = loadToken
@@ -601,7 +680,6 @@ struct WereadNativeReaderView: View {
         do {
             // 目录和阅读进度互不依赖，并行发出去，少等一个来回。
             // 这里直接走 service 而不是 store，避免并发闭包捕获 self。
-            let service = WereadService.shared
             let bookId = target.book.id
             let cookie = store.cookie
             Task { await loadBookmarks(bookId: bookId, cookie: cookie, token: bookmarkToken) }

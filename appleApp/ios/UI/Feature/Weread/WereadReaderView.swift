@@ -12,6 +12,23 @@ struct WereadReaderTarget: Identifiable {
     let bookId: String
     /// true = 没有阅读器地址，先落到网页书架再自动点开那本书。
     let needsJump: Bool
+    /// true = PDF 书。PDF 由网页阅读器用画布渲染，正文 `innerText`
+    /// 可能接近空，不能按「白屏」把它退回网页书架。
+    let isPDF: Bool
+
+    init(
+        url: String,
+        title: String,
+        bookId: String,
+        needsJump: Bool,
+        isPDF: Bool = false
+    ) {
+        self.url = url
+        self.title = title
+        self.bookId = bookId
+        self.needsJump = needsJump
+        self.isPDF = isPDF
+    }
 }
 
 /// 微信读书阅读器（网页版，全屏）。
@@ -41,6 +58,7 @@ struct WereadReaderView: View {
                 bookTitle: target.title,
                 bookId: target.bookId,
                 needsJump: target.needsJump,
+                isPDF: target.isPDF,
                 reloadToken: reloadToken,
                 isLoading: $isLoading,
                 inReader: $inReader
@@ -57,7 +75,11 @@ struct WereadReaderView: View {
                         Text("正在打开《\(target.title)》…")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                        Text("一直在转圈的话，等下会露出网页书架，点封面也能进")
+                        Text(
+                            target.isPDF
+                                ? "PDF 由微读官方网页阅读器渲染，首次打开会稍慢"
+                                : "一直在转圈的话，等下会露出网页书架，点封面也能进"
+                        )
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -116,6 +138,7 @@ private struct WereadReaderWebView: UIViewRepresentable {
     let bookTitle: String
     let bookId: String
     let needsJump: Bool
+    let isPDF: Bool
     let reloadToken: Int
     @Binding var isLoading: Bool
     @Binding var inReader: Bool
@@ -338,6 +361,21 @@ private struct WereadReaderWebView: UIViewRepresentable {
 
         /// 阅读器页可能只是「书不存在」的空壳（HTTP 200），看正文判断一下。
         private func verifyReader(in webView: WKWebView, url: String) {
+            // PDF 阅读页是画布，`innerText` 只有页码之类的 UI 文案，
+            // 甚至可能因为「第 3 / 404 页」被误判成 404。PDF 能停在
+            // `/web/reader/` 就按成功处理；真被服务端踢回书架时
+            // `didFinish` 的地址判断会走点击兜底。
+            if parent.isPDF {
+                readerVerified = true
+                watchdog?.cancel()
+                watchdog = nil
+                WereadStore.shared.rememberReaderLink(
+                    bookId: parent.bookId,
+                    title: parent.bookTitle,
+                    url: url
+                )
+                return
+            }
             checkedReader = true
             verifyAttempts = 0
             readerVerified = false

@@ -49,6 +49,10 @@ final class WereadService: @unchecked Sendable {
     /// 用锁保护：`content()` 在并发 prefetch 里会被同时调用。
     private let sessionLock = NSLock()
     private var sessionCache: [String: (value: WereadReaderSession, stamp: Date)] = [:]
+    /// `shelf/sync` 解析时见过的 PDF 书。原生阅读器只认 epub/txt 的章节分片，
+    /// PDF 要在读正文前分流到网页版，不能等 chapter 接口返回空 HTML 再补救。
+    private let pdfLock = NSLock()
+    private var pdfBookIDs = Set<String>()
     /// 信标有效期。`psvts` 会随时间失效，太短会反复抓页面，太长会拿到过期的。
     private static let sessionTTL: TimeInterval = 120
     /// 同一源 cookie 的并发续期只打一次服务端，其余调用等这一次结果。
@@ -1006,6 +1010,17 @@ final class WereadService: @unchecked Sendable {
         readerURL(bookId: bookId, chapterUid: chapterUid)?.absoluteString
     }
 
+    /// 这本书是否已在书架数据里标记为 PDF。
+    ///
+    /// 书架刷新会先把 `shelf/sync` 的原始 `books[]` 交给 `parseBook`，所以用户
+    /// 点进书时这里已经有结果，不需要再发一次详情请求。
+    func isPDFBook(id: String) -> Bool {
+        guard !id.isEmpty else { return false }
+        pdfLock.lock()
+        defer { pdfLock.unlock() }
+        return pdfBookIDs.contains(id)
+    }
+
     /// 公众号（`MP_WXS_` 开头的 bookId）走另一个阅读器路径。
     func mpReaderURL(bookId: String) -> URL? {
         guard !bookId.isEmpty else { return nil }
@@ -1209,6 +1224,7 @@ final class WereadService: @unchecked Sendable {
             (item["bookId"] as? String)
             ?? (item["bookId"] as? NSNumber)?.stringValue
         guard let bookId = bookId, !bookId.isEmpty else { return nil }
+        rememberBookFormat(bookId: bookId, item: item)
         let percent = percentValue(item)
         let updated = stampValue(item)
 
@@ -1221,6 +1237,62 @@ final class WereadService: @unchecked Sendable {
             finished: (intValue(item["finishReading"]) ?? 0) == 1,
             updatedAt: updated
         )
+    }
+
+    private func rememberBookFormat(bookId: String, item: [String: Any]) {
+        guard containsPDFMarker(item) else { return }
+        pdfLock.lock()
+        pdfBookIDs.insert(bookId)
+        pdfLock.unlock()
+    }
+
+    /// 兼容书架偶尔把书信息包一层 `bookInfo` 的写法。
+    private func containsPDFMarker(_ item: [String: Any]) -> Bool {
+        if isPDFBookInfo(item) { return true }
+        for key in ["bookInfo", "bookinfo"] {
+            if let nested = item[key] as? [String: Any], isPDFBookInfo(nested) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// 对齐 wereadx `M278.actualTreatBookFormatAs` / `isPDFBookType`：
+    /// `otherType[0].showType` 为真时以 `otherType[0].type` 为准，否则看
+    /// `format`；`type == 11` 单独表示 PDF 书。
+    private func isPDFBookInfo(_ info: [String: Any]) -> Bool {
+        if let other = (info["otherType"] as? [[String: Any]])?.first,
+           boolValue(other["showType"]) == true
+        {
+            // `showType` 为真时服务端以 `otherType[0].type` 覆盖 `format`，
+            // 不能再拿原始 `type == 11` 兜底，否则可能把别的格式误判成 PDF。
+            if let type = other["type"] as? String, !type.isEmpty {
+                let lower = type.lowercased()
+                return lower == "pdf" || lower == "11"
+            }
+            // 少数接口把 `otherType.type` 直接给成数字 11。
+            return intValue(other["type"]) == 11
+        }
+        if let format = info["format"] as? String, format.lowercased() == "pdf" {
+            return true
+        }
+        return intValue(info["type"]) == 11
+    }
+
+    private func boolValue(_ value: Any?) -> Bool? {
+        if let bool = value as? Bool { return bool }
+        if let number = value as? NSNumber { return number.boolValue }
+        if let string = value as? String {
+            switch string.lowercased() {
+            case "1", "true", "yes":
+                return true
+            case "0", "false", "no":
+                return false
+            default:
+                return nil
+            }
+        }
+        return nil
     }
 
     /// 正文里大量 `<img src="data:...">` 占位图会把 HTML 撑到几 MB，
