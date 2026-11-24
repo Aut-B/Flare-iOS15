@@ -34,6 +34,8 @@ final class WereadStore: ObservableObject {
     private let linksKey = "weread.readerLinks"
     private let linksByIdKey = "weread.readerLinksById"
     private let linksEpochKey = "weread.readerLinksEpoch"
+    /// 本机阅读进度：`weread.progress.<bookId>`。服务端上报失败/断网时靠它续读。
+    private let progressPrefix = "weread.progress."
     /// 缓存校验逻辑变了就换这个值：老版本把「白屏地址」也写进过缓存，
     /// 升级后自动丢一次，省得用户每本书点进去都是白的。
     private static let linksEpoch = "build77"
@@ -882,11 +884,83 @@ final class WereadStore: ObservableObject {
         }
     }
 
+    /// 本机上次阅读位置 + 服务端进度，按时间择新。
+    ///
+    /// 服务端 `updateTime` 比本机记录新（例如用户又用官方 App 读过）就用
+    /// 服务端，继续「继承其它 App 的进度」；本机记录更新或服务端没有时间戳
+    /// 时优先保住本机位置 —— 上报失败/断网时不能每次重进都从头开始。
     func progress(for bookId: String) async -> WereadProgress? {
-        try? await WereadService.shared.progress(bookId: bookId, cookie: cookie)
+        let local = storedProgress(bookId: bookId)
+        var remote: WereadService.ProgressSnapshot?
+        do {
+            // 走统一鉴权恢复：cookie 刚好过期时先续期，再读服务端进度；
+            // 否则本次会拿 nil，用户仍会从第一章开始。
+            remote = try await withSessionRecovery { attemptCookie in
+                try await WereadService.shared.progressSnapshot(
+                    bookId: bookId,
+                    cookie: attemptCookie
+                )
+            }
+        } catch {
+            remote = nil
+            WereadService.screenDiag(
+                "进度服务端读取失败 book=\(bookId) \(error.localizedDescription)"
+            )
+        }
+
+        let localText = local.map {
+            "\($0.chapterUid)/\($0.chapterOffset)@\(Int($0.savedAt))"
+        } ?? "nil"
+        let remoteText = remote.map {
+            "\($0.chapterUid)/\($0.chapterOffset)@\(Int($0.updatedAt))"
+        } ?? "nil"
+        WereadService.screenDiag(
+            "进度 book=\(bookId) local=\(localText) remote=\(remoteText)"
+        )
+
+        switch (local, remote) {
+        case let (local?, nil):
+            return local.progress
+        case let (nil, remote?):
+            remember(remote, bookId: bookId)
+            return remote.progress
+        case let (local?, remote?):
+            if remote.updatedAt > 0, remote.updatedAt > local.savedAt {
+                remember(remote, bookId: bookId)
+                return remote.progress
+            }
+            return local.progress
+        case (nil, nil):
+            return nil
+        }
     }
 
-    func report(bookId: String, chapterUid: Int, offset: Int, chapterIndex: Int) {
+    /// 只落本机，不上报：滚动过程中定期存一份，App 被杀掉也能续读。
+    func cacheProgress(bookId: String, chapterUid: Int, offset: Int, percent: Int) {
+        guard !bookId.isEmpty, chapterUid > 0 else { return }
+        storeProgress(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            chapterOffset: max(offset, 0),
+            percent: min(max(percent, 0), 100)
+        )
+    }
+
+    func report(
+        bookId: String,
+        chapterUid: Int,
+        offset: Int,
+        chapterIndex: Int,
+        percent: Int = 0
+    ) {
+        guard !bookId.isEmpty, chapterUid > 0 else { return }
+        // 先落本机：断网、未登录或服务端不认上报时，重进仍能回到原位。
+        cacheProgress(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            offset: offset,
+            percent: percent
+        )
         let cookie = cookie
         guard !cookie.isEmpty else { return }
         Task.detached(priority: .utility) {
@@ -898,6 +972,58 @@ final class WereadStore: ObservableObject {
                 cookie: cookie
             )
         }
+    }
+
+    private func progressKey(_ bookId: String) -> String {
+        progressPrefix + bookId
+    }
+
+    private func storedProgress(bookId: String) -> WereadStoredProgress? {
+        guard !bookId.isEmpty, let data = defaults.data(forKey: progressKey(bookId)) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(WereadStoredProgress.self, from: data)
+    }
+
+    private func storeProgress(bookId: String, chapterUid: Int, chapterOffset: Int, percent: Int) {
+        let value = WereadStoredProgress(
+            chapterUid: chapterUid,
+            chapterOffset: chapterOffset,
+            percent: percent,
+            savedAt: Date().timeIntervalSince1970
+        )
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        defaults.set(data, forKey: progressKey(bookId))
+    }
+
+    /// 服务端进度在本地留一份：下次断网/未登录也能续读。
+    private func remember(_ remote: WereadService.ProgressSnapshot, bookId: String) {
+        guard remote.chapterUid > 0 else { return }
+        let value = WereadStoredProgress(
+            chapterUid: remote.chapterUid,
+            chapterOffset: remote.chapterOffset,
+            percent: remote.percent,
+            savedAt: remote.updatedAt
+        )
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        defaults.set(data, forKey: progressKey(bookId))
+    }
+}
+
+/// 本机阅读进度缓存。`savedAt` 是本地保存时间（秒），用来和服务端
+/// `updateTime` 比较，决定这次续读听谁的。
+private struct WereadStoredProgress: Codable {
+    let chapterUid: Int
+    let chapterOffset: Int
+    let percent: Int
+    let savedAt: TimeInterval
+
+    var progress: WereadProgress {
+        WereadProgress(
+            chapterUid: chapterUid,
+            chapterOffset: chapterOffset,
+            percent: percent
+        )
     }
 }
 

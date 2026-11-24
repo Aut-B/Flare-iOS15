@@ -48,13 +48,23 @@ struct WereadNativeReaderView: View {
     @State private var notesError: String?
     @State private var showNotes = false
     @State private var scrollFraction: Double = 0
-    /// 进章后要跳到的章内比例（0~1）。只在「打开这本书」时用一次，
+    /// 当前滚动位置对应的章内字符偏移（和微读 `chapterOffset` 同一口径）。
+    /// 比比例更耐排版变化，上报和续读都用它。
+    @State private var scrollOffset = 0
+    /// 进章后要跳到的章内字符偏移。只在「打开这本书」时用一次，
     /// 翻章/重载都不该复用 —— 那些场景本来就要从头看。
+    @State private var restoreOffset = 0
+    /// 进章后要跳到的章内比例（0~1），文本长度量不出来时兜底。
     @State private var restoreFraction: Double = 0
-    /// 待执行的滚动请求。非 nil 时 `updateUIView` 会把它发给 JS 的 `__wrScrollTo`，
+    /// 当前章是否已经真正渲染出来。没渲染完就退出时不能把「0」当成
+    /// 用户的阅读位置写回本地，否则会把上次读到的地方覆盖成章首。
+    @State private var chapterReady = false
+    /// 待执行的滚动请求。非 nil 时 `updateUIView` 会把它发给 JS，
     /// 发完立刻清空；用「值变化」驱动而不是闭包，避免 WebView 重建后请求丢失。
-    @State private var scrollRequest: Double?
+    @State private var scrollRequest: WereadScrollTarget?
     @State private var loadToken = 0
+    /// 滚动时定期落本机的节流时间（秒）。
+    @State private var lastCachedAt: TimeInterval = 0
     /// JS 点「想法」后发起的输入请求。走 SwiftUI 浮层而不是 `window.prompt`，
     /// 不依赖 WKUIDelegate 的 UIKit 弹窗回调链。
     @State private var noteRequest: WereadNoteRequest?
@@ -231,6 +241,7 @@ struct WereadNativeReaderView: View {
         // 记住生成这个 reader 时的加载代次；`onReady` 是 escaping 闭包，
         // 会晚于翻章触发，代次不一致就说明是上一章的渲染完成。
         let token = loadToken
+        let chapterUid = current?.uid ?? 0
         let reply = noteReply
         return WereadChapterWebView(
             html: html,
@@ -266,8 +277,25 @@ struct WereadNativeReaderView: View {
                     )
                 }
             },
-            onScroll: { value in
-                scrollFraction = min(max(value, 0), 1)
+            onScroll: { value, offset in
+                // 旧页面的 pagehide / 迟到的滚动消息不能覆盖新章节的位置。
+                guard token == self.loadToken else { return }
+                let fraction = min(max(value, 0), 1)
+                let position = max(offset, 0)
+                scrollFraction = fraction
+                scrollOffset = position
+                chapterReady = true
+                // 滚动中每 2 秒落一次本机；正常退出仍由 saveProgress 兜底。
+                let now = Date().timeIntervalSince1970
+                if chapterUid > 0, now - lastCachedAt > 2 {
+                    lastCachedAt = now
+                    store.cacheProgress(
+                        bookId: target.book.id,
+                        chapterUid: chapterUid,
+                        offset: position,
+                        percent: Int(fraction * 100)
+                    )
+                }
             },
             noteReply: reply,
             onNoteRequest: { text in
@@ -282,6 +310,7 @@ struct WereadNativeReaderView: View {
             scrollRequest: scrollRequest,
             onScrollApplied: {
                 // 请求已经交给 WebView，清掉，避免下次 updateUIView 重复滚。
+                guard token == self.loadToken else { return }
                 if scrollRequest != nil { scrollRequest = nil }
             },
             onReady: {
@@ -700,7 +729,7 @@ struct WereadNativeReaderView: View {
             let bookId = target.book.id
             let cookie = store.cookie
             Task { await loadBookmarks(bookId: bookId, cookie: cookie, token: bookmarkToken) }
-            async let progressTask = service.progress(bookId: bookId, cookie: cookie)
+            async let progressTask = store.progress(for: bookId)
             let list = try await store.chapters(for: target.book.id)
             guard token == loadToken else { return }
             // 目录为空时 store.chapters 已经抛错；这里再兜一次，
@@ -714,20 +743,35 @@ struct WereadNativeReaderView: View {
             chapters = list
 
             var start = 0
-            // 续读位置：以前只拿 chapterUid 定位到「章」，chapterOffset 取了
-            // 却从没用过，所以每次重开都停在章首。这里把它换成章内比例，
-            // 等 WebView 渲染完再滚过去（见 restoreFraction）。
-            var resume: Double = 0
-            if let progress = try? await progressTask,
-               let position = list.firstIndex(where: { $0.uid == progress.chapterUid }) {
-                start = position
-                let words = max(list[position].wordCount, 1)
-                if progress.chapterOffset > 0 {
-                    resume = min(max(Double(progress.chapterOffset) / Double(words), 0), 1)
+            // 续读位置：章由 chapterUid 定位，章内位置优先用字符偏移。
+            // 以前只把 offset 换成比例、比例又依赖 wordCount，wordCount 为 0
+            // 时会直接算成 1.0 跳到章尾；这里把 offset 原样交给 WebView，
+            // 由 JS 按正文文本长度定位，比例只做兜底（见 restoreOffset）。
+            var resumeOffset = 0
+            var resumeFraction: Double = 0
+            if let progress = await progressTask {
+                let position = list.firstIndex { $0.uid == progress.chapterUid }
+                if let position {
+                    start = position
+                    if progress.chapterOffset > 0 {
+                        resumeOffset = progress.chapterOffset
+                        let words = list[position].wordCount
+                        if words > 0 {
+                            resumeFraction = min(
+                                max(Double(progress.chapterOffset) / Double(words), 0),
+                                1
+                            )
+                        }
+                    } else if progress.percent > 0 {
+                        resumeFraction = min(max(Double(progress.percent) / 100, 0), 1)
+                    }
                 }
             }
             index = start
-            restoreFraction = resume
+            restoreOffset = resumeOffset
+            restoreFraction = resumeFraction
+            scrollOffset = resumeOffset
+            scrollFraction = resumeFraction
             await loadChapter(at: start, token: token)
         } catch {
             guard token == loadToken else { return }
@@ -780,6 +824,7 @@ struct WereadNativeReaderView: View {
         cache[current.uid] = nil
         cacheOrder.removeAll { $0 == current.uid }
         // 重新加载本章是用户主动动作，从章首开始，不要复用续读位置。
+        restoreOffset = 0
         restoreFraction = 0
         loadToken += 1
         await loadChapter(at: index, token: loadToken)
@@ -790,6 +835,9 @@ struct WereadNativeReaderView: View {
         guard chapters.indices.contains(position) else { return }
         guard position != index else { return }
         saveProgress()
+        // 手动翻章从章首开始，不能把「打开这本书」的续读位置带过去。
+        restoreOffset = 0
+        restoreFraction = 0
         loadToken += 1
         await loadChapter(at: position, token: loadToken)
     }
@@ -799,6 +847,11 @@ struct WereadNativeReaderView: View {
         guard chapters.indices.contains(position) else { return }
         index = position
         scrollFraction = 0
+        scrollOffset = 0
+        chapterReady = false
+        lastCachedAt = 0
+        // 上一章还没执行完的续读滚动不能落到新章上。
+        scrollRequest = nil
         loading = true
         errorMessage = nil
         // 换章时上一章的待处理想法必须丢掉，否则会包到新章的文本上。
@@ -820,6 +873,7 @@ struct WereadNativeReaderView: View {
             html = cached
             await waitForRender(token: token)
             restoreScrollIfNeeded(token: token)
+            if token == loadToken { chapterReady = true }
             prefetch(after: position)
             return
         }
@@ -834,6 +888,7 @@ struct WereadNativeReaderView: View {
             // 用户看到的是白屏。等 `onReady` 或超时兜底。
             await waitForRender(token: token)
             restoreScrollIfNeeded(token: token)
+            if token == loadToken { chapterReady = true }
             prefetch(after: position)
         } catch {
             guard token == loadToken else { return }
@@ -862,11 +917,20 @@ struct WereadNativeReaderView: View {
     /// 否则后面手动翻章会被反复拽回原位（用户会觉得页面在抢滚动）。
     /// 调用点都在 `waitForRender` 之后，确保 DOM 已排版，`scrollTo` 才有意义。
     private func restoreScrollIfNeeded(token: Int) {
+        let offset = restoreOffset
         let fraction = restoreFraction
-        guard fraction > 0.001, token == loadToken else { return }
+        guard token == loadToken else { return }
+        restoreOffset = 0
         restoreFraction = 0
+        guard offset > 0 || fraction > 0.001 else { return }
+        // 先把「目标位置」记成本地状态：即使滚动因图片未加载完失败，
+        // 退出时也不会把刚恢复到的位置又覆盖成 0。
+        scrollOffset = offset
         scrollFraction = fraction
-        scrollRequest = fraction
+        WereadService.screenDiag(
+            "进度恢复 book=\(target.book.id) chapter=\(current?.uid ?? 0) offset=\(offset) fraction=\(Int((fraction * 100).rounded()))%"
+        )
+        scrollRequest = WereadScrollTarget(offset: offset, fraction: fraction)
     }
 
     /// 等 WebView 真正渲染完（`didFinish` / JS `ready`）。
@@ -907,13 +971,17 @@ struct WereadNativeReaderView: View {
     }
 
     private func saveProgress() {
-        guard let current else { return }
-        let offset = Int(Double(max(current.wordCount, 1)) * scrollFraction)
+        guard chapterReady, let current else { return }
+        var offset = scrollOffset
+        if offset <= 0, scrollFraction > 0.001 {
+            offset = Int(Double(max(current.wordCount, 1)) * scrollFraction)
+        }
         store.report(
             bookId: target.book.id,
             chapterUid: current.uid,
-            offset: offset,
-            chapterIndex: index
+            offset: max(offset, 0),
+            chapterIndex: current.index,
+            percent: Int((scrollFraction * 100).rounded())
         )
     }
 }
@@ -964,6 +1032,12 @@ private struct WereadNoteRequest: Identifiable {
     let text: String
 }
 
+/// 一次续读滚动请求：优先按章内字符偏移定位，比例只在量不出文本长度时兜底。
+private struct WereadScrollTarget: Equatable {
+    let offset: Int
+    let fraction: Double
+}
+
 /// SwiftUI 回传给 JS 的结果；`text == nil` 表示取消。
 private struct WereadNoteReply: Equatable {
     let id: Int
@@ -978,12 +1052,12 @@ private struct WereadChapterWebView: UIViewRepresentable {
     let cookie: String
     let highlights: [WereadHighlight]
     let onHighlight: (WereadHighlight) -> Void
-    let onScroll: (Double) -> Void
+    let onScroll: (Double, Int) -> Void
     let noteReply: WereadNoteReply?
     let onNoteRequest: (String) -> Void
     let onNoteReplyApplied: () -> Void
-    /// 待执行的章内滚动比例。非 nil 时在页面 ready 之后滚过去。
-    let scrollRequest: Double?
+    /// 待执行的续读位置。非 nil 时在页面 ready 之后滚过去。
+    let scrollRequest: WereadScrollTarget?
     /// 滚动请求已经处理（无论成功失败都要回调，否则会一直重试）。
     let onScrollApplied: () -> Void
     let onReady: () -> Void
@@ -1035,7 +1109,9 @@ private struct WereadChapterWebView: UIViewRepresentable {
         private var lastNoteReplyID: Int?
         private var loaded = false
         /// 页面还没 ready 时收到的滚动请求，等 `markReady` 再补执行。
-        private var pendingScroll: Double?
+        private var pendingScroll: WereadScrollTarget?
+        /// 页面高度还没撑开时的重试次数。
+        private var scrollRetries = 0
 
         init(_ parent: WereadChapterWebView) {
             self.parent = parent
@@ -1046,6 +1122,8 @@ private struct WereadChapterWebView: UIViewRepresentable {
             lastHTML = html
             lastHighlights = ""
             loaded = false
+            pendingScroll = nil
+            scrollRetries = 0
             install(cookies: cookie, in: webView) {
                 webView.loadHTMLString(html, baseURL: baseURL)
             }
@@ -1093,41 +1171,59 @@ private struct WereadChapterWebView: UIViewRepresentable {
             return "JSON.parse(\"\(escaped)\")"
         }
 
-        /// 在页面 ready 之后把 WebView 滚到指定比例。
+        /// 在页面 ready 之后把 WebView 滚到指定位置。
         ///
         /// 只在 `loaded == true` 时执行：排版前 `scrollTo` 会落到 0（页面高度还是 0），
         /// 那就是「每次都回到章首」的老毛病。还没 ready 就先记着，等 `markReady` 再补。
-        func requestScroll(_ fraction: Double?, in webView: WKWebView) {
-            guard let fraction = fraction else { return }
+        func requestScroll(_ target: WereadScrollTarget?, in webView: WKWebView) {
+            guard let target = target else { return }
             guard loaded else {
-                pendingScroll = fraction
+                pendingScroll = target
                 return
             }
-            performScroll(fraction, in: webView)
+            scrollRetries = 0
+            performScroll(target, in: webView)
         }
 
-        private func performScroll(_ fraction: Double, in webView: WKWebView) {
-            pendingScroll = nil
-            let clamped = min(max(fraction, 0), 1)
+        private func performScroll(_ target: WereadScrollTarget, in webView: WKWebView) {
+            pendingScroll = target
             let script = """
-            (function(){
-              var h = document.documentElement;
-              var max = h.scrollHeight - window.innerHeight;
-              if (!(max > 0)) { return false; }
-              window.scrollTo(0, Math.round(max * \(clamped)));
-              return true;
-            })()
+            window.__wrRestoreProgress(\(target.offset), \(target.fraction));
             """
             webView.evaluateJavaScript(script) { value, error in
                 if let error = error {
                     Self.log.error(
                         "weread restore scroll failed: \(String(describing: error), privacy: .public)"
                     )
-                } else if (value as? Bool) == false {
-                    Self.log.debug("weread restore scroll skipped: page not scrollable yet")
+                    // 页面脚本还没装好时 evaluate 会报 undefined；和
+                    // 「页面还不可滚动」一样重试，不能第一次失败就放弃。
+                    self.retryScroll(in: webView)
+                    return
                 }
-                // 无论成败都清掉请求：失败时反复重试只会和用户手动滚动打架。
+                if (value as? Bool) == true {
+                    self.pendingScroll = nil
+                    self.scrollRetries = 0
+                    DispatchQueue.main.async { self.parent.onScrollApplied() }
+                    return
+                }
+                // 图片还没加载完时页面可能量不出可滚动高度。隔一会儿再试，
+                // 不要一次失败就放弃 —— 那就是「回到章首」的直接原因。
+                self.retryScroll(in: webView)
+            }
+        }
+
+        private func retryScroll(in webView: WKWebView) {
+            if scrollRetries >= 8 {
+                Self.log.debug("weread restore scroll gave up before page was scrollable")
+                pendingScroll = nil
+                scrollRetries = 0
                 DispatchQueue.main.async { self.parent.onScrollApplied() }
+                return
+            }
+            scrollRetries += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                guard let pending = self.pendingScroll else { return }
+                self.performScroll(pending, in: webView)
             }
         }
 
@@ -1158,6 +1254,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 apply(parent.highlights, in: webView)
                 // 排版完成后再补执行挂起的续读滚动。
                 if let pending = pendingScroll {
+                    scrollRetries = 0
                     performScroll(pending, in: webView)
                 }
             }
@@ -1201,8 +1298,9 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 }
             case "scroll":
                 let value = (body["value"] as? NSNumber)?.doubleValue ?? 0
+                let offset = (body["offset"] as? NSNumber)?.intValue ?? 0
                 DispatchQueue.main.async {
-                    self.parent.onScroll(value)
+                    self.parent.onScroll(value, offset)
                 }
             default:
                 break
@@ -1605,15 +1703,169 @@ enum WereadReaderHTML {
                 });
             };
 
-            var last = 0;
-            window.addEventListener('scroll', function () {
+            // —— 阅读进度：续读定位 + 位置上报 ——
+            // Swift 传进来的 offset 是章内字符偏移（和微读 chapterOffset 同口径）；
+            // fraction 只在正文还没量出文本长度时兜底。
+            var pendingRestore = null;
+            var restoreAt = 0;
+            // 恢复落点和上报取样必须用同一个视口锚点，否则每进一次会漂一行。
+            var progressAnchorY = 48;
+            // 取样点要落在视口顶部那一行的字形盒里，不能正好压在行的上边界上，
+            // 否则 caretRangeFromPoint 可能取到上一行，每重进一次就往上漂一行。
+            var progressProbeY = progressAnchorY + 12;
+            var scrollStopTimer = 0;
+
+            function textNodeAt(root, offset) {
+                var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+                var remaining = offset;
+                var last = null;
+                var node = null;
+                while ((node = walker.nextNode())) {
+                    var value = node.nodeValue || '';
+                    if (!value.length) continue;
+                    if (remaining < value.length) return { node: node, at: remaining };
+                    remaining -= value.length;
+                    last = node;
+                }
+                // offset 正好落在文末：退到最后一个字符，保证还能量出矩形。
+                if (last) return { node: last, at: last.nodeValue.length - 1 };
+                return null;
+            }
+
+            function applyRestore() {
+                if (!pendingRestore) return true;
+                // 用户已经自己滑动/点按，就别再按旧位置把人拽回去。
+                if (pendingRestore.moved) return true;
+                var root = document.getElementById('wr-content');
+                var max = document.documentElement.scrollHeight - window.innerHeight;
+                if (!(max > 0)) return false;
+                var target = 0;
+                var found = false;
+                if (pendingRestore.offset > 0 && root) {
+                    var position = textNodeAt(root, pendingRestore.offset);
+                    if (position) {
+                        try {
+                            var length = position.node.nodeValue.length;
+                            var range = document.createRange();
+                            range.setStart(position.node, position.at);
+                            range.setEnd(
+                                position.node,
+                                Math.min(position.at + 1, length)
+                            );
+                            var rect = range.getBoundingClientRect();
+                            target = window.scrollY + rect.top - progressAnchorY;
+                            found = true;
+                        } catch (e) {}
+                    }
+                    if (!found) {
+                        var total = String(root.textContent || '').length;
+                        if (total > 0) {
+                            target = max * Math.min(pendingRestore.offset / total, 1);
+                        }
+                    }
+                }
+                // 只有「按 offset 根本没定位到」时才用比例兜底；定位到章首
+                // 附近（target <= 0）是合法结果，不能再用比例把人往前推。
+                if (!found && pendingRestore.fraction > 0) {
+                    target = max * Math.min(Math.max(pendingRestore.fraction, 0), 1);
+                }
+                target = Math.min(Math.max(target, 0), max);
+                restoreAt = Date.now();
+                window.scrollTo(0, Math.round(target));
+                pendingRestore.applied = true;
+                return true;
+            }
+
+            window.__wrRestoreProgress = function (offset, fraction) {
+                pendingRestore = {
+                    offset: Number(offset) || 0,
+                    fraction: Number(fraction) || 0,
+                    applied: false,
+                    moved: false
+                };
+                return applyRestore();
+            };
+
+            // 图片加载完正文会重新排版，落点会偏；再校一次。用户已经自己
+            // 滚动过就不再拽回去。
+            window.addEventListener('load', function () {
+                if (pendingRestore && !pendingRestore.moved) applyRestore();
+            });
+
+            // 视口顶部那一行对应的章内字符偏移。取不到文本节点时按比例折算。
+            function currentOffset() {
+                var root = document.getElementById('wr-content');
+                if (!root) return 0;
+                try {
+                    if (document.caretRangeFromPoint) {
+                        var caret = document.caretRangeFromPoint(
+                            window.innerWidth / 2,
+                            progressProbeY
+                        );
+                        if (caret && root.contains(caret.startContainer)) {
+                            var probe = document.createRange();
+                            probe.setStart(root, 0);
+                            probe.setEnd(caret.startContainer, caret.startOffset);
+                            return String(probe.toString() || '').length;
+                        }
+                    }
+                } catch (e) {}
+                var max = document.documentElement.scrollHeight - window.innerHeight;
+                var total = String(root.textContent || '').length;
+                if (!(max > 0) || total <= 0) return 0;
+                var ratio = Math.min(Math.max(window.scrollY / max, 0), 1);
+                return Math.round(total * ratio);
+            }
+
+            var lastReport = 0;
+            var lastSent = null;
+
+            function restoring() {
+                return pendingRestore && !pendingRestore.moved;
+            }
+
+            function reportScroll(force) {
+                // 恢复本身也会触发 scroll；这时候报上去的落点和 Swift 记的目标
+                // 可能差一行，反复进出就会漂。恢复阶段先不报，等用户自己滚动。
+                if (restoring()) return;
                 var max = document.documentElement.scrollHeight - window.innerHeight;
                 var value = max > 0 ? window.scrollY / max : 0;
+                var offset = currentOffset();
                 var now = Date.now();
-                if (now - last < 300) return;
-                last = now;
-                window.webkit.messageHandlers.weread.postMessage({ type: 'scroll', value: value });
+                if (!force && now - lastReport < 200) return;
+                lastReport = now;
+                if (lastSent && lastSent.value === value && lastSent.offset === offset) return;
+                lastSent = { value: value, offset: offset };
+                window.webkit.messageHandlers.weread.postMessage({
+                    type: 'scroll',
+                    value: value,
+                    offset: offset
+                });
+            }
+
+            window.addEventListener('scroll', function () {
+                if (pendingRestore && !pendingRestore.moved && Date.now() - restoreAt > 400) {
+                    pendingRestore.moved = true;
+                    reportScroll(true);
+                }
+                reportScroll(false);
+                // 老 iOS 没有 scrollend：滚动停下 180ms 后强制补一次，
+                // 惯性滚动结束后的最终位置才不会被 200ms 节流吞掉。
+                clearTimeout(scrollStopTimer);
+                scrollStopTimer = setTimeout(function () { reportScroll(true); }, 180);
             }, { passive: true });
+
+            // 手指一碰就代表用户接管阅读位置，恢复阶段立即结束。
+            ['touchstart', 'mousedown'].forEach(function (name) {
+                window.addEventListener(name, function () {
+                    if (pendingRestore) pendingRestore.moved = true;
+                }, { passive: true });
+            });
+
+            // 退出前/手指松开时立刻补一次，别被 200ms 节流吞掉最后一段。
+            ['touchend', 'scrollend', 'pagehide'].forEach(function (name) {
+                window.addEventListener(name, function () { reportScroll(true); }, { passive: true });
+            });
 
             window.webkit.messageHandlers.weread.postMessage({ type: 'ready' });
         })();

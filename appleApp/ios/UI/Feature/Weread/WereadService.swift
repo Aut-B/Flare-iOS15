@@ -763,7 +763,41 @@ final class WereadService: @unchecked Sendable {
 
     // MARK: - 进度
 
+    /// 带服务端时间戳的进度快照。`updatedAt` 是 `updateTime` 换算成秒；
+    /// 服务端没给时为 0，交给上层决定要不要信本地记录。
+    struct ProgressSnapshot: Sendable {
+        let chapterUid: Int
+        let chapterOffset: Int
+        let percent: Int
+        let updatedAt: TimeInterval
+
+        var progress: WereadProgress {
+            WereadProgress(
+                chapterUid: chapterUid,
+                chapterOffset: chapterOffset,
+                percent: percent
+            )
+        }
+    }
+
     func progress(bookId: String, cookie: String) async throws -> WereadProgress? {
+        guard let snapshot = try await progressSnapshot(bookId: bookId, cookie: cookie) else {
+            return nil
+        }
+        return WereadProgress(
+            chapterUid: snapshot.chapterUid,
+            chapterOffset: snapshot.chapterOffset,
+            percent: snapshot.percent
+        )
+    }
+
+    /// 拉这本书的阅读进度。
+    ///
+    /// `/web/book/getProgress` 真机响应是**顶层平铺**
+    /// （`{"bookId":...,"chapterUid":5,"chapterOffset":330,...}`），
+    /// 旧代码只认 `json["book"]`，于是明明有进度也被当成「没读过」，
+    /// 每次打开都从第一章开始。这里同时兼容 `book` / `data` 包一层的形态。
+    func progressSnapshot(bookId: String, cookie: String) async throws -> ProgressSnapshot? {
         let url = URL(string: "\(base)/web/book/getProgress?bookId=\(bookId)")!
         var request = URLRequest(url: url)
         request.setValue(cookie, forHTTPHeaderField: "Cookie")
@@ -771,14 +805,84 @@ final class WereadService: @unchecked Sendable {
         let data = try await send(request)
         let json = try parseObject(data)
         // 没读过时接口会给 errCode，当作「没有进度」处理，不弹错误。
-        if let code = intValue(json["errCode"]), code != 0 { return nil }
+        if let code = intValue(json["errCode"]) ?? intValue(json["errcode"]), code != 0 {
+            return nil
+        }
 
-        guard let book = json["book"] as? [String: Any] else { return nil }
-        return WereadProgress(
-            chapterUid: intValue(book["chapterUid"]) ?? 0,
-            chapterOffset: intValue(book["chapterOffset"]) ?? 0,
-            percent: intValue(book["progress"]) ?? 0
+        guard let node = progressNode(in: json) else { return nil }
+        let chapterUid =
+            intValue(node["chapterUid"])
+            ?? intValue(node["chapter_uid"])
+            ?? intValue(node["chapterId"])
+            ?? 0
+        let chapterOffset =
+            intValue(node["chapterOffset"])
+            ?? intValue(node["chapter_offset"])
+            ?? 0
+        // `progress` 是整本书的 0-100 百分比，不是章内比例；拿它当
+        // 章内进度会把「读到全书一半」错误地滚到本章一半。章内兜底
+        // 只认明确带 chapter 前缀的字段。
+        let percent =
+            intValue(node["chapterProgress"])
+            ?? intValue(node["chapter_progress"])
+            ?? intValue(node["chapterPercent"])
+            ?? intValue(node["chapter_percent"])
+            ?? 0
+        // 没有 chapterUid 就无法定位到章，offset 再大也不能可靠恢复。
+        guard chapterUid > 0 else { return nil }
+        let chapterPercent = min(max(percent, 0), 100)
+
+        var stampNodes: [[String: Any]] = [node]
+        if let nested = node["progress"] as? [String: Any] { stampNodes.append(nested) }
+        if let list = node["progress"] as? [[String: Any]], let first = list.first {
+            stampNodes.append(first)
+        }
+        let rawStamp =
+            stampNodes.compactMap { intValue($0["updateTime"]) ?? intValue($0["update_time"]) }.first
+            ?? intValue(json["updateTime"])
+            ?? intValue(json["update_time"])
+            ?? intValue(json["readUpdateTime"])
+            ?? intValue(json["read_update_time"])
+            ?? 0
+        // 微读时间戳有时是毫秒。
+        let updatedAt = rawStamp > 100_000_000_000
+            ? Double(rawStamp) / 1000
+            : Double(rawStamp)
+
+        return ProgressSnapshot(
+            chapterUid: chapterUid,
+            chapterOffset: chapterOffset,
+            percent: chapterPercent,
+            updatedAt: updatedAt
         )
+    }
+
+    /// 找真正带进度字段的那一层：顶层优先，其次 `book` / `data` / `bookInfo`。
+    private func progressNode(in json: [String: Any]) -> [String: Any]? {
+        var containers: [[String: Any]] = [json]
+        for key in ["book", "bookInfo", "bookinfo", "data"] {
+            guard let layer = json[key] as? [String: Any] else { continue }
+            containers.append(layer)
+            if let nested = layer["book"] as? [String: Any] { containers.append(nested) }
+            if let nested = layer["bookInfo"] as? [String: Any] { containers.append(nested) }
+        }
+        var nodes: [[String: Any]] = []
+        for item in containers {
+            nodes.append(item)
+            if let nested = item["progress"] as? [String: Any] { nodes.append(nested) }
+            if let list = item["progress"] as? [[String: Any]] {
+                nodes.append(contentsOf: list)
+            }
+        }
+        // 先认真正带章节号的节点：顶层可能只有 `progress` 数组，不能
+        // 挡住含 chapterUid 的 `book` / `data` / `progress[]`。`chapterUid`
+        // 为 0 的节点也不能选，否则会在目录里永远匹配不到章。
+        return nodes.first { node in
+            (intValue(node["chapterUid"])
+                ?? intValue(node["chapter_uid"])
+                ?? intValue(node["chapterId"])
+                ?? 0) > 0
+        }
     }
 
     /// 上报阅读进度。失败不抛错 —— 进度丢一次不影响读书。
