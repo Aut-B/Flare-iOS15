@@ -40,6 +40,12 @@ enum LaunchCrashTrace {
         // 必须赶在打开 crash.log（O_TRUNC）之前读上次现场：O_TRUNC 会立刻把文件清零，
         // 之后再 readLog() 只能读到空文件，横幅和恢复页拿到的 lastCrash 永远是空串。
         previous = readLog()
+        // 同理：stderr.log 本次会被 O_TRUNC。用户崩完重新打开 App 才能导出，
+        // 所以先把上次的尾部读进内存，拼进崩溃记录里直接显示。
+        // 只在确实有上次崩溃记录时拼，避免首次启动凭空造出一条「上次崩溃」。
+        if let record = previous, let tail = readStderrTail(), !tail.isEmpty {
+            previous = record + "\n# 上次启动 stderr 末尾（运行时 trap 原文）\n" + tail
+        }
 
         try? FileManager.default.createDirectory(
             atPath: directory,
@@ -48,8 +54,28 @@ enum LaunchCrashTrace {
         )
         excludeFromBackup(directory)
 
+        // 本次的 crash.log / stderr.log 都是 O_TRUNC。用户往往在重新打开 App 后
+        // 才去「文件」里导出，不先改名的话，上一轮现场已经被清空 —— 导出包里
+        // 只剩一个空 crash.log。改名保留成 *.last.log，目录自带上一轮现场。
+        rotateLog(named: "crash.log", to: "crash.last.log", in: directory)
+        rotateLog(named: "stderr.log", to: "stderr.last.log", in: directory)
+
         crashFd = open("\(directory)/crash.log", O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR)
         stageFd = open("\(directory)/stage.log", O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR)
+
+        // SIGTRAP 大多是 Swift 运行时 trap：`fatalError` / 强解包 nil / 数组越界
+        // 都会先把 `Fatal error: ...` 或 `Swift runtime failure: ...` 写进 stderr，
+        // 再执行 trap 指令。设备上的 stderr 只进系统控制台，用户导不出来，
+        // 于是日志里只剩一个 sig=05、没有任何原因。这里把 fd 2 接到 Documents
+        // 下的文件，用户导出 flare-launch 目录就能看到 trap 原文。
+        redirectStandardError(to: directory)
+
+        // image 清单要同时进两处：images.log（单独一份，好翻）和 crash.log 尾部
+        // （信号路径原样追加，导出一个文件就能看到栈 + 全部 image）。
+        // 文本在 install 阶段构造一次，信号处理只读烘好的常量块。
+        let imageList = imageListText()
+        writeImageList(imageList, to: directory)
+        imageListBlob = StaticBytes(imageList)
 
         // 事先把信号处理要用的东西全部烘进这块常量表：两个 fd + 路径 C 串 +
         // 每种信号每个阶段的整行。信号处理只持有它，不碰任何可变静态。
@@ -67,6 +93,13 @@ enum LaunchCrashTrace {
             _ = lseek(crashFd, 0, SEEK_SET)
         }
         writeImageBase(to: crashFd, stage: Stage.initEntered.name)
+        if crashFd >= 0 {
+            // 没有构建号就没法确定该拿哪个二进制做 atos，这行必须跟着栈一起导出。
+            writeBuildInfo(to: crashFd)
+            let text = "# images 清单附在栈后，同内容见 flare-launch/images.log\n"
+                + "# 运行时 trap 原文（若有）见 flare-launch/stderr.log\n"
+            text.withCString { _ = Darwin.write(crashFd, $0, strlen($0)) }
+        }
 
         // 预热信号路径会读到的所有文件级常量。Swift 的 `let` 全局是懒初始化的，
         // 第一次访问会走一次运行时检查；提前在这里读一遍，信号处理里就不会有第一次。
@@ -100,6 +133,7 @@ enum LaunchCrashTrace {
         _ = lineFooter.length
         _ = backtraceDepth
         _ = fatalTable != nil
+        _ = imageListBlob != nil
         _ = SIG_DFL
         _ = STDERR_FILENO
         _ = F_GETFL
@@ -126,6 +160,11 @@ enum LaunchCrashTrace {
         guard crashFd >= 0 else { return }
         let text = "\(header)\n  reason: \(reason)\n  stage: \(stage)\n  stack:\n    \(stack)\n\n"
         text.withCString { _ = Darwin.write(crashFd, $0, strlen($0)) }
+        // 这条路径随后会 raise(SIGABRT) 且已把处理器换回 SIG_DFL，信号处理不会再跑，
+        // 所以 image 清单只在这里补一次，不会重复。
+        if let blob = imageListBlob, blob.length > 0 {
+            _ = Darwin.write(crashFd, blob.pointer, blob.length)
+        }
     }
 
     private static func readLog() -> String? {
@@ -151,6 +190,9 @@ enum LaunchCrashTrace {
 /// 不写成 `LaunchCrashTrace` 的静态属性，是为了在信号上下文里取它时不必再
 /// 经过 Swift 的可变静态访问检查。
 private nonisolated(unsafe) var fatalTable: FatalTable?
+
+/// 本次启动的 image 清单，install 阶段烘成常量块。信号处理里只读，不构造 String。
+private nonisolated(unsafe) var imageListBlob: StaticBytes?
 
 /// 信号处理只认这 6 个信号，下标即查表位置。
 /// 放成文件级 `let`：表在 install 阶段就构造好，签名里再复用它，
@@ -211,7 +253,8 @@ private let flareSignalHandler: @convention(c) (Int32) -> Void = flareSignalHand
 /// 栈最多取多少帧。`backtrace` 本身是固定开销，只需要一块足够大的指针数组。
 private nonisolated let backtraceDepth: Int32 = 64
 /// 崩溃日志读取上限（字节），防止无限读。
-private let LOG_READ_LIMIT: Int = 64 * 1024
+/// 栈后面跟着几百个 image 的清单（约 30~50KB），64KB 会把尾部截掉，放宽到 128KB。
+private let LOG_READ_LIMIT: Int = 128 * 1024
 
 private struct FatalTable {
     /// 同上，但挂在实例上：信号处理里不触发 `static let` 的懒初始化检查。
@@ -317,6 +360,11 @@ private struct FatalTable {
             _ = Darwin.write(STDERR_FILENO, rowStart, length)
         }
         writeBacktrace(to: fd)
+        // 栈后紧跟本次启动的 image 清单（install 阶段烘好的常量块）。
+        // 只进文件，不走 stderr：几百行路径刷在设备控制台里只会盖住有用信息。
+        if let blob = imageListBlob, blob.length > 0, fd >= 0 {
+            _ = Darwin.write(fd, blob.pointer, blob.length)
+        }
     }
 
     /// 把当前线程调用栈写进 fd。
@@ -426,6 +474,116 @@ private func writeImageBase(to fd: Int32, stage: String) {
     let slide = _dyld_get_image_vmaddr_slide(0)
     let text = "image-base 0x\(String(headerAddress, radix: 16)) slide \(slide) stage \(stage)\n"
     text.withCString { _ = Darwin.write(fd, $0, strlen($0)) }
+}
+
+/// 构建号 + 系统版本 + 机型。普通线程上下文（install 阶段）调用。
+/// 用户导出的日志要能对上具体构建的 `Flare.app`，否则 `atos` 用的二进制可能不是同一个。
+private func writeBuildInfo(to fd: Int32) {
+    guard fd >= 0 else { return }
+    let info = Bundle.main.infoDictionary
+    let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+    let build = info?["CFBundleVersion"] as? String ?? "?"
+    let system = ProcessInfo.processInfo.operatingSystemVersionString
+    let text = "app \(version) (\(build)) \(system) \(machineIdentifier())\n"
+    text.withCString { _ = Darwin.write(fd, $0, strlen($0)) }
+}
+
+/// `hw.machine`，例如 `iPhone16,2`（15 Pro Max）。
+/// 本文件不 import UIKit，用 `uname` 取，避免为一个字符串把 UIKit 拖进启动路径。
+private func machineIdentifier() -> String {
+    var info = utsname()
+    guard uname(&info) == 0 else { return "?" }
+    let capacity = MemoryLayout.size(ofValue: info.machine)
+    return withUnsafePointer(to: &info.machine) { pointer in
+        pointer.withMemoryRebound(to: CChar.self, capacity: capacity) { String(cString: $0) }
+    }
+}
+
+/// 本次启动已加载的全部 image：`0x<base> slide <slide> <path>`，按 base 升序。
+/// 普通线程上下文（install 阶段）调用，可以用 Foundation 和字符串。
+///
+/// 为什么需要：崩溃栈里是绝对地址，而 `image-base` 那行只给了主二进制。
+/// 15PM 那份日志里 `#00`（0x10d44da94）与 image-base（0x1022d8000）相差
+/// 约 0xB1C5A94（≈186MB）——主二进制是否真有这么大，静态判断不了；但只拿
+/// 主二进制去 `atos` 就默认了帧一定在主二进制里，这一步本身没有依据。
+/// 有了这份清单，才能按帧地址挑出真正包含它的 image 再符号化。
+/// 注意：只含 install 时刻已加载的 image，之后再 dlopen 的库不在此列。
+private func imageListText() -> String {
+    var images: [(base: UInt, slide: Int, path: String)] = []
+    let count = _dyld_image_count()
+    for index in 0..<count {
+        guard let header = _dyld_get_image_header(index) else { continue }
+        let base = UInt(bitPattern: UnsafeRawPointer(header))
+        let path = _dyld_get_image_name(index).map { String(cString: $0) } ?? "?"
+        images.append((base: base, slide: _dyld_get_image_vmaddr_slide(index), path: path))
+    }
+    images.sort { $0.base < $1.base }
+
+    var text = """
+    # images \(images.count)：本次启动已加载的 image，按 base 升序。
+    # 帧地址满足 base_i ≤ frame < base_i+1 即属于第 i 个 image；最后一行上界是进程地址空间末尾。
+    # 符号化：atos -o "<path>" -l 0x<base> 0x<frame>（arm64e 设备加 -arch arm64e）
+
+    """
+    for image in images {
+        text += "0x\(String(image.base, radix: 16)) slide \(image.slide) \(image.path)\n"
+    }
+    return text
+}
+
+/// 把 image 清单写成独立的 `images.log`，方便单独导出和 `grep`。
+private func writeImageList(_ text: String, to directory: String) {
+    let fd = open("\(directory)/images.log", O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR)
+    guard fd >= 0 else { return }
+    defer { close(fd) }
+    text.withCString { _ = Darwin.write(fd, $0, strlen($0)) }
+}
+
+/// 把进程的 fd 2 接到 `stderr.log`。
+///
+/// Swift 运行时在 trap 前写的 `Fatal error:` / `Swift runtime failure:` 都走 stderr；
+/// 设备上它只进系统控制台，用户导出不了。这里只做 `dup2`，不碰 `setvbuf`：
+/// 重定向后 stderr 默认仍是无缓冲，崩溃前那行不会被吞。
+///
+/// 失败就保持原样（系统控制台），不影响启动；日志能力本身不能成为新的崩溃源。
+private func redirectStandardError(to directory: String) {
+    let fd = open("\(directory)/stderr.log", O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR)
+    guard fd >= 0 else { return }
+    _ = dup2(fd, STDERR_FILENO)
+    // fd 2 本来就被关掉时，open 可能正好返回 2；这时 dup2 是空操作，
+    // 再 close 会把 stderr 关死，信号路径那几行 stderr 兜底也跟着没了。
+    if fd != STDERR_FILENO { close(fd) }
+}
+
+/// 把上一轮的日志改名为 `*.last.log`，保留原始现场。
+/// 必须在本次以 O_TRUNC 打开同名文件之前调用。
+private func rotateLog(named name: String, to lastName: String, in directory: String) {
+    let current = "\(directory)/\(name)"
+    guard FileManager.default.fileExists(atPath: current) else { return }
+    let last = "\(directory)/\(lastName)"
+    try? FileManager.default.removeItem(atPath: last)
+    try? FileManager.default.moveItem(atPath: current, toPath: last)
+}
+
+/// 读上次 `stderr.log` 的尾部。运行时 trap 那几行在最后，只留 4KB 足够，
+/// 免得把几百行无关输出塞进恢复页。
+private func readStderrTail() -> String? {
+    let path = "\(NSHomeDirectory())/Documents/flare-launch/stderr.log"
+    guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+    defer { try? handle.close() }
+    let size = handle.seekToEndOfFile()
+    guard size > 0 else { return nil }
+    let limit: UInt64 = 4096
+    _ = try? handle.seek(toOffset: size > limit ? size - limit : 0)
+    guard let data = try? handle.readToEnd(), !data.isEmpty else { return nil }
+    // 截断点可能切开一个 UTF-8 序列，用 lossy 解码，别因为一个坏字节把整段丢掉。
+    var text = String(decoding: data, as: UTF8.self)
+    // 从中间截断可能切开一行/一个 UTF-8 序列：丢掉第一个不完整行。
+    if size > limit, let newline = text.firstIndex(of: "\n") {
+        text = String(text[text.index(after: newline)...])
+    }
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
 }
 
 extension LaunchCrashTrace {
