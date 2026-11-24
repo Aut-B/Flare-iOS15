@@ -324,6 +324,12 @@ struct WereadNativeReaderView: View {
                 guard token == self.loadToken else { return }
                 handleChapterLink(text, href: href)
             },
+            onAnnotationLink: { href, text in
+                // 正文里批注/想法/高亮的蓝色可点元素指向 /web/review/...
+                // 或相对伪地址时也不该真的导航，统一落到本章笔记面板。
+                guard token == self.loadToken else { return }
+                handleAnnotationLink(text, href: href)
+            },
             noteReply: reply,
             onNoteRequest: { text in
                 // 浮层已经开着时忽略重复请求，避免 JS 的待处理选区被覆盖。
@@ -912,6 +918,20 @@ struct WereadNativeReaderView: View {
         showChapters = true
     }
 
+    /// 正文里批注/想法/高亮的蓝色可点元素：不请求它指向的地址，
+    /// 打开本章笔记面板。能按文字对上一条笔记时只记诊断，面板里可直接看。
+    private func handleAnnotationLink(_ text: String, href: String = "") {
+        let link = href.isEmpty ? "-" : String(href.prefix(120))
+        let key = normalizedText(text)
+        let matched = !key.isEmpty && currentNoteEntries.contains {
+            normalizedText($0.text) == key
+        }
+        WereadService.screenDiag(
+            "批注蓝条→笔记面板 matched=\(matched ? 1 : 0) \(link)"
+        )
+        showNotes = true
+    }
+
     private func chapterTitleKey(_ text: String) -> String {
         text
             .replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
@@ -1148,6 +1168,9 @@ private struct WereadChapterWebView: UIViewRepresentable {
     /// 章节内相对链接（epub/azw3 的 partNNNN.html#...）被点击。
     /// 参数是原始 href 和链接文字，由 Swift 侧对回目录再跳章。
     let onChapterLink: (String, String) -> Void
+    /// 正文里批注/想法/高亮的蓝色可点元素被点击。
+    /// 参数是原始 href 和元素文字，由 Swift 侧打开本章笔记面板。
+    let onAnnotationLink: (String, String) -> Void
     let noteReply: WereadNoteReply?
     let onNoteRequest: (String) -> Void
     let onNoteReplyApplied: () -> Void
@@ -1365,16 +1388,35 @@ private struct WereadChapterWebView: UIViewRepresentable {
             let isChapterFile = path.hasSuffix(".html")
                 || path.hasSuffix(".htm")
                 || path.hasSuffix(".xhtml")
-            guard isChapterFile, url.host == "weread.qq.com" else {
-                decisionHandler(.allow)
+            let isWeread = url.host == "weread.qq.com"
+            // 批注/想法详情页（`/web/review/...`）在静态章节页的会话里
+            // 同样会落到 404，属于本批要拦的「批注蓝条」，不是章文件。
+            // 放在章节判断之前：批注链接也可能带 `.html` 后缀。
+            let isAnnotationPath = path.hasPrefix("/web/review")
+                || path.contains("/review/detail/")
+            if isWeread, isAnnotationPath {
+                decisionHandler(.cancel)
+                let href = url.absoluteString
+                WereadService.screenDiag(
+                    "已拦截批注伪链接 path=\(String(url.path.prefix(120)))"
+                )
+                DispatchQueue.main.async {
+                    self.parent.onAnnotationLink(href, "")
+                }
                 return
             }
-            decisionHandler(.cancel)
-            let href = url.absoluteString
-            WereadService.screenDiag("已拦截章节伪链接 path=\(String(url.path.prefix(120)))")
-            DispatchQueue.main.async {
-                self.parent.onChapterLink(href, "")
+            if isWeread, isChapterFile {
+                decisionHandler(.cancel)
+                let href = url.absoluteString
+                WereadService.screenDiag(
+                    "已拦截章节伪链接 path=\(String(url.path.prefix(120)))"
+                )
+                DispatchQueue.main.async {
+                    self.parent.onChapterLink(href, "")
+                }
+                return
             }
+            decisionHandler(.allow)
         }
 
         /// 页面可交互了：恢复本地划线，并通知 SwiftUI 收起加载层。
@@ -1438,6 +1480,12 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 let text = (body["text"] as? String) ?? ""
                 DispatchQueue.main.async {
                     self.parent.onChapterLink(href, text)
+                }
+            case "annotationLink":
+                let href = (body["href"] as? String) ?? ""
+                let text = (body["text"] as? String) ?? ""
+                DispatchQueue.main.async {
+                    self.parent.onAnnotationLink(href, text)
                 }
             default:
                 break
@@ -1709,7 +1757,113 @@ enum WereadReaderHTML {
                 return null;
             }
 
+            // 正文里的「批注蓝条」不止 <a href>：服务端章节 HTML 还会用
+            // data-review-id / data-note-id / .wr_highlight_char 标出想法
+            // 或高亮，官方阅读器的点按逻辑会跳到 `/web/review/...`。
+            // 静态章节页没有那套路由，点了就 404；这里统一拦下来交给 Swift
+            // 打开本章笔记面板。脚注（data-wr-footernote）是原地气泡，不拦。
+            var NOTE_ATTRS = [
+                'data-review-id', 'data-reviewid',
+                'data-note-id', 'data-noteid',
+                'data-bookmark-id', 'data-bookmarkid'
+            ];
+
+            function annotationHint(value) {
+                if (!value) return '';
+                var lower = String(value).toLowerCase();
+                if (lower.indexOf('/web/review') >= 0) return 'review';
+                if (lower.indexOf('reviewid') >= 0) return 'review';
+                if (lower.indexOf('gotoreview') >= 0) return 'review';
+                if (lower.indexOf('bookmarkid') >= 0) return 'bookmark';
+                if (lower.indexOf('shownote') >= 0) return 'note';
+                if (lower.indexOf('weread://') === 0
+                    && lower.indexOf('note') >= 0) return 'note';
+                return '';
+            }
+
+            function annotationHref(node) {
+                if (!node || node.nodeType !== 1) return '';
+                var attrs = ['href', 'data-href', 'data-url', 'data-link'];
+                for (var i = 0; i < attrs.length; i++) {
+                    var raw = node.getAttribute(attrs[i]);
+                    if (!raw) continue;
+                    var value = String(raw).trim();
+                    if (!value) continue;
+                    var lower = value.toLowerCase();
+                    // 章内脚注锚点交给浏览器原地滚，不算批注链接。
+                    if (lower.charAt(0) === '#') continue;
+                    if (lower.indexOf('javascript:') === 0) {
+                        if (annotationHint(value)) return value.slice(0, 200);
+                        continue;
+                    }
+                    return value.slice(0, 200);
+                }
+                return '';
+            }
+
+            function annotationMark(node) {
+                if (!node || node.nodeType !== 1) return '';
+                if (annotationHint(node.getAttribute('onclick'))) return 'onclick';
+                for (var i = 0; i < NOTE_ATTRS.length; i++) {
+                    var raw = node.getAttribute(NOTE_ATTRS[i]);
+                    if (raw && String(raw).trim()) return NOTE_ATTRS[i];
+                }
+                var cls = String(node.getAttribute('class') || '');
+                if (/(^|\\s)(wr_highlight\\w*|reader_note|reader_review)(\\s|$)/i.test(cls)) {
+                    return 'class';
+                }
+                if (node.tagName && node.tagName.toLowerCase() === 'mark'
+                    && /(^|\\s)wr-hl(\\s|$)/i.test(cls)
+                    && String(node.getAttribute('data-note') || '').trim()) {
+                    return 'mark';
+                }
+                if (annotationHint(node.getAttribute('href'))) return 'href';
+                return '';
+            }
+
+            function annotationLinkTarget(start) {
+                var node = start;
+                var depth = 0;
+                while (node && node !== document && depth < 8) {
+                    if (node.nodeType === 1) {
+                        if (annotationMark(node)) {
+                            var href = annotationHref(node);
+                            var text = '';
+                            try {
+                                text = node.innerText || node.textContent || '';
+                            } catch (e) { text = ''; }
+                            if (!text) {
+                                text = node.getAttribute('title')
+                                    || node.getAttribute('aria-label')
+                                    || '';
+                            }
+                            return {
+                                node: node,
+                                href: href,
+                                text: String(text).replace(/\\s+/g, ' ').trim().slice(0, 80)
+                            };
+                        }
+                    }
+                    node = node.parentElement;
+                    depth += 1;
+                }
+                return null;
+            }
+
             document.addEventListener('click', function (event) {
+                // 批注优先：蓝条可能同时带 `partNNNN.html` 和批注标记，
+                // 这种情况要进笔记面板，不能当成目录链接去换章。
+                var noteHit = annotationLinkTarget(event.target);
+                if (noteHit) {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    window.webkit.messageHandlers.weread.postMessage({
+                        type: 'annotationLink',
+                        href: noteHit.href,
+                        text: noteHit.text
+                    });
+                    return;
+                }
                 var hit = chapterLinkTarget(event.target);
                 if (!hit) return;
                 // 用 stopImmediatePropagation：stopPropagation 不拦同一元素上
