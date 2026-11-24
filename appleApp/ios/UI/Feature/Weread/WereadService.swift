@@ -845,12 +845,21 @@ final class WereadService: @unchecked Sendable {
         let json = try parseObject(data)
         try checkError(json)
 
-        guard let updated = json["updated"] as? [[String: Any]] else {
-            Self.screenDiag("bookmarklist book=\(bookId) 响应缺少 updated[]")
+        let updated: [[String: Any]]
+        if let list = json["updated"] as? [[String: Any]] {
+            updated = list
+        } else if !json.keys.contains("updated") {
+            // 这本书在服务端没有划线时，接口返回 200 + `{}`，不是坏响应。
+            updated = []
+            let message = "bookmarklist book=\(bookId) 无 updated[]，按无服务端笔记处理"
+            Self.screenDiag(message)
+            FlareDiagnostics.shared.record(.weread, "RES", message)
+        } else {
+            Self.screenDiag("bookmarklist book=\(bookId) updated[] 类型错误")
             FlareDiagnostics.shared.record(
                 .weread,
                 "ERR",
-                "bookmarklist book=\(bookId) 响应缺少 updated[]"
+                "bookmarklist book=\(bookId) updated[] 类型错误"
             )
             throw WereadError.decodeFailed
         }
