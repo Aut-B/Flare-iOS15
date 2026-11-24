@@ -317,12 +317,12 @@ struct WereadNativeReaderView: View {
                     )
                 }
             },
-            onChapterLink: { _, text in
+            onChapterLink: { href, text in
                 // 章节 HTML 里的 partNNNN.html 相对链接在 loadHTMLString 的
                 // 站点根基址下会变成 404。能对上目录就按目录跳章，对不上
                 // 就弹目录让用户自己选，绝不让 WebView 去请求那个假地址。
                 guard token == self.loadToken else { return }
-                handleChapterLink(text)
+                handleChapterLink(text, href: href)
             },
             noteReply: reply,
             onNoteRequest: { text in
@@ -901,11 +901,14 @@ struct WereadNativeReaderView: View {
 
     /// 相对章节链接的落点：能对上目录就跳章，对不上就弹目录兜底。
     /// 宁可多弹一次目录，也不要让链接静默失效或落进 404。
-    private func handleChapterLink(_ text: String) {
+    private func handleChapterLink(_ text: String, href: String = "") {
+        let link = href.isEmpty ? "-" : String(href.prefix(120))
         if let position = chapterPosition(forLinkText: text) {
+            WereadService.screenDiag("目录链接→第\(position + 1)章 \(link)")
             Task { await open(position) }
             return
         }
+        WereadService.screenDiag("目录链接未匹配，打开目录 \(link)")
         showChapters = true
     }
 
@@ -1338,32 +1341,40 @@ private struct WereadChapterWebView: UIViewRepresentable {
             markReady(in: webView)
         }
 
-        /// 兜底：JS 拦不到的章节相对链接（比如 target=_blank 或多指点击）
-        /// 也不要真的去请求 `partNNNN.html` —— 服务端没有这个文件，只会 404。
-        /// 直接取消，交给 Swift 按目录跳章或弹目录。
+        /// 兜底：JS 拦不到的章节链接（onclick / JS 改 location、target=_blank、
+        /// 多指点击等）也不要真的去请求 `partNNNN.html` —— 服务端没有这个
+        /// 文件，只会把 WebView 带到 404 页。
+        ///
+        /// 这里不能要求 `navigationType == .linkActivated`：JS 路由式跳转在
+        /// WKWebView 里的类型是 `.other`，按类型过滤就会把 404 放过去。
         func webView(
             _ webView: WKWebView,
             decidePolicyFor navigationAction: WKNavigationAction,
             decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
         ) {
-            guard
-                navigationAction.navigationType == .linkActivated,
-                let url = navigationAction.request.url
-            else {
+            guard let url = navigationAction.request.url else {
+                decisionHandler(.allow)
+                return
+            }
+            // 只处理主框架；章节页里的子框架导航与跳章无关。
+            if let frame = navigationAction.targetFrame, !frame.isMainFrame {
                 decisionHandler(.allow)
                 return
             }
             let path = url.path.lowercased()
-            let isChapterFile = path.hasSuffix(".html") || path.hasSuffix(".xhtml")
-            if isChapterFile, url.host == "weread.qq.com" {
-                decisionHandler(.cancel)
-                let text = navigationAction.request.url?.fragment ?? ""
-                DispatchQueue.main.async {
-                    self.parent.onChapterLink(url.absoluteString, text)
-                }
+            let isChapterFile = path.hasSuffix(".html")
+                || path.hasSuffix(".htm")
+                || path.hasSuffix(".xhtml")
+            guard isChapterFile, url.host == "weread.qq.com" else {
+                decisionHandler(.allow)
                 return
             }
-            decisionHandler(.allow)
+            decisionHandler(.cancel)
+            let href = url.absoluteString
+            WereadService.screenDiag("已拦截章节伪链接 path=\(String(url.path.prefix(120)))")
+            DispatchQueue.main.async {
+                self.parent.onChapterLink(href, "")
+            }
         }
 
         /// 页面可交互了：恢复本地划线，并通知 SwiftUI 收起加载层。
@@ -1625,35 +1636,87 @@ enum WereadReaderHTML {
             // epub/azw3 的章内链接是 `part0012.html#chapter_3` 这种相对地址。
             // 页面是 loadHTMLString 生成的，基址是站点根，直接放行会请求
             // 一个不存在的 partNNNN.html（404）。这里拦下来交给 Swift 按目录跳章。
-            function chapterHref(anchor) {
-                var raw = anchor.getAttribute('href') || '';
-                if (!raw || raw.charAt(0) === '#') return '';
-                var lower = raw.toLowerCase();
+            //
+            // 蓝色可点文字不一定写成 `<a href>`：打包后的页面里还有
+            // `data-href` / `data-url` / `onclick="location='part0003.html'"`。
+            // 只认 `<a href>` 会漏拦，所以两类都抽。
+            var CHAPTER_ATTRS = [
+                'href', 'data-href', 'data-url', 'data-src',
+                'data-target', 'data-link', 'data-chapter', 'data-chapter-url'
+            ];
+
+            function chapterHrefFrom(raw) {
+                if (!raw) return '';
+                var value = String(raw).trim();
+                if (!value) return '';
+                var lower = value.toLowerCase();
+                if (lower.charAt(0) === '#') return '';
                 if (lower.indexOf('javascript:') === 0) return '';
-                if (lower.indexOf('http://') === 0 || lower.indexOf('https://') === 0) return '';
-                if (lower.indexOf('//') === 0) return '';
                 if (lower.indexOf('mailto:') === 0 || lower.indexOf('tel:') === 0) return '';
                 if (lower.indexOf('data:') === 0) return '';
-                // 只拦「章文件」：part0012.html / chapter_3.xhtml 这类，
-                // 以及带 # 的跨文档锚点。图片、样式等相对资源放行。
-                // 站点绝对路径（/web/...）不拦，那是微读自己的页面。
-                if (lower.charAt(0) === '/') return '';
-                var file = lower.split('#')[0];
-                if (!file) return '';
-                var isChapterFile = /\\.(html?|xhtml)(\\?|$)/.test(file);
-                if (!isChapterFile && lower.indexOf('#') < 0) return '';
-                return raw;
-            }
-            document.addEventListener('click', function (event) {
-                var node = event.target;
-                while (node && node !== document && node.tagName !== 'A') {
-                    node = node.parentElement;
+                // 外链、协议相对地址放行；微读本站的绝对地址还原成相对路径。
+                if (lower.indexOf('//') === 0) return '';
+                if (lower.indexOf('http://') === 0 || lower.indexOf('https://') === 0) {
+                    if (lower.indexOf('https://weread.qq.com/') !== 0
+                        && lower.indexOf('http://weread.qq.com/') !== 0) return '';
+                    value = value.replace(/^https?:\\/\\/weread\\.qq\\.com/i, '');
+                    if (value.charAt(0) !== '/') return '';
+                    value = value.slice(1);
+                    lower = value.toLowerCase();
                 }
-                if (!node || node.tagName !== 'A') return;
-                var href = chapterHref(node);
-                if (!href) return;
+                // 站点绝对路径（/web/...）不拦，那是微读自己的页面。
+                if (value.charAt(0) === '/') return '';
+                var file = lower.split('#')[0].split('?')[0];
+                if (!file) return '';
+                return /\\.(html?|xhtml)$/.test(file) ? value : '';
+            }
+
+            // 从 onclick / javascript: 里抠章文件名，例如
+            // `javascript:location='part0003.html#c1'`。
+            function chapterFileIn(text) {
+                if (!text) return '';
+                var pattern = /(?:\\.{0,2}\\/)?[A-Za-z0-9_\\-.\\/%]+\\.(?:html?|xhtml)(?:\\?[^'"\\s)]*)?(?:#[^'"\\s)]*)?/ig;
+                var match;
+                while ((match = pattern.exec(String(text))) !== null) {
+                    var candidate = chapterHrefFrom(match[0]);
+                    if (candidate) return candidate;
+                }
+                return '';
+            }
+
+            function chapterHref(node) {
+                if (!node || node.nodeType !== 1) return '';
+                for (var i = 0; i < CHAPTER_ATTRS.length; i++) {
+                    var candidate = chapterHrefFrom(node.getAttribute(CHAPTER_ATTRS[i]));
+                    if (candidate) return candidate;
+                }
+                return chapterFileIn(
+                    node.getAttribute('onclick') || node.getAttribute('href') || ''
+                );
+            }
+
+            function chapterLinkTarget(start) {
+                var node = start;
+                var depth = 0;
+                while (node && node !== document && depth < 8) {
+                    if (node.nodeType === 1) {
+                        var href = chapterHref(node);
+                        if (href) return { node: node, href: href };
+                    }
+                    node = node.parentElement;
+                    depth += 1;
+                }
+                return null;
+            }
+
+            document.addEventListener('click', function (event) {
+                var hit = chapterLinkTarget(event.target);
+                if (!hit) return;
+                // 用 stopImmediatePropagation：stopPropagation 不拦同一元素上
+                // 其它 listener，微读页面自己绑的跳转仍可能把 404 放出去。
                 event.preventDefault();
-                event.stopPropagation();
+                event.stopImmediatePropagation();
+                var href = hit.href;
                 // 同一篇里的脚注锚点（`part0012.html#note3` 但 note3 就在
                 // 本文档里）直接滚过去，不要当成换章。
                 var hashAt = href.indexOf('#');
@@ -1670,16 +1733,19 @@ enum WereadReaderHTML {
                         return;
                     }
                 }
+                var text = '';
+                try {
+                    text = hit.node.innerText || hit.node.textContent || '';
+                } catch (e) { text = ''; }
+                if (!text) {
+                    text = hit.node.getAttribute('title')
+                        || hit.node.getAttribute('aria-label')
+                        || '';
+                }
                 window.webkit.messageHandlers.weread.postMessage({
                     type: 'chapterLink',
                     href: href,
-                    text: String(
-                        node.innerText
-                        || node.textContent
-                        || node.getAttribute('title')
-                        || node.getAttribute('aria-label')
-                        || ''
-                    ).trim()
+                    text: String(text).trim()
                 });
             }, true);
 
