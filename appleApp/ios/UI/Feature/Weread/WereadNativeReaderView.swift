@@ -2,6 +2,7 @@ import SwiftUI
 import WebKit
 import UIKit
 import os
+import FlareAppleCore
 
 /// 原生书架点书后直接打开的目标。
 struct WereadNativeTarget: Identifiable {
@@ -24,6 +25,7 @@ struct WereadNativeReaderView: View {
 
     @ObservedObject private var store = WereadStore.shared
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var chapters: [WereadChapter] = []
     @State private var index = 0
@@ -59,6 +61,10 @@ struct WereadNativeReaderView: View {
     /// 当前章是否已经真正渲染出来。没渲染完就退出时不能把「0」当成
     /// 用户的阅读位置写回本地，否则会把上次读到的地方覆盖成章首。
     @State private var chapterReady = false
+    /// 本章是否已经有可信位置（用户滚动过，或续读目标非 0）。
+    /// 只有 true 才允许保存：打开书就退出时不能把章首 0 写成本机最新进度，
+    /// 否则本机时间戳永远比官方新，下次就再也继承不到官方进度。
+    @State private var hasReadingPosition = false
     /// 待执行的滚动请求。非 nil 时 `updateUIView` 会把它发给 JS，
     /// 发完立刻清空；用「值变化」驱动而不是闭包，避免 WebView 重建后请求丢失。
     @State private var scrollRequest: WereadScrollTarget?
@@ -211,6 +217,11 @@ struct WereadNativeReaderView: View {
             WereadReaderView(target: webReaderTarget)
         }
         .onDisappear { saveProgress() }
+        // 切后台/被系统回收前再落一次；强杀无法拦截，滚动节流和续读
+        // 目标落盘才是「读到一半被杀」的主要保障。
+        .backportOnChange(of: scenePhase) { _, phase in
+            if phase != .active { saveProgress() }
+        }
     }
 
     /// PDF 直接给官方 `/web/reader/<hash>`，不再先落到网页书架自动点书。
@@ -292,6 +303,8 @@ struct WereadNativeReaderView: View {
                 scrollFraction = fraction
                 scrollOffset = position
                 chapterReady = true
+                // 能收到滚动消息说明用户已经接管位置（恢复阶段 JS 不报）。
+                hasReadingPosition = true
                 // 滚动中每 2 秒落一次本机；正常退出仍由 saveProgress 兜底。
                 let now = Date().timeIntervalSince1970
                 if chapterUid > 0, now - lastCachedAt > 2 {
@@ -769,11 +782,16 @@ struct WereadNativeReaderView: View {
                     if progress.chapterOffset > 0 {
                         resumeOffset = progress.chapterOffset
                         let words = list[position].wordCount
-                        if words > 0 {
+                        // offset 超过章节字数时 ratio 会被截成 1；一旦 DOM
+                        // 定位失败就会直接跳到章尾。宁可不用这个比例，
+                        // 改用服务端给的章内百分比。
+                        if words > 0, progress.chapterOffset <= words {
                             resumeFraction = min(
                                 max(Double(progress.chapterOffset) / Double(words), 0),
                                 1
                             )
+                        } else if progress.percent > 0 {
+                            resumeFraction = min(max(Double(progress.percent) / 100, 0), 1)
                         }
                     } else if progress.percent > 0 {
                         resumeFraction = min(max(Double(progress.percent) / 100, 0), 1)
@@ -905,6 +923,7 @@ struct WereadNativeReaderView: View {
         scrollFraction = 0
         scrollOffset = 0
         chapterReady = false
+        hasReadingPosition = false
         lastCachedAt = 0
         // 上一章还没执行完的续读滚动不能落到新章上。
         scrollRequest = nil
@@ -979,10 +998,21 @@ struct WereadNativeReaderView: View {
         restoreOffset = 0
         restoreFraction = 0
         guard offset > 0 || fraction > 0.001 else { return }
+        hasReadingPosition = true
         // 先把「目标位置」记成本地状态：即使滚动因图片未加载完失败，
         // 退出时也不会把刚恢复到的位置又覆盖成 0。
         scrollOffset = offset
         scrollFraction = fraction
+        // 续读目标本身也要立刻落本机：用户恢复后不再滚动就强杀时，
+        // 之前只有 onScroll/onDisappear 会写，目标位置会丢。
+        if let chapter = current, chapter.uid > 0 {
+            store.cacheProgress(
+                bookId: target.book.id,
+                chapterUid: chapter.uid,
+                offset: offset,
+                percent: Int((fraction * 100).rounded())
+            )
+        }
         WereadService.screenDiag(
             "进度恢复 book=\(target.book.id) chapter=\(current?.uid ?? 0) offset=\(offset) fraction=\(Int((fraction * 100).rounded()))%"
         )
@@ -1027,11 +1057,14 @@ struct WereadNativeReaderView: View {
     }
 
     private func saveProgress() {
-        guard chapterReady, let current else { return }
+        guard chapterReady, hasReadingPosition, let current else { return }
         var offset = scrollOffset
         if offset <= 0, scrollFraction > 0.001 {
             offset = Int(Double(max(current.wordCount, 1)) * scrollFraction)
         }
+        WereadService.screenDiag(
+            "进度保存 book=\(target.book.id) chapter=\(current.uid) offset=\(max(offset, 0)) percent=\(Int((scrollFraction * 100).rounded()))"
+        )
         store.report(
             bookId: target.book.id,
             chapterUid: current.uid,
@@ -1895,7 +1928,14 @@ enum WereadReaderHTML {
                 if (!(max > 0)) return false;
                 var target = 0;
                 var found = false;
-                if (pendingRestore.offset > 0 && root) {
+                var total = root ? String(root.textContent || '').length : 0;
+                // 官方 chapterOffset 和 DOM 文本口径可能不同（TXT 章节会
+                // 去掉行首空白/空行，长度偏短）。offset 明显超过 DOM 全长时
+                // textNodeAt 会退到最后一个字符，反而跳到章尾；这种时候只用
+                // 比例兜底，宁可略偏也不要固定跑到章尾。
+                var offsetTooLarge = total > 0
+                    && pendingRestore.offset > Math.max(total * 1.5, total + 2000);
+                if (pendingRestore.offset > 0 && root && !offsetTooLarge) {
                     var position = textNodeAt(root, pendingRestore.offset);
                     if (position) {
                         try {
@@ -1911,11 +1951,8 @@ enum WereadReaderHTML {
                             found = true;
                         } catch (e) {}
                     }
-                    if (!found) {
-                        var total = String(root.textContent || '').length;
-                        if (total > 0) {
-                            target = max * Math.min(pendingRestore.offset / total, 1);
-                        }
+                    if (!found && total > 0) {
+                        target = max * Math.min(pendingRestore.offset / total, 1);
                     }
                 }
                 // 只有「按 offset 根本没定位到」时才用比例兜底；定位到章首
@@ -1960,6 +1997,19 @@ enum WereadReaderHTML {
                             var probe = document.createRange();
                             probe.setStart(root, 0);
                             probe.setEnd(caret.startContainer, caret.startOffset);
+                            return String(probe.toString() || '').length;
+                        }
+                    }
+                    // 新版 WebKit 可能只实现标准接口，补一条同样的兜底。
+                    if (document.caretPositionFromPoint) {
+                        var caret = document.caretPositionFromPoint(
+                            window.innerWidth / 2,
+                            progressProbeY
+                        );
+                        if (caret && caret.offsetNode && root.contains(caret.offsetNode)) {
+                            var probe = document.createRange();
+                            probe.setStart(root, 0);
+                            probe.setEnd(caret.offsetNode, caret.offset);
                             return String(probe.toString() || '').length;
                         }
                     }

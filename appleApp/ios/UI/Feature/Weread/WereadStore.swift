@@ -934,6 +934,15 @@ final class WereadStore: ObservableObject {
             remember(remote, bookId: bookId)
             return remote.progress
         case let (local?, remote?):
+            // 「章首 0」不是有效阅读位置：旧版本可能把它当成最新本机进度
+            // 写下来，时间戳还会压过官方进度。只要一边有真实位置，
+            // 就先选那一边，不能被「0 秒前刚存过」挡住官方进度。
+            let localHasPosition = local.chapterOffset > 0 || local.percent > 0
+            let remoteHasPosition = remote.chapterOffset > 0 || remote.percent > 0
+            if remoteHasPosition, !localHasPosition {
+                remember(remote, bookId: bookId)
+                return remote.progress
+            }
             if remote.updatedAt > 0, remote.updatedAt > local.savedAt {
                 remember(remote, bookId: bookId)
                 return remote.progress
