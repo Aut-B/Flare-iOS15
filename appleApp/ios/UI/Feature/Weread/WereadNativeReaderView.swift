@@ -297,6 +297,13 @@ struct WereadNativeReaderView: View {
                     )
                 }
             },
+            onChapterLink: { _, text in
+                // 章节 HTML 里的 partNNNN.html 相对链接在 loadHTMLString 的
+                // 站点根基址下会变成 404。能对上目录就按目录跳章，对不上
+                // 就弹目录让用户自己选，绝不让 WebView 去请求那个假地址。
+                guard token == self.loadToken else { return }
+                handleChapterLink(text)
+            },
             noteReply: reply,
             onNoteRequest: { text in
                 // 浮层已经开着时忽略重复请求，避免 JS 的待处理选区被覆盖。
@@ -842,6 +849,53 @@ struct WereadNativeReaderView: View {
         await loadChapter(at: position, token: loadToken)
     }
 
+    /// 把章节正文里的相对链接对回目录。
+    ///
+    /// epub/azw3 的目录页链接形如 `part0012.html#chapter_3`，文件名是打包
+    /// 时的 spine 序号，和 `chapterIdx` 不一定同序，按数字猜会跳错章。
+    /// 所以只认链接文字：上一章 / 下一章 / 章节标题（精确 → 唯一包含）。
+    /// 对不上返回 nil，由调用方弹目录兜底，绝不把用户送到 404。
+    private func chapterPosition(forLinkText text: String) -> Int? {
+        let label = chapterTitleKey(text)
+        if label.contains("上一章") {
+            return index > 0 ? index - 1 : nil
+        }
+        if label.contains("下一章") {
+            return index + 1 < chapters.count ? index + 1 : nil
+        }
+        if label.contains("目录") { return nil }
+
+        if !label.isEmpty {
+            if let exact = chapters.firstIndex(where: { chapterTitleKey($0.title) == label }) {
+                return exact
+            }
+            let partial = chapters.indices.filter { position in
+                let title = chapterTitleKey(chapters[position].title)
+                return !title.isEmpty && (title.contains(label) || label.contains(title))
+            }
+            // 只认唯一命中：「第一章」这类短标题容易同时包含在多章里。
+            if partial.count == 1 { return partial[0] }
+        }
+        return nil
+    }
+
+    /// 相对章节链接的落点：能对上目录就跳章，对不上就弹目录兜底。
+    /// 宁可多弹一次目录，也不要让链接静默失效或落进 404。
+    private func handleChapterLink(_ text: String) {
+        if let position = chapterPosition(forLinkText: text) {
+            Task { await open(position) }
+            return
+        }
+        showChapters = true
+    }
+
+    private func chapterTitleKey(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "[、。，：；·,.:;\"'“”‘’《》()（）\\[\\]]", with: "", options: .regularExpression)
+            .lowercased()
+    }
+
     @MainActor
     private func loadChapter(at position: Int, token: Int) async {
         guard chapters.indices.contains(position) else { return }
@@ -1053,6 +1107,9 @@ private struct WereadChapterWebView: UIViewRepresentable {
     let highlights: [WereadHighlight]
     let onHighlight: (WereadHighlight) -> Void
     let onScroll: (Double, Int) -> Void
+    /// 章节内相对链接（epub/azw3 的 partNNNN.html#...）被点击。
+    /// 参数是原始 href 和链接文字，由 Swift 侧对回目录再跳章。
+    let onChapterLink: (String, String) -> Void
     let noteReply: WereadNoteReply?
     let onNoteRequest: (String) -> Void
     let onNoteReplyApplied: () -> Void
@@ -1246,6 +1303,34 @@ private struct WereadChapterWebView: UIViewRepresentable {
             markReady(in: webView)
         }
 
+        /// 兜底：JS 拦不到的章节相对链接（比如 target=_blank 或多指点击）
+        /// 也不要真的去请求 `partNNNN.html` —— 服务端没有这个文件，只会 404。
+        /// 直接取消，交给 Swift 按目录跳章或弹目录。
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            guard
+                navigationAction.navigationType == .linkActivated,
+                let url = navigationAction.request.url
+            else {
+                decisionHandler(.allow)
+                return
+            }
+            let path = url.path.lowercased()
+            let isChapterFile = path.hasSuffix(".html") || path.hasSuffix(".xhtml")
+            if isChapterFile, url.host == "weread.qq.com" {
+                decisionHandler(.cancel)
+                let text = navigationAction.request.url?.fragment ?? ""
+                DispatchQueue.main.async {
+                    self.parent.onChapterLink(url.absoluteString, text)
+                }
+                return
+            }
+            decisionHandler(.allow)
+        }
+
         /// 页面可交互了：恢复本地划线，并通知 SwiftUI 收起加载层。
         private func markReady(in webView: WKWebView?) {
             loaded = true
@@ -1301,6 +1386,12 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 let offset = (body["offset"] as? NSNumber)?.intValue ?? 0
                 DispatchQueue.main.async {
                     self.parent.onScroll(value, offset)
+                }
+            case "chapterLink":
+                let href = (body["href"] as? String) ?? ""
+                let text = (body["text"] as? String) ?? ""
+                DispatchQueue.main.async {
+                    self.parent.onChapterLink(href, text)
                 }
             default:
                 break
@@ -1495,6 +1586,67 @@ enum WereadReaderHTML {
         (function () {
             var tools = document.getElementById('wr-tools');
             var savedRange = null;
+
+            // epub/azw3 的章内链接是 `part0012.html#chapter_3` 这种相对地址。
+            // 页面是 loadHTMLString 生成的，基址是站点根，直接放行会请求
+            // 一个不存在的 partNNNN.html（404）。这里拦下来交给 Swift 按目录跳章。
+            function chapterHref(anchor) {
+                var raw = anchor.getAttribute('href') || '';
+                if (!raw || raw.charAt(0) === '#') return '';
+                var lower = raw.toLowerCase();
+                if (lower.indexOf('javascript:') === 0) return '';
+                if (lower.indexOf('http://') === 0 || lower.indexOf('https://') === 0) return '';
+                if (lower.indexOf('//') === 0) return '';
+                if (lower.indexOf('mailto:') === 0 || lower.indexOf('tel:') === 0) return '';
+                if (lower.indexOf('data:') === 0) return '';
+                // 只拦「章文件」：part0012.html / chapter_3.xhtml 这类，
+                // 以及带 # 的跨文档锚点。图片、样式等相对资源放行。
+                // 站点绝对路径（/web/...）不拦，那是微读自己的页面。
+                if (lower.charAt(0) === '/') return '';
+                var file = lower.split('#')[0];
+                if (!file) return '';
+                var isChapterFile = /\\.(html?|xhtml)(\\?|$)/.test(file);
+                if (!isChapterFile && lower.indexOf('#') < 0) return '';
+                return raw;
+            }
+            document.addEventListener('click', function (event) {
+                var node = event.target;
+                while (node && node !== document && node.tagName !== 'A') {
+                    node = node.parentElement;
+                }
+                if (!node || node.tagName !== 'A') return;
+                var href = chapterHref(node);
+                if (!href) return;
+                event.preventDefault();
+                event.stopPropagation();
+                // 同一篇里的脚注锚点（`part0012.html#note3` 但 note3 就在
+                // 本文档里）直接滚过去，不要当成换章。
+                var hashAt = href.indexOf('#');
+                if (hashAt >= 0) {
+                    var id = href.slice(hashAt + 1);
+                    try { id = decodeURIComponent(id); } catch (e) {}
+                    var target = null;
+                    try {
+                        target = document.getElementById(id)
+                            || document.getElementsByName(id)[0];
+                    } catch (e) { target = null; }
+                    if (target && target.scrollIntoView) {
+                        target.scrollIntoView();
+                        return;
+                    }
+                }
+                window.webkit.messageHandlers.weread.postMessage({
+                    type: 'chapterLink',
+                    href: href,
+                    text: String(
+                        node.innerText
+                        || node.textContent
+                        || node.getAttribute('title')
+                        || node.getAttribute('aria-label')
+                        || ''
+                    ).trim()
+                });
+            }, true);
 
             // 章节 HTML 会在元素上内联写 user-select:none / touch-callout:none，
             // 且可能带 !important。样式表里的 !important 压不过内联 !important，
