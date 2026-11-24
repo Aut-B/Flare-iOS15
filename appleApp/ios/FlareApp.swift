@@ -5,6 +5,8 @@ import FlareAppleCore
 import FlareAppleUI
 import AVFAudio
 import UIKit
+import Foundation
+import os
 
 @main
 struct FlareApp: App {
@@ -13,6 +15,10 @@ struct FlareApp: App {
     /// 上次崩过就在主界面顶上挂一条横幅。崩一次（安全模式）时用户根本进不到
     /// 恢复页，如果只在恢复页显示现场，第一次崩溃的记录就白存了。
     @State private var showCrashBanner = false
+    /// 覆盖安装后进程没被结束（TrollStore 更新时不会杀正在运行的 App），
+    /// 磁盘上已经是新版本、当前进程还跑着旧二进制。此时底栏等 UI 改动
+    /// 全部不生效，用户会以为「升级了但没修」。检测到就在顶部提示重启。
+    @State private var staleBuild: LaunchBuildIdentity.StaleInfo?
 
     private enum BootPhase {
         case loading
@@ -21,6 +27,9 @@ struct FlareApp: App {
     }
 
     init() {
+        // 必须在启动瞬间固化「内存里的版本」：static let 是懒加载，等更新后
+        // 再读 Bundle 里的 Info.plist 可能已经读到新文件，就检测不出僵尸进程了。
+        LaunchBuildIdentity.captureAtLaunch()
         // 必须在任何 SwiftUI 视图 / Kotlin 初始化之前落盘启动标记：
         // 若首屏渲染阶段就崩，onAppear 永远不会执行，崩溃计数也就永远不会累加，
         // 15 Pro Max 上就会表现为「每次冷启动都闪退、兜底界面永远不出现」。
@@ -48,12 +57,25 @@ struct FlareApp: App {
                         // VStack 会改变它的安全区与 tab bar 布局，风险远大于收益。
                         root
                             .safeAreaInset(edge: .top, spacing: 0) {
-                                // 只依赖 @State：静态变量不参与 SwiftUI 的依赖追踪。
-                                if showCrashBanner {
-                                    LaunchCrashBanner(
-                                        record: LaunchCrashTrace.lastCrash,
-                                        onDismiss: { showCrashBanner = false }
-                                    )
+                                VStack(spacing: 0) {
+                                    // 只依赖 @State：静态变量不参与 SwiftUI 的依赖追踪。
+                                    if showCrashBanner {
+                                        LaunchCrashBanner(
+                                            record: LaunchCrashTrace.lastCrash,
+                                            onDismiss: { showCrashBanner = false }
+                                        )
+                                    }
+                                    if let staleBuild {
+                                        LaunchUpdateBanner(
+                                            info: staleBuild,
+                                            onRestart: {
+                                                // 这次退出不是崩溃：先清掉启动看门狗，
+                                                // 否则下次启动会按「上次没走完」进安全模式。
+                                                LaunchGuard.markStable()
+                                                LaunchGuard.relaunch()
+                                            }
+                                        )
+                                    }
                                 }
                             }
                     }
@@ -61,6 +83,9 @@ struct FlareApp: App {
                     .ugoiraExportStatus()
                     .backportOnChange(of: scenePhase) { _, phase in
                         MediaCacheMaintenance.handleScenePhase(phase)
+                        if phase == .active {
+                            checkForStaleBuild()
+                        }
                         if phase == .background {
                             LaunchGuard.markStable()
                             // 进后台即视为本次启动成功，崩溃计数清零，
@@ -103,6 +128,14 @@ struct FlareApp: App {
                 InstagramStateIsolator.allowAdoptionThisLaunch()
             }
         }
+    }
+
+    /// 从后台回到前台时检查：磁盘 Info.plist 的版本和本进程启动时读到的是否一致。
+    /// 不一致说明安装包已经被替换、进程还是旧的；此时任何 Swift 代码修复都不会
+    /// 出现在界面上，只能让用户重启一次。
+    private func checkForStaleBuild() {
+        guard staleBuild == nil else { return }
+        staleBuild = LaunchBuildIdentity.detectStaleProcess()
     }
 
     private func bootstrap() {
@@ -208,6 +241,90 @@ struct FlareApp: App {
         if #available(iOS 15.0, *) {
             tabBar.scrollEdgeAppearance = tab
         }
+    }
+}
+
+/// 「安装包已更新、当前进程还是旧的」提示条。
+///
+/// 只在从后台回到前台、且磁盘 Info.plist 与启动时缓存的版本不一致时出现；
+/// 正常启动/切前后台永远不会触发。
+private struct LaunchUpdateBanner: View {
+    let info: LaunchBuildIdentity.StaleInfo
+    let onRestart: () -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.caption)
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Flare 已更新，当前仍是旧界面")
+                    .font(.caption)
+                Text("正在运行 \(info.launched.label)，已安装 \(info.installed.label)。重启后新功能才会生效。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button {
+                onRestart()
+            } label: {
+                Text("重启")
+                    .font(.caption)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(.secondarySystemGroupedBackground))
+    }
+}
+
+/// 识别「覆盖安装后旧进程继续运行」。
+///
+/// 6S 上 TrollStore 覆盖安装不会结束正在运行的 Flare：设置里已经显示 1.8.0(120)，
+/// 但进程还是几小时前启动的旧二进制（实测 pid 35588 启动于 11:36Z，build120 在
+/// 12:55Z 之后才构建），所以底栏仍是旧的 Instagram 图标。两边的 bundle 路径相同
+/// （都是 590F7AAC-…/Flare.app），旧进程可以直接读到被替换后的 Info.plist。
+/// 这不是 SwiftUI 条件判断的问题，任何「改代码」在旧进程里都不会出现。
+private enum LaunchBuildIdentity {
+    struct BuildInfo {
+        let version: String
+        let build: String
+        var label: String { "\(version) (\(build))" }
+    }
+
+    struct StaleInfo {
+        let launched: BuildInfo
+        let installed: BuildInfo
+    }
+
+    private static let log = Logger(subsystem: "dev.dimension.flare", category: "launch")
+    private(set) static var launched: BuildInfo?
+
+    /// 纯读文件，不经过 Bundle 的缓存，这样拿到的才是磁盘上「已安装」的版本。
+    static func captureAtLaunch() {
+        guard launched == nil else { return }
+        launched = readInfoPlist()
+    }
+
+    static func detectStaleProcess() -> StaleInfo? {
+        guard let launched = launched, let installed = readInfoPlist() else { return nil }
+        guard launched.build != installed.build || launched.version != installed.version else {
+            return nil
+        }
+        log.notice("stale process: launched \(launched.build, privacy: .public), installed \(installed.build, privacy: .public)")
+        return StaleInfo(launched: launched, installed: installed)
+    }
+
+    private static func readInfoPlist() -> BuildInfo? {
+        let url = Bundle.main.bundleURL.appendingPathComponent("Info.plist")
+        guard let data = try? Data(contentsOf: url),
+              let object = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let plist = object as? [String: Any],
+              let build = plist["CFBundleVersion"] as? String,
+              let version = plist["CFBundleShortVersionString"] as? String else {
+            return nil
+        }
+        return BuildInfo(version: version, build: build)
     }
 }
 
