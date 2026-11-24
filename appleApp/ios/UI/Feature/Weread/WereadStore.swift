@@ -884,6 +884,15 @@ final class WereadStore: ObservableObject {
         }
     }
 
+    /// 云端划线/想法和目录走同一套会话恢复：`bookmarklist` 对过期 cookie
+    /// 会静默返回 `{}`，必须由 Service 识别出来后在这里续期重试，否则
+    /// 首页目录能打开、笔记却永远显示为空。
+    func bookmarks(for bookId: String) async throws -> [WereadBookmark] {
+        try await withSessionRecovery { attemptCookie in
+            try await WereadService.shared.bookmarks(bookId: bookId, cookie: attemptCookie)
+        }
+    }
+
     /// 本机上次阅读位置 + 服务端进度，按时间择新。
     ///
     /// 服务端 `updateTime` 比本机记录新（例如用户又用官方 App 读过）就用

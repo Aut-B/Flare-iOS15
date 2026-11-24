@@ -940,6 +940,7 @@ final class WereadService: @unchecked Sendable {
         let id: String
         let chapterUid: Int
         let range: String
+        let abstract: String
         let content: String
         let createTime: TimeInterval
     }
@@ -954,6 +955,14 @@ final class WereadService: @unchecked Sendable {
     ///
     /// 想法接口失败不影响划线：只降级成「没有想法」，不阻断阅读。
     func bookmarks(bookId: String, cookie: String) async throws -> [WereadBookmark] {
+        do {
+            return try await fetchBookmarks(bookId: bookId, cookie: cookie)
+        } catch WereadError.notLoggedIn {
+            throw WereadAuthFailure.rejected(failedCookie: cookie)
+        }
+    }
+
+    private func fetchBookmarks(bookId: String, cookie: String) async throws -> [WereadBookmark] {
         guard !cookie.isEmpty else { throw WereadError.notLoggedIn }
         var components = URLComponents(string: "\(base)/web/book/bookmarklist")
         components?.queryItems = [URLQueryItem(name: "bookId", value: bookId)]
@@ -985,13 +994,29 @@ final class WereadService: @unchecked Sendable {
             )
             throw WereadError.decodeFailed
         }
-        let thoughts = await fetchThoughts(bookId: bookId, cookie: cookie)
+        let thoughtFetch = await fetchThoughts(bookId: bookId, cookie: cookie)
+        let thoughts = thoughtFetch.thoughts
+        // bookmarklist 对无效/过期 cookie 也会返回 200 + `{}`，不能只凭响应体
+        // 判断「真的没有笔记」。review/list 会明确回 -2010/-2012，用它兜底：
+        // 云端为空且想法接口说登录态失效时，交给 Store 续期/换会话后重试。
+        if updated.isEmpty, thoughtFetch.authRejected {
+            let message =
+                "bookmarklist book=\(bookId) updated=0 且 review/list 登录态被拒绝；触发会话恢复"
+            Self.screenDiag(message)
+            FlareDiagnostics.shared.record(.weread, "ERR", message)
+            throw WereadAuthFailure.rejected(failedCookie: cookie)
+        }
         // `range` 是章内字符偏移，不同章节会重复，必须带上 chapterUid 才能对齐。
         var thoughtsByLocation: [String: [ServerThought]] = [:]
         var usedThoughtIds = Set<String>()
         for thought in thoughts where !thought.range.isEmpty {
             let key = thoughtLocation(chapterUid: thought.chapterUid, range: thought.range)
             thoughtsByLocation[key, default: []].append(thought)
+        }
+        var thoughtsByText: [String: [ServerThought]] = [:]
+        for thought in thoughts where !thought.abstract.isEmpty {
+            let key = thoughtTextLocation(chapterUid: thought.chapterUid, text: thought.abstract)
+            thoughtsByText[key, default: []].append(thought)
         }
 
         var result: [WereadBookmark] = []
@@ -1002,7 +1027,7 @@ final class WereadService: @unchecked Sendable {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !markText.isEmpty else { continue }
 
-            let range = (item["range"] as? String) ?? ""
+            let range = stringValue(item["range"])
             let rawId = ((item["bookmarkId"] as? String) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let id = rawId.isEmpty ? "bookmark-\(chapterUid)-\(range)-\(index)" : rawId
@@ -1013,7 +1038,10 @@ final class WereadService: @unchecked Sendable {
                 notes.append(inlineNote)
             }
             let location = thoughtLocation(chapterUid: chapterUid, range: range)
-            if let matched = thoughtsByLocation[location] {
+            let matched =
+                thoughtsByLocation[location]
+                ?? thoughtsByText[thoughtTextLocation(chapterUid: chapterUid, text: markText)]
+            if let matched {
                 for thought in matched {
                     usedThoughtIds.insert(thought.id)
                     if !thought.content.isEmpty, !notes.contains(thought.content) {
@@ -1041,7 +1069,7 @@ final class WereadService: @unchecked Sendable {
                 WereadBookmark(
                     id: thought.id,
                     chapterUid: thought.chapterUid,
-                    markText: "",
+                    markText: thought.abstract,
                     note: thought.content,
                     range: thought.range,
                     createTime: thought.createTime
@@ -1050,7 +1078,7 @@ final class WereadService: @unchecked Sendable {
         }
 
         let summary =
-            "bookmarklist book=\(bookId) updated=\(updated.count) thoughts=\(thoughts.count) parsed=\(result.count)"
+            "bookmarklist book=\(bookId) updated=\(updated.count) reviews=\(thoughtFetch.reviewCount) total=\(thoughtFetch.totalCount) more=\(thoughtFetch.hasMore ? 1 : 0) type1=\(thoughtFetch.type1Count) type4=\(thoughtFetch.type4Count) vid=\(thoughtFetch.hasUserVid ? 1 : 0) thoughts=\(thoughts.count) parsed=\(result.count)"
         Self.screenDiag(summary)
         FlareDiagnostics.shared.record(.weread, "RES", summary)
         return result
@@ -1060,16 +1088,47 @@ final class WereadService: @unchecked Sendable {
         "\(chapterUid)|\(range)"
     }
 
-    /// 拉取自己的「想法」。失败只记日志并返回空数组，不影响划线。
-    private func fetchThoughts(bookId: String, cookie: String) async -> [ServerThought] {
+    private func thoughtTextLocation(chapterUid: Int, text: String) -> String {
+        "\(chapterUid)|\(text)"
+    }
+
+    private struct ThoughtFetchResult {
+        var thoughts: [ServerThought] = []
+        var reviewCount = 0
+        var totalCount = 0
+        var hasMore = false
+        var type1Count = 0
+        var type4Count = 0
+        var hasUserVid = false
+        var authRejected = false
+    }
+
+    /// 拉取自己的「想法」。失败只记日志并返回空数组，不影响划线；
+    /// 登录态被拒绝时额外标记 `authRejected`，由 caller 决定是否续期。
+    ///
+    /// `type == 1` 是划线想法，`type == 4` 是整章想法（官方也会展示），
+    /// 两种都收；整章想法不按 range 挂到某条划线上。
+    private func fetchThoughts(bookId: String, cookie: String) async -> ThoughtFetchResult {
+        var result = ThoughtFetchResult()
+        // 官方网页版 review/list 会带 userVid（cookie 里的 wr_vid）；
+        // `count=0` + `listMode=2` 是一次取完「本书我的想法」的常用组合。
+        let userVid = cookieValue(named: "wr_vid", in: cookie)
+        result.hasUserVid = userVid != nil
         var components = URLComponents(string: "\(base)/web/review/list")
-        components?.queryItems = [
+        var queryItems = [
             URLQueryItem(name: "bookId", value: bookId),
             URLQueryItem(name: "listType", value: "11"),
+            URLQueryItem(name: "maxIdx", value: "0"),
+            URLQueryItem(name: "count", value: "0"),
+            URLQueryItem(name: "listMode", value: "2"),
             URLQueryItem(name: "mine", value: "1"),
             URLQueryItem(name: "synckey", value: "0"),
         ]
-        guard let url = components?.url else { return [] }
+        if let userVid {
+            queryItems.append(URLQueryItem(name: "userVid", value: userVid))
+        }
+        components?.queryItems = queryItems
+        guard let url = components?.url else { return result }
 
         var request = URLRequest(url: url)
         request.setValue(cookie, forHTTPHeaderField: "Cookie")
@@ -1078,35 +1137,50 @@ final class WereadService: @unchecked Sendable {
             let json = try parseObject(data)
             try checkError(json)
             let reviews = json["reviews"] as? [[String: Any]] ?? []
-            var result: [ServerThought] = []
+            result.reviewCount = reviews.count
+            result.totalCount = intValue(json["totalCount"]) ?? reviews.count
+            result.hasMore = intValue(json["hasMore"]) == 1
             for (index, item) in reviews.enumerated() {
                 guard
                     let review = item["review"] as? [String: Any],
-                    intValue(review["type"]) == 1,
-                    let chapterUid = intValue(review["chapterUid"])
+                    let chapterUid = intValue(review["chapterUid"]),
+                    chapterUid > 0
                 else {
                     continue
                 }
+                let type = intValue(review["type"]) ?? 0
+                if type == 1 { result.type1Count += 1 }
+                if type == 4 { result.type4Count += 1 }
+                guard type == 1 || type == 4 else { continue }
                 let content = ((review["content"] as? String) ?? "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !content.isEmpty else { continue }
-                let range =
-                    (review["range"] as? String)
-                    ?? (review["range"] as? NSNumber)?.stringValue
-                    ?? ""
+                let abstract = ((review["abstract"] as? String) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let range = type == 1 ? stringValue(review["range"]) : ""
                 let rawId = ((review["reviewId"] as? String) ?? "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 let id = rawId.isEmpty ? "thought-\(chapterUid)-\(range)-\(index)" : rawId
-                result.append(
+                result.thoughts.append(
                     ServerThought(
                         id: id,
                         chapterUid: chapterUid,
                         range: range,
+                        abstract: abstract,
                         content: content,
                         createTime: TimeInterval(intValue(review["createTime"]) ?? 0)
                     )
                 )
             }
+            return result
+        } catch WereadError.notLoggedIn {
+            result.authRejected = true
+            log.notice("weread diag: review/list rejected the session")
+            FlareDiagnostics.shared.record(
+                .weread,
+                "ERR",
+                "review/list book=\(bookId) 登录态被拒绝，等待会话恢复"
+            )
             return result
         } catch {
             log.notice(
@@ -1117,7 +1191,7 @@ final class WereadService: @unchecked Sendable {
                 "ERR",
                 "review/list book=\(bookId) 失败: \(error.localizedDescription)"
             )
-            return []
+            return result
         }
     }
 
@@ -1684,6 +1758,28 @@ final class WereadService: @unchecked Sendable {
         if let double = value as? Double { return Int(double) }
         if let string = value as? String { return Int(string) }
         if let number = value as? NSNumber { return number.intValue }
+        return nil
+    }
+
+    /// 接口里的 `range` 有时是字符串、有时是数字，统一成去空白的字符串。
+    private func stringValue(_ value: Any?) -> String {
+        if let string = value as? String {
+            return string.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let number = value as? NSNumber { return number.stringValue }
+        return ""
+    }
+
+    /// 从 `name=value; name2=value2` 形式的 Cookie 头里取单个值。
+    private func cookieValue(named name: String, in header: String) -> String? {
+        for part in header.split(separator: ";") {
+            let pieces = part.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pieces.count == 2 else { continue }
+            let key = pieces[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard key == name else { continue }
+            let value = pieces[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            return value.isEmpty ? nil : value
+        }
         return nil
     }
 

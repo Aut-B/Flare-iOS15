@@ -739,10 +739,9 @@ struct WereadNativeReaderView: View {
         html = ""
         do {
             // 目录和阅读进度互不依赖，并行发出去，少等一个来回。
-            // 这里直接走 service 而不是 store，避免并发闭包捕获 self。
+            // 三个请求都走 Store 的会话恢复，过期的 cookie 会先续期再重试。
             let bookId = target.book.id
-            let cookie = store.cookie
-            Task { await loadBookmarks(bookId: bookId, cookie: cookie, token: bookmarkToken) }
+            Task { await loadBookmarks(bookId: bookId, token: bookmarkToken) }
             async let progressTask = store.progress(for: bookId)
             let list = try await store.chapters(for: target.book.id)
             guard token == loadToken else { return }
@@ -796,16 +795,13 @@ struct WereadNativeReaderView: View {
 
     /// 服务端笔记单独拉：慢或失败都不能挡住正文。
     @MainActor
-    private func loadBookmarks(bookId: String, cookie: String, token: Int) async {
+    private func loadBookmarks(bookId: String, token: Int) async {
         guard token == notesToken else { return }
         notesLoading = true
-        guard !cookie.isEmpty else {
-            notesLoading = false
-            notesError = WereadError.notLoggedIn.localizedDescription
-            return
-        }
         do {
-            let list = try await WereadService.shared.bookmarks(bookId: bookId, cookie: cookie)
+            // 走 Store 的会话恢复：过期 cookie 时先续期，避免 bookmarklist
+            // 静默返回 `{}` 被当成「云端没有笔记」。
+            let list = try await store.bookmarks(for: bookId)
             guard token == notesToken else { return }
             serverNotes = Dictionary(grouping: list) { $0.chapterUid }
             notesError = nil
@@ -825,7 +821,6 @@ struct WereadNativeReaderView: View {
         Task {
             await loadBookmarks(
                 bookId: target.book.id,
-                cookie: store.cookie,
                 token: token
             )
         }
