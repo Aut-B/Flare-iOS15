@@ -1183,7 +1183,10 @@ final class WereadService: @unchecked Sendable {
     /// colorStyle / range / markText`，其中 `markText` 上传前要 base64。
     /// `style` 0=直线、1=马克笔、2=波浪线；`colorStyle` 5 是网页默认黄色。
     ///
-    /// 成功时 `data.bookmarkId` 是非空数组。失败只记诊断并返回 false，
+    /// 官方写接口调用链（`fetchAddBookmark` → `_0x472748` 统一封装）不显式带
+    /// `s`；不要照正文接口自行补签名。
+    ///
+    /// 成功时 `data.bookmarkId` 必须是非空数组。失败只记诊断并返回 false，
     /// 不抛错 —— 本地笔记已经保存，上传失败不能让用户丢笔记。
     func addBookmark(
         bookId: String,
@@ -1197,8 +1200,18 @@ final class WereadService: @unchecked Sendable {
         cookie: String
     ) async -> Bool {
         guard !bookId.isEmpty, !range.isEmpty, !markText.isEmpty, !cookie.isEmpty else {
+            let line =
+                "addBookmark 跳过参数不完整 book=\(bookId) chapter=\(chapterUid) " +
+                "idx=\(chapterIdx) ver=\(bookVersion) rangeLen=\(range.count) " +
+                "markLen=\(markText.count) cookieEmpty=\(cookie.isEmpty)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
             return false
         }
+        let context =
+            "book=\(bookId) chapter=\(chapterUid) idx=\(chapterIdx) " +
+            "ver=\(bookVersion) rangeLen=\(range.count) markLen=\(markText.count)"
+        Self.screenDiag("addBookmark 请求 \(context)")
         var request = URLRequest(url: URL(string: "\(base)/web/book/addBookmark")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1224,40 +1237,41 @@ final class WereadService: @unchecked Sendable {
                     (json["errMsg"] as? String)
                     ?? (json["errmsg"] as? String)
                     ?? "请求失败"
-                Self.screenDiag("addBookmark book=\(bookId) 失败 errCode=\(code) \(message)")
-                FlareDiagnostics.shared.record(
-                    .weread,
-                    "ERR",
-                    "addBookmark book=\(bookId) errCode=\(code) \(message)"
-                )
+                let container = json["data"] as? [String: Any] ?? json
+                let succ = intValue(json["succ"]) ?? intValue(container["succ"]) ?? -1
+                let busy =
+                    intValue(json["isFetching"])
+                    ?? intValue(container["isFetching"])
+                    ?? 0
+                let detail =
+                    "errCode=\(code) succ=\(succ) isFetching=\(busy) msg=\(message)"
+                let line = "addBookmark \(context) FAIL \(detail)"
+                Self.screenDiag(line)
+                FlareDiagnostics.shared.record(.weread, "ERR", line)
                 return false
             }
             let container = json["data"] as? [String: Any] ?? json
             if let id = firstIdentifier(container["bookmarkId"]) {
-                Self.screenDiag("addBookmark book=\(bookId) ok id=\(id)")
+                Self.screenDiag("addBookmark \(context) OK id=\(id)")
                 return true
             }
-            if intValue(json["succ"]) == 1 || intValue(container["succ"]) == 1 {
-                Self.screenDiag("addBookmark book=\(bookId) succ=1（未返回 bookmarkId）")
-                return true
-            }
-            let busy = intValue(json["isFetching"]) == 1 || intValue(container["isFetching"]) == 1
-            Self.screenDiag(
-                "addBookmark book=\(bookId) 未返回 bookmarkId\(busy ? "（操作频繁）" : "")"
-            )
-            FlareDiagnostics.shared.record(
-                .weread,
-                "ERR",
-                "addBookmark book=\(bookId) 未返回 bookmarkId\(busy ? "（操作频繁）" : "")"
-            )
+            let code = intValue(json["errCode"]) ?? intValue(json["errcode"]) ?? 0
+            let succ = intValue(json["succ"]) ?? intValue(container["succ"]) ?? -1
+            let busy =
+                intValue(json["isFetching"])
+                ?? intValue(container["isFetching"])
+                ?? 0
+            let line =
+                "addBookmark \(context) FAIL 未返回 bookmarkId " +
+                "errCode=\(code) succ=\(succ) isFetching=\(busy)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
             return false
         } catch {
-            Self.screenDiag("addBookmark book=\(bookId) 请求失败: \(error.localizedDescription)")
-            FlareDiagnostics.shared.record(
-                .weread,
-                "ERR",
-                "addBookmark book=\(bookId) 请求失败: \(error.localizedDescription)"
-            )
+            let line =
+                "addBookmark \(context) FAIL 请求异常: \(error.localizedDescription)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
             return false
         }
     }
@@ -1270,6 +1284,7 @@ final class WereadService: @unchecked Sendable {
     /// `abstract` 是选中的原文。成功时 `data.reviewId` 是非空数组。
     /// 网页 reducer 的默认 payload 带 `bookVersion: 0`，选区想法不传真实
     /// 版本号，这里保持一致。失败同样只记诊断，不抛错。
+    /// 官方 `/web/review/add` 调用点也不显式带 `s`，不要自行补签名。
     func addReview(
         bookId: String,
         chapterUid: Int,
@@ -1279,8 +1294,18 @@ final class WereadService: @unchecked Sendable {
         cookie: String
     ) async -> Bool {
         guard !bookId.isEmpty, !range.isEmpty, !content.isEmpty, !cookie.isEmpty else {
+            let line =
+                "addReview 跳过参数不完整 book=\(bookId) chapter=\(chapterUid) " +
+                "rangeLen=\(range.count) contentLen=\(content.count) " +
+                "abstractLen=\(abstract.count) cookieEmpty=\(cookie.isEmpty)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
             return false
         }
+        let context =
+            "book=\(bookId) chapter=\(chapterUid) rangeLen=\(range.count) " +
+            "contentLen=\(content.count) abstractLen=\(abstract.count)"
+        Self.screenDiag("addReview 请求 \(context)")
         var request = URLRequest(url: URL(string: "\(base)/web/review/add")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1304,33 +1329,40 @@ final class WereadService: @unchecked Sendable {
                     (json["errMsg"] as? String)
                     ?? (json["errmsg"] as? String)
                     ?? "请求失败"
-                Self.screenDiag("addReview book=\(bookId) 失败 errCode=\(code) \(message)")
-                FlareDiagnostics.shared.record(
-                    .weread,
-                    "ERR",
-                    "addReview book=\(bookId) errCode=\(code) \(message)"
-                )
+                let container = json["data"] as? [String: Any] ?? json
+                let succ = intValue(json["succ"]) ?? intValue(container["succ"]) ?? -1
+                let busy =
+                    intValue(json["isFetching"])
+                    ?? intValue(container["isFetching"])
+                    ?? 0
+                let detail =
+                    "errCode=\(code) succ=\(succ) isFetching=\(busy) msg=\(message)"
+                let line = "addReview \(context) FAIL \(detail)"
+                Self.screenDiag(line)
+                FlareDiagnostics.shared.record(.weread, "ERR", line)
                 return false
             }
             let container = json["data"] as? [String: Any] ?? json
             if let id = firstIdentifier(container["reviewId"]) {
-                Self.screenDiag("addReview book=\(bookId) ok id=\(id)")
+                Self.screenDiag("addReview \(context) OK id=\(id)")
                 return true
             }
-            Self.screenDiag("addReview book=\(bookId) 未返回 reviewId")
-            FlareDiagnostics.shared.record(
-                .weread,
-                "ERR",
-                "addReview book=\(bookId) 未返回 reviewId"
-            )
+            let code = intValue(json["errCode"]) ?? intValue(json["errcode"]) ?? 0
+            let succ = intValue(json["succ"]) ?? intValue(container["succ"]) ?? -1
+            let busy =
+                intValue(json["isFetching"])
+                ?? intValue(container["isFetching"])
+                ?? 0
+            let line =
+                "addReview \(context) FAIL 未返回 reviewId " +
+                "errCode=\(code) succ=\(succ) isFetching=\(busy)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
             return false
         } catch {
-            Self.screenDiag("addReview book=\(bookId) 请求失败: \(error.localizedDescription)")
-            FlareDiagnostics.shared.record(
-                .weread,
-                "ERR",
-                "addReview book=\(bookId) 请求失败: \(error.localizedDescription)"
-            )
+            let line = "addReview \(context) FAIL 请求异常: \(error.localizedDescription)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
             return false
         }
     }
@@ -1343,6 +1375,7 @@ final class WereadService: @unchecked Sendable {
     /// 划线（note 为空）只建 bookmark；写想法只建 review。网页写想法时
     /// 不会再调 `addBookmark`，服务端用 review 自带的 range 显示高亮；
     /// 两边都建会在官方端出现同一段文字的两条笔记。
+    @discardableResult
     func uploadHighlight(
         bookId: String,
         chapterUid: Int,
@@ -1351,24 +1384,32 @@ final class WereadService: @unchecked Sendable {
         markText: String,
         note: String,
         cookie: String
-    ) async {
-        guard !cookie.isEmpty else { return }
+    ) async -> Bool {
+        let context =
+            "book=\(bookId) chapter=\(chapterUid) idx=\(chapterIdx) " +
+            "rangeLen=\(range.count) markLen=\(markText.count)"
+        guard !cookie.isEmpty else {
+            let line = "上传笔记跳过 \(context) 未登录"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
+            return false
+        }
         guard !range.isEmpty, !markText.isEmpty else {
-            Self.screenDiag(
-                "上传笔记跳过 book=\(bookId) chapter=\(chapterUid) 缺少 range"
-            )
-            return
+            let line = "上传笔记跳过 \(context) 缺少 range/markText"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
+            return false
         }
 
         let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             guard let version = await bookVersions(bookId: bookId, cookie: cookie)?.version else {
-                Self.screenDiag(
-                    "上传划线跳过 book=\(bookId) chapter=\(chapterUid) 未取到 bookVersion"
-                )
-                return
+                let line = "上传划线跳过 \(context) 未取到 bookVersion"
+                Self.screenDiag(line)
+                FlareDiagnostics.shared.record(.weread, "ERR", line)
+                return false
             }
-            _ = await addBookmark(
+            let ok = await addBookmark(
                 bookId: bookId,
                 chapterUid: chapterUid,
                 chapterIdx: chapterIdx,
@@ -1377,10 +1418,15 @@ final class WereadService: @unchecked Sendable {
                 markText: markText,
                 cookie: cookie
             )
-            return
+            let line = "上传划线 \(ok ? "OK" : "FAIL") \(context) ver=\(version)"
+            Self.screenDiag(line)
+            if !ok {
+                FlareDiagnostics.shared.record(.weread, "ERR", line)
+            }
+            return ok
         }
 
-        _ = await addReview(
+        let ok = await addReview(
             bookId: bookId,
             chapterUid: chapterUid,
             range: range,
@@ -1388,6 +1434,12 @@ final class WereadService: @unchecked Sendable {
             abstract: markText,
             cookie: cookie
         )
+        let line = "上传想法 \(ok ? "OK" : "FAIL") \(context) noteLen=\(trimmed.count)"
+        Self.screenDiag(line)
+        if !ok {
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
+        }
+        return ok
     }
 
     /// 服务端标识字段可能是数组，也可能直接是字符串。

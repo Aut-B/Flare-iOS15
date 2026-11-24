@@ -264,7 +264,14 @@ struct WereadNativeReaderView: View {
                 let cookie = store.cookie
                 let chapterUid = chapter.uid
                 let chapterIdx = chapter.index
-                guard !cookie.isEmpty else { return }
+                guard !cookie.isEmpty else {
+                    let line =
+                        "本地笔记已保存但未登录，未上传 book=\(bookId) " +
+                        "chapter=\(chapterUid)"
+                    WereadService.screenDiag(line)
+                    FlareDiagnostics.shared.record(.weread, "ERR", line)
+                    return
+                }
                 Task {
                     await WereadService.shared.uploadHighlight(
                         bookId: bookId,
