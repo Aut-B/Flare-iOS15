@@ -57,6 +57,20 @@ final class WereadService: @unchecked Sendable {
     /// 取不到时不缓存，下次划线会重试。
     private let bookVersionLock = NSLock()
     private var bookVersionCache: [String: BookVersions] = [:]
+
+    /// NSLock.lock()/unlock() 不允许在 async 上下文调用（Swift 6 严格并发），
+    /// 所以把缓存读写包在同步方法里，async 侧只调这两个方法。
+    private func cachedBookVersion(for bookId: String) -> BookVersions? {
+        bookVersionLock.lock()
+        defer { bookVersionLock.unlock() }
+        return bookVersionCache[bookId]
+    }
+
+    private func storeBookVersion(_ versions: BookVersions, for bookId: String) {
+        bookVersionLock.lock()
+        defer { bookVersionLock.unlock() }
+        bookVersionCache[bookId] = versions
+    }
     /// 信标有效期。`psvts` 会随时间失效，太短会反复抓页面，太长会拿到过期的。
     private static let sessionTTL: TimeInterval = 120
     /// 同一源 cookie 的并发续期只打一次服务端，其余调用等这一次结果。
@@ -1123,10 +1137,7 @@ final class WereadService: @unchecked Sendable {
     /// 失败返回 nil，不抛错：上传只是本地保存之后的尽力而为。
     private func bookVersions(bookId: String, cookie: String) async -> BookVersions? {
         guard !bookId.isEmpty, !cookie.isEmpty else { return nil }
-        bookVersionLock.lock()
-        let cached = bookVersionCache[bookId]
-        bookVersionLock.unlock()
-        if let cached { return cached }
+        if let cached = cachedBookVersion(for: bookId) { return cached }
 
         var components = URLComponents(string: "\(base)/web/book/info")
         components?.queryItems = [URLQueryItem(name: "bookId", value: bookId)]
@@ -1152,9 +1163,7 @@ final class WereadService: @unchecked Sendable {
                 )
                 return nil
             }
-            bookVersionLock.lock()
-            bookVersionCache[bookId] = versions
-            bookVersionLock.unlock()
+            storeBookVersion(versions, for: bookId)
             return versions
         } catch {
             Self.screenDiag("book/info book=\(bookId) 取版本失败: \(error.localizedDescription)")
