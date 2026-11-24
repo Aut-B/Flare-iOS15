@@ -88,14 +88,20 @@ struct WereadNativeReaderView: View {
                     merged[position] = WereadHighlight(
                         id: item.id,
                         text: item.text,
-                        note: bookmark.note
+                        note: bookmark.note,
+                        range: item.range ?? bookmark.range
                     )
                 }
                 continue
             }
             indexByText[key] = merged.count
             merged.append(
-                WereadHighlight(id: bookmark.id, text: bookmark.markText, note: bookmark.note)
+                WereadHighlight(
+                    id: bookmark.id,
+                    text: bookmark.markText,
+                    note: bookmark.note,
+                    range: bookmark.range
+                )
             )
         }
         return merged
@@ -116,14 +122,24 @@ struct WereadNativeReaderView: View {
             if !key.isEmpty, let position = indexByText[key] {
                 if result[position].note.isEmpty, !bookmark.note.isEmpty {
                     let item = result[position]
-                    result[position] = WereadHighlight(id: item.id, text: item.text, note: bookmark.note)
+                    result[position] = WereadHighlight(
+                        id: item.id,
+                        text: item.text,
+                        note: bookmark.note,
+                        range: item.range ?? bookmark.range
+                    )
                 }
                 continue
             }
             guard !key.isEmpty || !bookmark.note.isEmpty else { continue }
             if !key.isEmpty { indexByText[key] = result.count }
             result.append(
-                WereadHighlight(id: bookmark.id, text: bookmark.markText, note: bookmark.note)
+                WereadHighlight(
+                    id: bookmark.id,
+                    text: bookmark.markText,
+                    note: bookmark.note,
+                    range: bookmark.range
+                )
             )
         }
         return result
@@ -231,6 +247,24 @@ struct WereadNativeReaderView: View {
                 }
                 highlights[chapter.uid] = list
                 WereadHighlightStore.save(list, bookId: target.book.id, chapterUid: chapter.uid)
+
+                // 本地已经落盘，再尽力同步到微读服务端；失败只记诊断，不回滚本地。
+                let bookId = target.book.id
+                let cookie = store.cookie
+                let chapterUid = chapter.uid
+                let chapterIdx = chapter.index
+                guard !cookie.isEmpty else { return }
+                Task {
+                    await WereadService.shared.uploadHighlight(
+                        bookId: bookId,
+                        chapterUid: chapterUid,
+                        chapterIdx: chapterIdx,
+                        range: item.range ?? "",
+                        markText: item.text,
+                        note: item.note,
+                        cookie: cookie
+                    )
+                }
             },
             onScroll: { value in
                 scrollFraction = min(max(value, 0), 1)
@@ -890,6 +924,17 @@ struct WereadHighlight: Codable, Hashable, Identifiable {
     let id: String
     let text: String
     let note: String
+    /// 章内文本偏移 `start-end`，用于回传服务端划线 / 想法。
+    /// 官方按自己的渲染对象算 offset，这里用 DOM 文本长度近似，位置可能有偏差，
+    /// 需真机校准。旧版本 UserDefaults 里没有这个字段，Optional 解码会得到 nil。
+    let range: String?
+
+    init(id: String, text: String, note: String, range: String? = nil) {
+        self.id = id
+        self.text = text
+        self.note = note
+        self.range = range
+    }
 }
 
 enum WereadHighlightStore {
@@ -1140,9 +1185,13 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 let id = (body["id"] as? String) ?? UUID().uuidString
                 let text = (body["text"] as? String) ?? ""
                 let note = (body["note"] as? String) ?? ""
+                let rawRange = (body["range"] as? String) ?? ""
+                let range = rawRange.isEmpty ? nil : rawRange
                 guard !text.isEmpty else { return }
                 DispatchQueue.main.async {
-                    self.parent.onHighlight(WereadHighlight(id: id, text: text, note: note))
+                    self.parent.onHighlight(
+                        WereadHighlight(id: id, text: text, note: note, range: range)
+                    )
                 }
             case "noteRequest":
                 let text = (body["text"] as? String) ?? ""
@@ -1387,6 +1436,18 @@ enum WereadReaderHTML {
                 return { selection: selection, range: selection.getRangeAt(0), text: text };
             }
 
+            // 微读服务端的 range 是章内文本偏移，必须在 surroundContents 之前算：
+            // 包上 mark 之后文本节点会被拆开，再算就不准了。这里用 DOM 文本长度
+            // 近似官方渲染口径，落点可能需要真机校准。
+            function textOffset(root, container, offset) {
+                if (!root) return 0;
+                if (container !== root && !root.contains(container)) return 0;
+                var probe = document.createRange();
+                probe.setStart(root, 0);
+                probe.setEnd(container, offset);
+                return String(probe.toString() || '').length;
+            }
+
             document.addEventListener('selectionchange', function () {
                 setTimeout(function () {
                     var current = selectedText();
@@ -1424,6 +1485,15 @@ enum WereadReaderHTML {
                 mark.setAttribute('data-note', note || '');
                 if (note) mark.title = note;
 
+                var root = document.getElementById('wr-content');
+                var start = textOffset(root, range.startContainer, range.startOffset);
+                var end = textOffset(root, range.endContainer, range.endOffset);
+                if (end < start) {
+                    var swap = start;
+                    start = end;
+                    end = swap;
+                }
+
                 try {
                     range.surroundContents(mark);
                 } catch (error) {
@@ -1436,7 +1506,8 @@ enum WereadReaderHTML {
                     type: 'highlight',
                     id: mark.id,
                     text: text,
-                    note: note || ''
+                    note: note || '',
+                    range: start + '-' + end
                 });
                 var selection = window.getSelection();
                 if (selection) selection.removeAllRanges();

@@ -53,6 +53,10 @@ final class WereadService: @unchecked Sendable {
     /// PDF 要在读正文前分流到网页版，不能等 chapter 接口返回空 HTML 再补救。
     private let pdfLock = NSLock()
     private var pdfBookIDs = Set<String>()
+    /// 新增划线必填 `bookVersion`，按书缓存，避免每划一次都多拉一次详情。
+    /// 取不到时不缓存，下次划线会重试。
+    private let bookVersionLock = NSLock()
+    private var bookVersionCache: [String: BookVersions] = [:]
     /// 信标有效期。`psvts` 会随时间失效，太短会反复抓页面，太长会拿到过期的。
     private static let sessionTTL: TimeInterval = 120
     /// 同一源 cookie 的并发续期只打一次服务端，其余调用等这一次结果。
@@ -997,6 +1001,296 @@ final class WereadService: @unchecked Sendable {
             )
             return []
         }
+    }
+
+    // MARK: - 写入服务端笔记
+
+    /// 新增划线要带的书籍版本号，来自 `/web/book/info` 的 `bookInfo.version`。
+    ///
+    /// 写想法走 `/web/review/add` 时网页并不带这个字段（选区想法路径），
+    /// 所以这里只缓存划线需要的版本号。
+    private struct BookVersions {
+        /// 划线接口的 `bookVersion`。
+        let version: Int?
+    }
+
+    /// 取划线接口需要的书籍版本号。
+    ///
+    /// 失败返回 nil，不抛错：上传只是本地保存之后的尽力而为。
+    private func bookVersions(bookId: String, cookie: String) async -> BookVersions? {
+        guard !bookId.isEmpty, !cookie.isEmpty else { return nil }
+        bookVersionLock.lock()
+        let cached = bookVersionCache[bookId]
+        bookVersionLock.unlock()
+        if let cached { return cached }
+
+        var components = URLComponents(string: "\(base)/web/book/info")
+        components?.queryItems = [URLQueryItem(name: "bookId", value: bookId)]
+        guard let url = components?.url else { return nil }
+
+        var request = URLRequest(url: url)
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        do {
+            let data = try await send(request)
+            let json = try parseObject(data)
+            try checkError(json)
+            let payload = json["data"] as? [String: Any] ?? json
+            let info = payload["bookInfo"] as? [String: Any] ?? payload
+            let versions = BookVersions(
+                version: intValue(info["version"]) ?? intValue(payload["version"])
+            )
+            guard versions.version != nil else {
+                Self.screenDiag("book/info book=\(bookId) 无 version 字段")
+                FlareDiagnostics.shared.record(
+                    .weread,
+                    "ERR",
+                    "book/info book=\(bookId) 无 version 字段"
+                )
+                return nil
+            }
+            bookVersionLock.lock()
+            bookVersionCache[bookId] = versions
+            bookVersionLock.unlock()
+            return versions
+        } catch {
+            Self.screenDiag("book/info book=\(bookId) 取版本失败: \(error.localizedDescription)")
+            FlareDiagnostics.shared.record(
+                .weread,
+                "ERR",
+                "book/info book=\(bookId) 取版本失败: \(error.localizedDescription)"
+            )
+            return nil
+        }
+    }
+
+    /// 新增一条划线：`POST /web/book/addBookmark`。
+    ///
+    /// 对照微读网页 `9.c00d47c2.js` 的 `addBookmark`：payload 为
+    /// `bookId / chapterUid / chapterIdx / bookVersion / type / style /
+    /// colorStyle / range / markText`，其中 `markText` 上传前要 base64。
+    /// `style` 0=直线、1=马克笔、2=波浪线；`colorStyle` 5 是网页默认黄色。
+    ///
+    /// 成功时 `data.bookmarkId` 是非空数组。失败只记诊断并返回 false，
+    /// 不抛错 —— 本地笔记已经保存，上传失败不能让用户丢笔记。
+    func addBookmark(
+        bookId: String,
+        chapterUid: Int,
+        chapterIdx: Int,
+        bookVersion: Int,
+        range: String,
+        markText: String,
+        style: Int = 1,
+        colorStyle: Int = 5,
+        cookie: String
+    ) async -> Bool {
+        guard !bookId.isEmpty, !range.isEmpty, !markText.isEmpty, !cookie.isEmpty else {
+            return false
+        }
+        var request = URLRequest(url: URL(string: "\(base)/web/book/addBookmark")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        let payload: [String: Any] = [
+            "bookId": bookId,
+            "chapterUid": chapterUid,
+            "chapterIdx": chapterIdx,
+            "bookVersion": bookVersion,
+            "type": 1,
+            "style": style,
+            "colorStyle": colorStyle,
+            "range": range,
+            "markText": Data(markText.utf8).base64EncodedString(),
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        do {
+            let data = try await send(request)
+            let json = try parseObject(data)
+            if let code = intValue(json["errCode"]) ?? intValue(json["errcode"]), code != 0 {
+                let message =
+                    (json["errMsg"] as? String)
+                    ?? (json["errmsg"] as? String)
+                    ?? "请求失败"
+                Self.screenDiag("addBookmark book=\(bookId) 失败 errCode=\(code) \(message)")
+                FlareDiagnostics.shared.record(
+                    .weread,
+                    "ERR",
+                    "addBookmark book=\(bookId) errCode=\(code) \(message)"
+                )
+                return false
+            }
+            let container = json["data"] as? [String: Any] ?? json
+            if let id = firstIdentifier(container["bookmarkId"]) {
+                Self.screenDiag("addBookmark book=\(bookId) ok id=\(id)")
+                return true
+            }
+            if intValue(json["succ"]) == 1 || intValue(container["succ"]) == 1 {
+                Self.screenDiag("addBookmark book=\(bookId) succ=1（未返回 bookmarkId）")
+                return true
+            }
+            let busy = intValue(json["isFetching"]) == 1 || intValue(container["isFetching"]) == 1
+            Self.screenDiag(
+                "addBookmark book=\(bookId) 未返回 bookmarkId\(busy ? "（操作频繁）" : "")"
+            )
+            FlareDiagnostics.shared.record(
+                .weread,
+                "ERR",
+                "addBookmark book=\(bookId) 未返回 bookmarkId\(busy ? "（操作频繁）" : "")"
+            )
+            return false
+        } catch {
+            Self.screenDiag("addBookmark book=\(bookId) 请求失败: \(error.localizedDescription)")
+            FlareDiagnostics.shared.record(
+                .weread,
+                "ERR",
+                "addBookmark book=\(bookId) 请求失败: \(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    /// 新增一条想法：`POST /web/review/add`。
+    ///
+    /// 对照微读网页 `9.c00d47c2.js` 选区写想法（`getRangeFromObjs(...).toString()`）：
+    /// `range` 和划线一样是 `start-end` 的 0 基文本偏移，不是整页浮层那种
+    /// 1 基单值；读侧 `formatRange(review.range)` 也按 `start-end` 拆。
+    /// `abstract` 是选中的原文。成功时 `data.reviewId` 是非空数组。
+    /// 网页 reducer 的默认 payload 带 `bookVersion: 0`，选区想法不传真实
+    /// 版本号，这里保持一致。失败同样只记诊断，不抛错。
+    func addReview(
+        bookId: String,
+        chapterUid: Int,
+        range: String,
+        content: String,
+        abstract: String,
+        cookie: String
+    ) async -> Bool {
+        guard !bookId.isEmpty, !range.isEmpty, !content.isEmpty, !cookie.isEmpty else {
+            return false
+        }
+        var request = URLRequest(url: URL(string: "\(base)/web/review/add")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        let payload: [String: Any] = [
+            "type": 1,
+            "bookId": bookId,
+            "chapterUid": chapterUid,
+            "bookVersion": 0,
+            "range": range,
+            "content": content,
+            "abstract": abstract,
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        do {
+            let data = try await send(request)
+            let json = try parseObject(data)
+            if let code = intValue(json["errCode"]) ?? intValue(json["errcode"]), code != 0 {
+                let message =
+                    (json["errMsg"] as? String)
+                    ?? (json["errmsg"] as? String)
+                    ?? "请求失败"
+                Self.screenDiag("addReview book=\(bookId) 失败 errCode=\(code) \(message)")
+                FlareDiagnostics.shared.record(
+                    .weread,
+                    "ERR",
+                    "addReview book=\(bookId) errCode=\(code) \(message)"
+                )
+                return false
+            }
+            let container = json["data"] as? [String: Any] ?? json
+            if let id = firstIdentifier(container["reviewId"]) {
+                Self.screenDiag("addReview book=\(bookId) ok id=\(id)")
+                return true
+            }
+            Self.screenDiag("addReview book=\(bookId) 未返回 reviewId")
+            FlareDiagnostics.shared.record(
+                .weread,
+                "ERR",
+                "addReview book=\(bookId) 未返回 reviewId"
+            )
+            return false
+        } catch {
+            Self.screenDiag("addReview book=\(bookId) 请求失败: \(error.localizedDescription)")
+            FlareDiagnostics.shared.record(
+                .weread,
+                "ERR",
+                "addReview book=\(bookId) 请求失败: \(error.localizedDescription)"
+            )
+            return false
+        }
+    }
+
+    /// 把一条本地划线 / 想法同步到微读服务端。
+    ///
+    /// 调用方已经完成本地保存，这里只做尽力上传：没有 range、没登录、
+    /// 取不到版本号或接口失败都只记诊断，绝不回滚本地笔记。
+    ///
+    /// 划线（note 为空）只建 bookmark；写想法只建 review。网页写想法时
+    /// 不会再调 `addBookmark`，服务端用 review 自带的 range 显示高亮；
+    /// 两边都建会在官方端出现同一段文字的两条笔记。
+    func uploadHighlight(
+        bookId: String,
+        chapterUid: Int,
+        chapterIdx: Int,
+        range: String,
+        markText: String,
+        note: String,
+        cookie: String
+    ) async {
+        guard !cookie.isEmpty else { return }
+        guard !range.isEmpty, !markText.isEmpty else {
+            Self.screenDiag(
+                "上传笔记跳过 book=\(bookId) chapter=\(chapterUid) 缺少 range"
+            )
+            return
+        }
+
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            guard let version = await bookVersions(bookId: bookId, cookie: cookie)?.version else {
+                Self.screenDiag(
+                    "上传划线跳过 book=\(bookId) chapter=\(chapterUid) 未取到 bookVersion"
+                )
+                return
+            }
+            _ = await addBookmark(
+                bookId: bookId,
+                chapterUid: chapterUid,
+                chapterIdx: chapterIdx,
+                bookVersion: version,
+                range: range,
+                markText: markText,
+                cookie: cookie
+            )
+            return
+        }
+
+        _ = await addReview(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            range: range,
+            content: trimmed,
+            abstract: markText,
+            cookie: cookie
+        )
+    }
+
+    /// 服务端标识字段可能是数组，也可能直接是字符串。
+    private func firstIdentifier(_ value: Any?) -> String? {
+        if let list = value as? [Any] {
+            for item in list {
+                let id =
+                    (item as? String)
+                    ?? (item as? NSNumber)?.stringValue
+                    ?? ""
+                if !id.isEmpty { return id }
+            }
+            return nil
+        }
+        if let id = value as? String, !id.isEmpty { return id }
+        return nil
     }
 
     // MARK: - 网页阅读器地址
