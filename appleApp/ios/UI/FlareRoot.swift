@@ -57,6 +57,20 @@ struct FlareRoot: View {
                         .adaptiveLabelStyle(globalAppearance.showBottomBarLabels || horizontalSizeClass == .regular)
                     }
                 }
+                if showsWereadMainTab {
+                    Tab(value: "route:weread") {
+                        Router { onNavigate in
+                            Route.weread.view(onNavigate: onNavigate, goBack: {})
+                        }
+                    } label: {
+                        Label {
+                            Text("微信读书")
+                        } icon: {
+                            Image(fontAwesome: .bookmark)
+                        }
+                        .adaptiveLabelStyle(globalAppearance.showBottomBarLabels || horizontalSizeClass == .regular)
+                    }
+                }
                 // iPhone Duo also has a regular width when unfolded; these shortcuts are iPad-only.
                 if UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular {
                     if case .success(let data) = onEnum(of: secondaryTabsPresenter.state.items) {
@@ -124,10 +138,22 @@ struct FlareRoot: View {
         return items.contains { $0.accountKey.host == "instagram.com" }
     }
 
-    /// iPad 常规宽度已经有副栏入口，不再重复加 tab。
+    /// 用户要求：底栏原本给 Instagram 的位置改放微信读书，Instagram 收到「标签页」
+    /// （iPhone 上是左上角头像打开的 SecondaryTabsScreen，那里本来就有 Instagram 入口）。
+    /// 因此 IG 主 tab 只在 iPad 紧凑宽度保留——iPad 常规宽度有侧栏，紧凑宽度没有
+    /// 侧栏、.sidebarOnly 的 IG 入口点不到，删掉会真的进不去 IG。
     private var showsInstagramMainTab: Bool {
         guard hasInstagramAccount else { return false }
-        return !(UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular)
+        return UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .compact
+    }
+
+    /// 微信读书占原来 Instagram 的底栏位置：iPhone 常驻，iPad 只在紧凑宽度
+    /// （没有侧栏）时补一个。15PM 精简包刻意不含微读，保持一致。
+    /// 不按登录态隐藏：未登录时书架页本身就是登录入口。
+    private var showsWereadMainTab: Bool {
+        guard !FlareBuildVariant.isPhoneLite else { return false }
+        guard UIDevice.current.userInterfaceIdiom == .pad else { return true }
+        return horizontalSizeClass == .compact
     }
 
     @TabContentBuilder<String?>
@@ -218,6 +244,20 @@ struct BackportFlareRoot: View {
                     }
                     .tag("route:instagram")
                 }
+                if showsWereadMainTab {
+                    Router { onNavigate in
+                        Route.weread.view(onNavigate: onNavigate, goBack: {})
+                    }
+                    .tabItem {
+                        Label {
+                            Text("微信读书")
+                        } icon: {
+                            Image(systemName: "book.fill")
+                        }
+                        .adaptiveLabelStyle(globalAppearance.showBottomBarLabels)
+                    }
+                    .tag("route:weread")
+                }
             }
             .modifier(TabBarDoubleTapModifier {
                 NotificationCenter.default.post(name: .tabDoubleTapped, object: selectedTab)
@@ -248,10 +288,20 @@ struct BackportFlareRoot: View {
         return items.contains { $0.accountKey.host == "instagram.com" }
     }
 
-    /// iPad 常规宽度已经有副栏入口，不再重复加 tab。
+    /// 底栏原来给 Instagram 的位置改放微信读书；Instagram 收到左上角头像打开的
+    /// 标签页（SecondaryTabsScreen）里。只有 iPad 紧凑宽度没有侧栏入口，才保留 IG tab。
     private var showsInstagramMainTab: Bool {
         guard hasInstagramAccount else { return false }
-        return !(UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular)
+        return UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .compact
+    }
+
+    /// 微信读书占原来 Instagram 的底栏位置：iPhone 常驻，iPad 只在紧凑宽度
+    /// （没有侧栏）时补一个。15PM 精简包刻意不含微读，保持一致。
+    /// 不按登录态隐藏：未登录时书架页本身就是登录入口。
+    private var showsWereadMainTab: Bool {
+        guard !FlareBuildVariant.isPhoneLite else { return false }
+        guard UIDevice.current.userInterfaceIdiom == .pad else { return true }
+        return horizontalSizeClass == .compact
     }
 }
 
