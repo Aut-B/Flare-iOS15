@@ -964,14 +964,19 @@ final class WereadStore: ObservableObject {
         )
     }
 
+    /// 落本机后再上报服务端。返回服务端结果，调用方据此决定是否还要补旧进度；
+    /// 本机进度不受上报成败影响。
     func report(
         bookId: String,
         chapterUid: Int,
         offset: Int,
         chapterIndex: Int,
-        percent: Int = 0
-    ) {
-        guard !bookId.isEmpty, chapterUid > 0 else { return }
+        percent: Int = 0,
+        rt: Int = 0
+    ) async -> WereadReadReportOutcome {
+        guard !bookId.isEmpty, chapterUid > 0 else {
+            return .failed("无效进度")
+        }
         // 先落本机：断网、未登录或服务端不认上报时，重进仍能回到原位。
         cacheProgress(
             bookId: bookId,
@@ -980,16 +985,17 @@ final class WereadStore: ObservableObject {
             percent: percent
         )
         let cookie = cookie
-        guard !cookie.isEmpty else { return }
-        Task.detached(priority: .utility) {
-            await WereadService.shared.reportProgress(
-                bookId: bookId,
-                chapterUid: chapterUid,
-                chapterOffset: offset,
-                chapterIndex: chapterIndex,
-                cookie: cookie
-            )
+        guard !cookie.isEmpty else {
+            return .failed("未登录")
         }
+        return await WereadService.shared.reportProgress(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            chapterOffset: offset,
+            chapterIndex: chapterIndex,
+            rt: rt,
+            cookie: cookie
+        )
     }
 
     private func progressKey(_ bookId: String) -> String {

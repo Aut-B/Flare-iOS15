@@ -1,5 +1,6 @@
 import Foundation
 import os
+import CryptoKit
 
 /// 续期结果必须可区分：只有服务端明确拒绝才允许上层清掉登录态。
 nonisolated enum WereadRenewalOutcome: Sendable, Equatable {
@@ -44,6 +45,21 @@ nonisolated struct WereadOwnReview: Hashable, Identifiable, Sendable {
     var id: String { reviewId }
 }
 
+/// `/web/book/read` 的结果。只用来记诊断和判断「服务端到底认没认」，
+/// 不据此清登录态 —— 时长上报失败不该把用户踢下线。
+nonisolated enum WereadReadReportOutcome: Sendable, Equatable {
+    /// 回包明确 `succ == 1`。
+    case accepted
+    /// HTTP 2xx 但回包没有 `succ` / `errCode`，无法确认是否计入。
+    case uncertain(String)
+    /// 服务端给了非 0 的 `errCode`。
+    case rejected(String)
+    /// 拿不到 readerToken，按要求不发假 rt。
+    case missingToken
+    /// 网络/解析失败。
+    case failed(String)
+}
+
 /// 微信读书 Web 接口封装。
 ///
 /// 全部走 `weread.qq.com` 的网页接口，登录态就是浏览器那套 cookie
@@ -72,6 +88,25 @@ final class WereadService: @unchecked Sendable {
     private let bookVersionLock = NSLock()
     private var bookVersionCache: [String: BookVersions] = [:]
 
+    /// `/web/getConfig` 下发的 reader token，`sg` 签名要用。
+    /// 按 cookie 摘要缓存，过期或服务端回 -806 时重取。
+    private let readTokenLock = NSLock()
+    private var readTokenCache: [String: (token: String, stamp: Date)] = [:]
+    private static let readTokenTTL: TimeInterval = 600
+
+    /// 阅读上报要用本章阅读器页面的 `ps`/`pc`，但正文可能走的是不需要信标的
+    /// 旧版直连。抓页面有成本，同一章 2 分钟内最多为上报补抓一次；
+    /// 抓到的会话另存 10 分钟，避免正文缓存过期后上报退回占位 `ps`/`pc`。
+    private let readSessionAttemptLock = NSLock()
+    private var readSessionAttempts: [String: Date] = [:]
+    private static let readSessionAttemptTTL: TimeInterval = 120
+
+    /// 只给时长上报复用的阅读器会话。官方阅读器在一个章节里始终用页面加载时
+    /// 那组 `psvts`/`pclts` 上报，所以这里不跟着正文缓存 2 分钟一起过期。
+    private let readReportSessionLock = NSLock()
+    private var readReportSessions: [String: (value: WereadReaderSession, stamp: Date)] = [:]
+    private static let readReportSessionTTL: TimeInterval = 600
+
     /// NSLock.lock()/unlock() 不允许在 async 上下文调用（Swift 6 严格并发），
     /// 所以把缓存读写包在同步方法里，async 侧只调这两个方法。
     private func cachedBookVersion(for bookId: String) -> BookVersions? {
@@ -85,6 +120,81 @@ final class WereadService: @unchecked Sendable {
         defer { bookVersionLock.unlock() }
         bookVersionCache[bookId] = versions
     }
+
+    /// NSLock 不能直接在 async 上下文里 lock，读写都包成同步方法。
+    private func cachedReaderToken(for key: String) -> String? {
+        readTokenLock.lock()
+        defer { readTokenLock.unlock() }
+        guard let entry = readTokenCache[key] else { return nil }
+        if Date().timeIntervalSince(entry.stamp) > Self.readTokenTTL {
+            readTokenCache[key] = nil
+            return nil
+        }
+        return entry.token.isEmpty ? nil : entry.token
+    }
+
+    private func storeReaderToken(_ token: String, for key: String) {
+        guard !token.isEmpty else { return }
+        readTokenLock.lock()
+        defer { readTokenLock.unlock() }
+        let now = Date()
+        readTokenCache = readTokenCache.filter { now.timeIntervalSince($0.value.stamp) <= Self.readTokenTTL }
+        readTokenCache[key] = (token, now)
+    }
+
+    private func invalidateReaderToken(for key: String) {
+        readTokenLock.lock()
+        readTokenCache[key] = nil
+        readTokenLock.unlock()
+    }
+
+    /// 同一章 2 分钟内只补抓一次阅读器页面；抓不到就退回占位 `ps`/`pc`。
+    private func beginReadSessionAttempt(for key: String) -> Bool {
+        readSessionAttemptLock.lock()
+        defer { readSessionAttemptLock.unlock() }
+        let now = Date()
+        if let last = readSessionAttempts[key],
+           now.timeIntervalSince(last) < Self.readSessionAttemptTTL
+        {
+            return false
+        }
+        if readSessionAttempts.count > 20 {
+            readSessionAttempts = readSessionAttempts.filter {
+                now.timeIntervalSince($0.value) <= Self.readSessionAttemptTTL
+            }
+        }
+        readSessionAttempts[key] = now
+        return true
+    }
+
+    private func cachedReadReportSession(
+        for key: String
+    ) -> (session: WereadReaderSession, stamp: Date)? {
+        readReportSessionLock.lock()
+        defer { readReportSessionLock.unlock() }
+        guard let entry = readReportSessions[key] else { return nil }
+        if Date().timeIntervalSince(entry.stamp) > Self.readReportSessionTTL {
+            readReportSessions[key] = nil
+            return nil
+        }
+        return (entry.value, entry.stamp)
+    }
+
+    @discardableResult
+    private func storeReadReportSession(
+        _ value: WereadReaderSession,
+        for key: String
+    ) -> Date {
+        readReportSessionLock.lock()
+        defer { readReportSessionLock.unlock() }
+        let now = Date()
+        readReportSessions = readReportSessions.filter {
+            now.timeIntervalSince($0.value.stamp) <= Self.readReportSessionTTL
+        }
+        readReportSessions[key] = (value, now)
+        return now
+    }
+
     /// 信标有效期。`psvts` 会随时间失效，太短会反复抓页面，太长会拿到过期的。
     private static let sessionTTL: TimeInterval = 120
     /// 同一源 cookie 的并发续期只打一次服务端，其余调用等这一次结果。
@@ -913,15 +1023,87 @@ final class WereadService: @unchecked Sendable {
         }
     }
 
-    /// 上报阅读进度。失败不抛错 —— 进度丢一次不影响读书。
+    /// 上报阅读进度 / 阅读时长。失败不抛错 —— 报告丢一次不影响读书。
     ///
-    /// 以前这里发 `ci/pc/ps` 三个假值（`pc`/`ps` 是别的设备的固定串），
-    /// 接口能收下但不认，进度等于没同步。现在只发不依赖阅读器会话的字段：
-    /// 章节偏移 + 章节序号 + 起始时间。
+    /// `rt == 0` 时保持旧行为，只报章节进度；`rt > 0` 时按官方 reader JS
+    /// `FETCH_READER_BOOK_READ` 的完整字段上报：
+    /// `appId,b,c,ci,co,sm,pr,rt,ts,rn,sg,ct,ps,pc`，最后 `s = sign(全部字段)`。
     ///
-    /// 完整上报（`rt` 阅读时长、`sg` 签名、`ps/pc` 会话）要等拿到
-    /// `reader.psvts` / `reader.token` 后才可信，见根因文档 Step 2。
+    /// - `rt`：距上次上报的前台阅读秒数，官方上限 60；
+    /// - `sg = sha256("\(ts)\(rn)\(readerToken)")`，token 来自 `/web/getConfig`；
+    /// - `ci` 是章节序号（官方 `currentChapter.chapterIdx`），`c` 是 chapterUid 的 calcHash；
+    /// - `ps` 取本章阅读器页面的 `psvts` 原值；`pc` 优先页面的 `pclts`，
+    ///   没有就按官方 `_e(页面挂载秒)` 用会话抓取时刻现算（`ps` 拿不到才退回历史占位串）。
+    @discardableResult
     func reportProgress(
+        bookId: String,
+        chapterUid: Int,
+        chapterOffset: Int,
+        chapterIndex: Int,
+        rt: Int = 0,
+        cookie: String
+    ) async -> WereadReadReportOutcome {
+        let seconds = min(max(rt, 0), 60)
+        guard seconds > 0 else {
+            await reportLegacyProgress(
+                bookId: bookId,
+                chapterUid: chapterUid,
+                chapterOffset: chapterOffset,
+                chapterIndex: chapterIndex,
+                cookie: cookie
+            )
+            // 这是纯进度上报，没有阅读时长可确认；不能伪装成「已发送时长」。
+            return .failed("rt=0")
+        }
+
+        let tokenKey = WereadCrypto.md5(cookie)
+        guard let token = await readerToken(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            cookie: cookie,
+            key: tokenKey
+        ) else {
+            let line = "read 缺 readerToken，跳过时长上报 rt=\(seconds)"
+            Self.screenDiag(line)
+            log.notice("weread diag: \(line, privacy: .public)")
+            return .missingToken
+        }
+
+        let outcome = await postReadReport(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            chapterOffset: chapterOffset,
+            chapterIndex: chapterIndex,
+            rt: seconds,
+            token: token,
+            cookie: cookie
+        )
+        // 官方在 -806 时先刷新 getConfig 再重试一次。
+        if case .rejected(let reason) = outcome, reason.contains("-806") {
+            invalidateReaderToken(for: tokenKey)
+            guard let fresh = await readerToken(
+                bookId: bookId,
+                chapterUid: chapterUid,
+                cookie: cookie,
+                key: tokenKey
+            ) else {
+                return outcome
+            }
+            return await postReadReport(
+                bookId: bookId,
+                chapterUid: chapterUid,
+                chapterOffset: chapterOffset,
+                chapterIndex: chapterIndex,
+                rt: seconds,
+                token: fresh,
+                cookie: cookie
+            )
+        }
+        return outcome
+    }
+
+    /// 旧的进度上报：不依赖 readerToken / 签名，只在没有时长时使用。
+    private func reportLegacyProgress(
         bookId: String,
         chapterUid: Int,
         chapterOffset: Int,
@@ -945,6 +1127,220 @@ final class WereadService: @unchecked Sendable {
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         _ = try? await send(request)
+    }
+
+    /// 带 `rt` 的完整上报。`ps` 没有信标时退回历史占位串，`pc` 依次取页面
+    /// `pclts` / 会话抓取时刻的 `_e(...)`；是否真被采信以服务端回包为准。
+    private func postReadReport(
+        bookId: String,
+        chapterUid: Int,
+        chapterOffset: Int,
+        chapterIndex: Int,
+        rt: Int,
+        token: String,
+        cookie: String
+    ) async -> WereadReadReportOutcome {
+        let sessionEntry = await readSessionForReport(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            cookie: cookie
+        )
+        let now = Date().timeIntervalSince1970
+        let ts = Int(now * 1000)
+        let ct = Int(now)
+        let rn = Int.random(in: 0..<1000)
+        let sg = Self.sha256Hex("\(ts)\(rn)\(token)")
+        let offset = max(chapterOffset, 0)
+        let livePs = sessionEntry?.session.ps(for: chapterUid)
+        let ps = livePs ?? Self.placeholderPs
+        // 官方页面挂载时 `pclts = _e(当前秒级时间戳)`，整章不变；页面里没解析到
+        // （或只是初始值 "0"）就用会话抓取时刻换算，避免每 30 秒变一次 `pc`。
+        let livePc = sessionEntry?.session.pc(for: ct)
+        let pc: String
+        let pcSource: String
+        if let livePc, !livePc.isEmpty, livePc != "0" {
+            pc = livePc
+            pcSource = "page"
+        } else if let stamp = sessionEntry?.stamp {
+            pc = WereadCrypto.calcHash(String(Int(stamp.timeIntervalSince1970)))
+            pcSource = "calcHash(sessionStamp)"
+        } else {
+            pc = WereadCrypto.calcHash(String(ct))
+            pcSource = "calcHash(ct)"
+        }
+        let appId = Self.readAppId(for: Self.readerUserAgent)
+
+        let fields: [(String, String)] = [
+            ("appId", appId),
+            ("b", WereadCrypto.calcHash(bookId)),
+            ("c", WereadCrypto.calcHash(String(chapterUid))),
+            ("ci", String(chapterIndex)),
+            ("co", String(offset)),
+            ("sm", ""),
+            ("pr", "0"),
+            ("rt", String(rt)),
+            ("ts", String(ts)),
+            ("rn", String(rn)),
+            ("sg", sg),
+            ("ct", String(ct)),
+            ("ps", ps),
+            ("pc", pc),
+        ]
+
+        var request = URLRequest(url: URL(string: "\(base)/web/book/read")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.setValue(Self.readerUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("https://weread.qq.com/", forHTTPHeaderField: "Referer")
+
+        let payload: [String: Any] = [
+            "appId": appId,
+            "b": WereadCrypto.calcHash(bookId),
+            "c": WereadCrypto.calcHash(String(chapterUid)),
+            "ci": chapterIndex,
+            "co": offset,
+            "sm": "",
+            "pr": 0,
+            "rt": rt,
+            "ts": ts,
+            "rn": rn,
+            "sg": sg,
+            "ct": ct,
+            "ps": ps,
+            "pc": pc,
+            "s": WereadCrypto.sign(fields),
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        let psSource = livePs != nil ? "session" : "placeholder"
+        let beaconSource = "ps=\(psSource) pc=\(pcSource)"
+        Self.screenDiag("read 上报 rt=\(rt) \(beaconSource) tokenLen=\(token.count)")
+        // 不用 sendWithStatus：它会把非 2xx 也当 error 抛，且这里必须拿到真实
+        // 状态码来区分「2xx 空回包（官方 {} 成功形态）」和「登录页/劫持页/5xx」。
+        // 后者绝不能标成 .uncertain，否则调用方 consumeReadingSeconds(rt) 会
+        // 永久扣掉这段时长且不重试，服务端进度也不会发。
+        do {
+            let (data, response) = try await session.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let head = String(decoding: data.prefix(160), as: UTF8.self)
+                .replacingOccurrences(of: "\n", with: " ")
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let succ = intValue(json?["succ"])
+            let errCode = intValue(json?["errCode"]) ?? intValue(json?["errcode"])
+            if succ == 1 {
+                let line = "read OK rt=\(rt) status=\(status) \(beaconSource) head=\(head)"
+                Self.screenDiag(line)
+                log.notice("weread diag: \(line, privacy: .public)")
+                return .accepted
+            }
+            if let errCode, errCode != 0 {
+                let reason = "errCode=\(errCode) status=\(status) head=\(head)"
+                let line = "read 拒绝 rt=\(rt) \(reason)"
+                Self.screenDiag(line)
+                log.notice("weread diag: \(line, privacy: .public)")
+                return .rejected(reason)
+            }
+            // 只有 2xx + 空回包或可解析的 JSON 对象（`{}` 官方成功形态）才算
+            // 「已发送但未确认」——这段时长真机再看是否计入。
+            let is2xx = (200..<300).contains(status)
+            let isEmptyOrJSON = data.isEmpty || json != nil
+            if is2xx && isEmptyOrJSON {
+                let line = "read 已发送 rt=\(rt) status=\(status) 2xx 无 succ/errCode（官方 {} 也算成功）head=\(head)"
+                Self.screenDiag(line)
+                log.notice("weread diag: \(line, privacy: .public)")
+                return .uncertain(head)
+            }
+            // 非 2xx / HTML 登录页 / 解析失败：保留 pending 到下一轮，不消费 rt。
+            let reason = "HTTP \(status) head=\(head)"
+            let line = "read 失败 rt=\(rt) \(reason)"
+            Self.screenDiag(line)
+            log.notice("weread diag: \(line, privacy: .public)")
+            return .failed(reason)
+        } catch {
+            let reason = String(describing: error)
+            let line = "read 失败 rt=\(rt) error=\(reason)"
+            Self.screenDiag(line)
+            log.notice("weread diag: \(line, privacy: .public)")
+            return .failed(reason)
+        }
+    }
+
+    /// 取 readerToken：优先 10 分钟缓存，其次 `/web/getConfig`，
+    /// 最后退回本章阅读器页面里的 `reader.token`。
+    private func readerToken(
+        bookId: String,
+        chapterUid: Int,
+        cookie: String,
+        key: String
+    ) async -> String? {
+        if let cached = cachedReaderToken(for: key) { return cached }
+        if let token = await fetchReaderToken(cookie: cookie) {
+            storeReaderToken(token, for: key)
+            return token
+        }
+        if let entry = await readSessionForReport(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            cookie: cookie
+        ), !entry.session.token.isEmpty {
+            storeReaderToken(entry.session.token, for: key)
+            return entry.session.token
+        }
+        return nil
+    }
+
+    private func fetchReaderToken(cookie: String) async -> String? {
+        guard let url = URL(string: "\(base)/web/getConfig") else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.setValue(Self.readerUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
+        request.setValue("https://weread.qq.com/", forHTTPHeaderField: "Referer")
+        do {
+            let data = try await send(request)
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let nested = json?["data"] as? [String: Any]
+            let token =
+                (nested?["token"] as? String)
+                ?? (json?["token"] as? String)
+                ?? ""
+            guard !token.isEmpty else {
+                log.notice("weread diag: getConfig 无 token")
+                return nil
+            }
+            log.notice("weread diag: getConfig tokenLen=\(token.count, privacy: .public)")
+            return token
+        } catch {
+            log.notice(
+                "weread diag: getConfig 失败 \(String(describing: error), privacy: .public)"
+            )
+            return nil
+        }
+    }
+
+    /// 正文可能走旧版直连、没留下信标；为上报补抓本章阅读器页面，
+    /// 同一章 2 分钟内最多一次，避免每 30 秒下载一遍 HTML。
+    private func readSessionForReport(
+        bookId: String,
+        chapterUid: Int,
+        cookie: String
+    ) async -> (session: WereadReaderSession, stamp: Date)? {
+        let key = "\(bookId)#\(chapterUid)"
+        if let cached = cachedReadReportSession(for: key) { return cached }
+        if let cached = cachedSession(for: key) {
+            return (cached, storeReadReportSession(cached, for: key))
+        }
+        guard beginReadSessionAttempt(for: key) else { return nil }
+        guard let fetched = await readerSession(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            cookie: cookie
+        ) else {
+            return nil
+        }
+        return (fetched, storeReadReportSession(fetched, for: key))
     }
 
     // MARK: - 服务端笔记
@@ -1913,6 +2309,29 @@ final class WereadService: @unchecked Sendable {
     private static let placeholderPs = "a2b325707a19e580g0186a2"
     /// 旧版（reader-session 改动之前）一直随 `placeholderPs` 一起发的固定 pc。
     private static let placeholderPc = "430321207a19e581g013ab0"
+
+    /// `sg = sha256("\(ts)\(rn)\(readerToken)")`，输出小写十六进制。
+    private static func sha256Hex(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    /// 官方 reader JS 的 `appId`：UA 按空格切前 12 段、每段长度取个位，
+    /// 再对整串做 `num = (131 * num + charCode) & 0x7fffffff`，
+    /// 最后拼十进制（官方 `'wb'+prefix+'h'+num`，Number 隐式转十进制）。
+    private static func readAppId(for userAgent: String) -> String {
+        let parts = userAgent.split(separator: " ", omittingEmptySubsequences: false)
+        var prefix = ""
+        for part in parts.prefix(12) {
+            prefix += String(part.count % 10)
+        }
+        var number: Int64 = 0
+        for unit in userAgent.utf16 {
+            number = (131 * number + Int64(unit)) & 0x7fff_ffff
+        }
+        return "wb\(prefix)h\(number)"
+    }
 
     // MARK: - 工具
 

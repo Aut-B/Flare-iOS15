@@ -73,6 +73,14 @@ struct WereadNativeReaderView: View {
     @State private var loadToken = 0
     /// 滚动时定期落本机的节流时间（秒）。
     @State private var lastCachedAt: TimeInterval = 0
+    /// 前台阅读计时的锚点：从这一刻起的时间会算进下一次 `rt` 上报。
+    @State private var readingFlushAnchor: Date?
+    /// 已计时但还没上报的秒数。单次最多报 60 秒，多出的留到下一次。
+    @State private var pendingReadingSeconds = 0
+    /// 前台每 30 秒（官方 `startReportTimer` 的 30000ms）上报阅读时长的循环任务。
+    @State private var readingTimer: Task<Void, Never>?
+    /// 是否已有一条带 `rt` 的上报在路上；避免并发 flush 把同一段秒数发两遍。
+    @State private var readingFlushInFlight = false
     /// JS 点「想法」后发起的输入请求。走 SwiftUI 浮层而不是 `window.prompt`，
     /// 不依赖 WKUIDelegate 的 UIKit 弹窗回调链。
     @State private var noteRequest: WereadNoteRequest?
@@ -258,11 +266,34 @@ struct WereadNativeReaderView: View {
         .fullScreenCover(isPresented: $showWeb) {
             WereadReaderView(target: webReaderTarget)
         }
-        .onDisappear { saveProgress() }
+        .onDisappear {
+            stopReadingTimer()
+            // 先同步落本机再上报：上报要等网络，进程可能先被挂起/回收，
+            // 不能把「退出前的最后一段位置」押在异步任务一定跑完上。
+            persistLocalProgress()
+            Task { await saveProgress() }
+        }
         // 切后台/被系统回收前再落一次；强杀无法拦截，滚动节流和续读
         // 目标落盘才是「读到一半被杀」的主要保障。
         .backportOnChange(of: scenePhase) { _, phase in
-            if phase != .active { saveProgress() }
+            if phase == .active {
+                // 只算前台时间：回前台重新起锚点，不补后台停留的秒数。
+                startReadingTimer()
+            } else {
+                stopReadingTimer()
+                persistLocalProgress()
+                Task { await saveProgress() }
+            }
+        }
+        .backportOnChange(of: showWeb) { _, shown in
+            // 进了官方网页阅读器就交给它自己计时，避免两边同时上报。
+            if shown {
+                stopReadingTimer()
+                persistLocalProgress()
+                Task { await saveProgress() }
+            } else {
+                startReadingTimer()
+            }
         }
     }
 
@@ -345,6 +376,8 @@ struct WereadNativeReaderView: View {
                 scrollFraction = fraction
                 scrollOffset = position
                 chapterReady = true
+                // 有章节只靠滚动就绪（没走加载成功分支）时，也把阅读计时带起来。
+                startReadingTimer()
                 // 能收到滚动消息说明用户已经接管位置（恢复阶段 JS 不报）。
                 hasReadingPosition = true
                 // 滚动中每 2 秒落一次本机；正常退出仍由 saveProgress 兜底。
@@ -406,7 +439,7 @@ struct WereadNativeReaderView: View {
     private var topBar: some View {
         HStack(spacing: 10) {
             Button {
-                saveProgress()
+                Task { await saveProgress() }
                 dismiss()
             } label: {
                 Image(systemName: "chevron.left")
@@ -1137,7 +1170,20 @@ struct WereadNativeReaderView: View {
     private func open(_ position: Int) async {
         guard chapters.indices.contains(position) else { return }
         guard position != index else { return }
-        saveProgress()
+        // 先快照旧章位置：等完时长上报后 index 已经是新章，不能再读视图状态。
+        let fallback = progressReport()
+        let outcome = await flushReadingTime()
+        if let fallback {
+            switch outcome {
+            case .accepted?:
+                // 只有服务端明确收下时才由带 rt 的上报同时携带旧章位置。
+                break
+            default:
+                // `{}` 只能确认请求发出，不能确认位置已落库；失败时更不能丢位置。
+                // 位置兜底不阻塞翻章：网络弱时让它在后台自己重试/失败。
+                Task { await reportLegacyProgress(fallback) }
+            }
+        }
         // 手动翻章从章首开始，不能把「打开这本书」的续读位置带过去。
         restoreOffset = 0
         restoreFraction = 0
@@ -1212,6 +1258,10 @@ struct WereadNativeReaderView: View {
     @MainActor
     private func loadChapter(at position: Int, token: Int) async {
         guard chapters.indices.contains(position) else { return }
+        // 先把上一章还没上报的阅读时长结掉，再换 index。
+        await flushReadingTime()
+        stopReadingTimer()
+        readingFlushAnchor = nil
         index = position
         scrollFraction = 0
         scrollOffset = 0
@@ -1241,7 +1291,10 @@ struct WereadNativeReaderView: View {
             html = cached
             await waitForRender(token: token)
             restoreScrollIfNeeded(token: token)
-            if token == loadToken { chapterReady = true }
+            if token == loadToken {
+                chapterReady = true
+                startReadingTimer()
+            }
             prefetch(after: position)
             return
         }
@@ -1256,7 +1309,10 @@ struct WereadNativeReaderView: View {
             // 用户看到的是白屏。等 `onReady` 或超时兜底。
             await waitForRender(token: token)
             restoreScrollIfNeeded(token: token)
-            if token == loadToken { chapterReady = true }
+            if token == loadToken {
+                chapterReady = true
+                startReadingTimer()
+            }
             prefetch(after: position)
         } catch {
             guard token == loadToken else { return }
@@ -1349,22 +1405,185 @@ struct WereadNativeReaderView: View {
         }
     }
 
-    private func saveProgress() {
-        guard chapterReady, hasReadingPosition, let current else { return }
+    /// 把从锚点到现在的秒数记进 `pendingReadingSeconds`，但不扣减。
+    /// 单次最多报 60 秒，多出的留给后面的上报。
+    @MainActor
+    private func peekReadingSeconds() -> Int {
+        if let anchor = readingFlushAnchor {
+            let now = Date()
+            let seconds = Int(now.timeIntervalSince(anchor))
+            if seconds > 0 {
+                readingFlushAnchor = now
+                pendingReadingSeconds += seconds
+            }
+        }
+        return min(max(pendingReadingSeconds, 0), 60)
+    }
+
+    /// 服务端确认收到后才扣掉这一段；失败时保留，下一轮原样重发。
+    @MainActor
+    private func consumeReadingSeconds(_ rt: Int) {
+        pendingReadingSeconds = max(pendingReadingSeconds - rt, 0)
+    }
+
+    /// 把累计的前台阅读时长发出去。
+    ///
+    /// - 返回 `nil`：没有待报时长（或当前不能计时），调用方按原进度上报。
+    /// - `.accepted`：服务端明确 `succ == 1`。
+    /// - `.uncertain`：2xx 但回包没有 `succ` / `errCode`，即官方 `{}` 成功形态。
+    ///   按「已发送」扣掉这段，避免重复计时；但绝不宣称已验证计入，
+    ///   调用方仍要补旧进度兜底。
+    /// - `.missingToken` / `.failed` / `.rejected`：不扣秒数，调用方继续走旧进度兜底，
+    ///   下一轮计时会带上这段未确认时长重试。
+    @MainActor
+    @discardableResult
+    private func flushReadingTime() async -> WereadReadReportOutcome? {
+        guard !isPDF, chapterReady, let chapter = current, chapter.uid > 0 else {
+            return nil
+        }
+        guard !store.cookie.isEmpty else {
+            // 未登录就别攒时间了，避免登录后把离线时长一次性补报。
+            readingFlushAnchor = Date()
+            pendingReadingSeconds = 0
+            return nil
+        }
+        // 同一段时长只能有一条上报在路上。并发 flush 明确返回失败，
+        // 让调用方继续走旧进度兜底；pending 不扣减，下一轮仍会重发。
+        if readingFlushInFlight {
+            return .failed("上一段时长上报尚未返回")
+        }
+        let rt = peekReadingSeconds()
+        guard rt > 0 else { return nil }
+        readingFlushInFlight = true
+        defer { readingFlushInFlight = false }
+        var offset = max(scrollOffset, 0)
+        if offset <= 0, scrollFraction > 0.001 {
+            offset = Int(Double(max(chapter.wordCount, 1)) * scrollFraction)
+        }
+        let outcome = await store.report(
+            bookId: target.book.id,
+            chapterUid: chapter.uid,
+            offset: offset,
+            chapterIndex: chapter.index,
+            percent: Int((scrollFraction * 100).rounded()),
+            rt: rt
+        )
+        switch outcome {
+        case .accepted:
+            consumeReadingSeconds(rt)
+        case .uncertain:
+            // 官方成功回调就是 2xx `{}`（诊断实测 200·2B·{}）。按「已发送」
+            // 扣掉这段，避免每 30 秒重复累加；但它没有 succ/errCode，
+            // 只能标成未确认，真机再看阅读时长是否增加。
+            consumeReadingSeconds(rt)
+            WereadService.screenDiag(
+                "阅读时长未确认（2xx {}），不重复发也未宣称已计入 rt=\(rt)"
+            )
+        case .missingToken, .failed, .rejected:
+            // peek 没扣减，pending 原样保留；调用方继续发旧进度兜底。
+            break
+        }
+        return outcome
+    }
+
+    /// 前台每 30 秒上报一次阅读时长；切后台、翻章、退出都会先 flush。
+    @MainActor
+    private func startReadingTimer() {
+        if let existing = readingTimer, !existing.isCancelled { return }
+        readingTimer = nil
+        guard !isPDF, !showWeb, chapterReady, scenePhase == .active,
+              let chapter = current, chapter.uid > 0,
+              !store.cookie.isEmpty
+        else { return }
+        readingFlushAnchor = Date()
+        readingTimer = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                if Task.isCancelled { return }
+                guard scenePhase == .active, !showWeb, chapterReady, !isPDF else { continue }
+                await flushReadingTime()
+            }
+        }
+    }
+
+    private func stopReadingTimer() {
+        readingTimer?.cancel()
+        readingTimer = nil
+    }
+
+    /// 把当前章的位置取成快照，供异步上报使用。
+    @MainActor
+    private func progressReport() -> WereadProgressReport? {
+        guard chapterReady, hasReadingPosition, let current else { return nil }
         var offset = scrollOffset
         if offset <= 0, scrollFraction > 0.001 {
             offset = Int(Double(max(current.wordCount, 1)) * scrollFraction)
         }
-        WereadService.screenDiag(
-            "进度保存 book=\(target.book.id) chapter=\(current.uid) offset=\(max(offset, 0)) percent=\(Int((scrollFraction * 100).rounded()))"
-        )
-        store.report(
+        return WereadProgressReport(
             bookId: target.book.id,
             chapterUid: current.uid,
-            offset: max(offset, 0),
             chapterIndex: current.index,
+            offset: max(offset, 0),
             percent: Int((scrollFraction * 100).rounded())
         )
+    }
+
+    @MainActor
+    private func reportLegacyProgress(_ report: WereadProgressReport) async {
+        WereadService.screenDiag(
+            "进度保存 book=\(report.bookId) chapter=\(report.chapterUid) offset=\(report.offset) percent=\(report.percent)"
+        )
+        _ = await store.report(
+            bookId: report.bookId,
+            chapterUid: report.chapterUid,
+            offset: report.offset,
+            chapterIndex: report.chapterIndex,
+            percent: report.percent
+        )
+    }
+
+    /// 只把当前阅读位置同步落本机，不发网络。
+    ///
+    /// 退出/切后台时系统可能在网络 `await` 期间就挂起进程，所以必须先落盘；
+    /// 返回值是这次快照，供调用方在异步上报里继续兜底，避免网络期间翻章
+    /// 后把旧位置写进新章。
+    @MainActor
+    @discardableResult
+    private func persistLocalProgress() -> WereadProgressReport? {
+        guard let report = progressReport() else { return nil }
+        store.cacheProgress(
+            bookId: report.bookId,
+            chapterUid: report.chapterUid,
+            offset: report.offset,
+            percent: report.percent
+        )
+        return report
+    }
+
+    @MainActor
+    private func saveProgress() async {
+        // 先落本机：后面的 flush 要等 getConfig / 阅读器页 / POST，
+        // 切后台或退出时不能保证 await 之后还有机会写 UserDefaults。
+        let snapshot = persistLocalProgress()
+        // 有时长就先发完整上报；只有服务端明确收下才跳过旧进度上报。
+        // `{}` 只代表请求已发出，仍补一次旧进度；失败/缺 token/被拒时
+        // pending 未扣减，同样继续走旧进度兜底。
+        if let outcome = await flushReadingTime() {
+            switch outcome {
+            case .accepted:
+                return
+            case .uncertain:
+                WereadService.screenDiag(
+                    "阅读时长未确认（2xx {}），继续补旧进度，不宣称已计入"
+                )
+            case .missingToken, .failed, .rejected:
+                break
+            }
+        }
+        // 兜底沿用进入 saveProgress 时的快照：flush 期间可能已经翻章，
+        // 不能再把新章位置当成上一章的进度上报。
+        guard let report = snapshot ?? progressReport() else { return }
+        await reportLegacyProgress(report)
     }
 }
 
@@ -1419,6 +1638,15 @@ private struct WereadNoteRequest: Identifiable {
     var reviewId: String? = nil
     /// 编辑已有想法；否则是给划线补想法（或新建）。
     var isEditing: Bool = false
+}
+
+/// 上报进度用的位置快照。退出/翻章后视图状态会变，异步任务不能回头再读。
+private struct WereadProgressReport: Sendable {
+    let bookId: String
+    let chapterUid: Int
+    let chapterIndex: Int
+    let offset: Int
+    let percent: Int
 }
 
 /// 一次续读滚动请求：优先按章内字符偏移定位，比例只在量不出文本长度时兜底。
