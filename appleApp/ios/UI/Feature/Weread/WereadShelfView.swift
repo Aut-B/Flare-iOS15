@@ -10,7 +10,13 @@ struct WereadShelfView: View {
     @State private var showLogin = false
     @State private var nativeTarget: WereadNativeTarget?
 
-    private let columns = [GridItem(.adaptive(minimum: 96, maximum: 140), spacing: 16)]
+    /// 6S 有「标准 375pt」和「放大 320pt」两种逻辑宽度。
+    /// 固定两列均分：左右各 12pt、列间 10pt，两列边界都能由同一公式算出；
+    /// 不再用单个 adaptive 列，避免宽封面把某一格撑宽后压到邻格。
+    private let columns = [
+        GridItem(.flexible(), spacing: 10, alignment: .top),
+        GridItem(.flexible(), spacing: 10, alignment: .top)
+    ]
 
     var body: some View {
         Group {
@@ -108,20 +114,21 @@ struct WereadShelfView: View {
             } else {
                 if shelfSections.count <= 1 {
                     grid(flatBooks)
-                        .padding(.vertical, 16)
+                        .padding(.vertical, 10)
                 } else {
-                    VStack(alignment: .leading, spacing: 20) {
+                    LazyVStack(alignment: .leading, spacing: 14) {
                         ForEach(shelfSections) { section in
-                            VStack(alignment: .leading, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 6) {
                                 Text(section.title)
-                                    .font(.system(size: 15, weight: .semibold))
+                                    .font(.system(size: 13, weight: .semibold))
                                     .foregroundStyle(.primary)
-                                    .padding(.horizontal, 16)
+                                    .lineLimit(1)
+                                    .padding(.horizontal, 12)
                                 grid(section.books)
                             }
                         }
                     }
-                    .padding(.vertical, 16)
+                    .padding(.vertical, 10)
                 }
             }
         }
@@ -137,7 +144,7 @@ struct WereadShelfView: View {
     }
 
     private func grid(_ books: [WereadBook]) -> some View {
-        LazyVGrid(columns: columns, spacing: 18) {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
             ForEach(books) { book in
                 Button {
                     open(book)
@@ -147,7 +154,7 @@ struct WereadShelfView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 12)
     }
 
     /// 点书立刻进原生阅读器。
@@ -159,52 +166,88 @@ struct WereadShelfView: View {
     }
 
     private func bookCell(_ book: WereadBook) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             cover(book)
             Text(book.title)
                 .font(.system(size: 13, weight: .medium))
-                .lineLimit(2)
                 .foregroundStyle(.primary)
-            Text(book.author)
-                .font(.system(size: 11))
-                .lineLimit(1)
-                .foregroundStyle(.secondary)
-            if book.progress > 0 || book.finished {
-                Text(book.finished ? "已读完" : "已读 \(book.progress)%")
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34, alignment: .topLeading)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(book.author.isEmpty ? " " : book.author)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                Text(progressText(book))
+                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 14, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // 整格（封面 + 书名 + 作者/进度）裁在自己的 bounds 内，
+        // 宽幅套装封面或超长书名都碰不到相邻格。
+        .clipped()
+        .contentShape(Rectangle())
+    }
+
+    private func progressText(_ book: WereadBook) -> String {
+        if book.finished {
+            return "已读完"
+        }
+        if book.progress > 0 {
+            return "已读 \(book.progress)%"
+        }
+        return "未读"
     }
 
     private func cover(_ book: WereadBook) -> some View {
-        ZStack(alignment: .bottomLeading) {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color(.tertiarySystemFill))
-            if let cover = book.cover, let url = URL(string: cover) {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        Image(systemName: "book.closed")
-                            .font(.system(size: 22))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            } else {
-                Image(systemName: "book.closed")
-                    .font(.system(size: 22))
-                    .foregroundStyle(.secondary)
+        // Color 先锁死单格封面比例，再让图片 cover 填满并裁切；
+        // 宽幅多册套装图不会按原图宽度撑开格子。
+        Color(.tertiarySystemFill)
+            .aspectRatio(3.0 / 4.2, contentMode: .fit)
+            .overlay {
+                coverImage(book)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
             }
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .strokeBorder(Color.black.opacity(0.06), lineWidth: 0.5)
+            )
+            .clipped()
+    }
+
+    @ViewBuilder
+    private func coverImage(_ book: WereadBook) -> some View {
+        if let cover = book.cover, let url = URL(string: cover) {
+            AsyncImage(url: url) { phase in
+                if let image = phase.image {
+                    image
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    coverPlaceholder
+                }
+            }
+        } else {
+            coverPlaceholder
         }
-        .aspectRatio(3.0 / 4.2, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .strokeBorder(Color.black.opacity(0.06), lineWidth: 0.5)
-        )
+    }
+
+    private var coverPlaceholder: some View {
+        Image(systemName: "book.closed")
+            .font(.system(size: 22))
+            .foregroundStyle(.secondary)
     }
 
     private var loginPrompt: some View {
