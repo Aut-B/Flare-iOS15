@@ -201,8 +201,30 @@ struct WereadNativeReaderView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             if !immersive { topBar }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if !isPDF && !immersive { bottomBar }
+        .overlay {
+            // 翻页按钮做成左下/右下两个玻璃小按钮，浮在正文上，不占整条底栏。
+            // 全屏(immersive)时仍保留——用户要求上一章/下一章不能消失。
+            if !isPDF {
+                VStack {
+                    Spacer()
+                    HStack {
+                        pageTurnButton(systemImage: "chevron.left", label: "上", enabled: index > 0) {
+                            Task { await open(index - 1) }
+                        }
+                        .allowsHitTesting(true)
+                        Spacer()
+                        pageTurnButton(systemImage: "chevron.right", label: "下", enabled: index < chapters.count - 1) {
+                            Task { await open(index + 1) }
+                        }
+                        .allowsHitTesting(true)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+                }
+                // 容器整体不拦截点击，只让两个按钮可点——否则会挡住
+                // 正文的"点中间进全屏"和划词选区。
+                .allowsHitTesting(false)
+            }
         }
         .overlay {
             if let request = noteRequest {
@@ -442,39 +464,31 @@ struct WereadNativeReaderView: View {
         .background(.ultraThinMaterial)
     }
 
-    private var bottomBar: some View {
-        HStack(spacing: 18) {
-            Button {
-                Task { await open(index - 1) }
-            } label: {
-                Label("上一章", systemImage: "chevron.left")
-                    .font(.system(size: 13, weight: .medium))
+    /// 左下/右下角的玻璃质感翻页小按钮：只放一个字，不占整条底栏，
+    /// 全屏时也保留（上一章/下一章不能消失）。
+    private func pageTurnButton(
+        systemImage: String,
+        label: String,
+        enabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 40, height: 40)
+                Circle()
+                    .stroke(.white.opacity(0.25), lineWidth: 0.5)
+                    .frame(width: 40, height: 40)
+                Text(label)
+                    .font(.system(size: 17, weight: .semibold))
             }
-            .buttonStyle(.plain)
-            .disabled(index <= 0)
-            .opacity(index <= 0 ? 0.35 : 1)
-
-            Spacer(minLength: 0)
-
-            Text(chapters.isEmpty ? "" : "\(index + 1) / \(chapters.count)")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-
-            Spacer(minLength: 0)
-
-            Button {
-                Task { await open(index + 1) }
-            } label: {
-                Label("下一章", systemImage: "chevron.right")
-                    .font(.system(size: 13, weight: .medium))
-            }
-            .buttonStyle(.plain)
-            .disabled(index >= chapters.count - 1)
-            .opacity(index >= chapters.count - 1 ? 0.35 : 1)
+            .opacity(enabled ? 0.85 : 0.3)
+            .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial)
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel(systemImage == "chevron.left" ? "上一章" : "下一章")
     }
 
     private var loadingView: some View {
