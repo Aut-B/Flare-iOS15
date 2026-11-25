@@ -197,7 +197,9 @@ private final class WereadSelectionWebView: WKWebView {
     }
 
     deinit {
-        failOpenWorkItem?.cancel()
+        // 不在这里访问 failOpenWorkItem：deinit 是非隔离上下文，Swift 6 严格并发
+        // 下不允许访问非 Sendable 的 DispatchWorkItem?。该 workItem 捕获的是
+        // [weak self]，self 释放后闭包自动 no-op，无需 cancel 也不会野指针。
         NotificationCenter.default.removeObserver(self)
     }
 
