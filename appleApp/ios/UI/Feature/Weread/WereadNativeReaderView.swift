@@ -34,6 +34,8 @@ struct WereadNativeReaderView: View {
     @State private var errorMessage: String?
     /// PDF 不能走原生 chapter 分片；置 true 后只显示跳转网页版的提示页。
     @State private var isPDF = false
+    /// 沉浸阅读：点正文空白处切换，隐藏上下栏。
+    @State private var immersive = false
     @State private var showChapters = false
     @State private var showWeb = false
     @State private var cache: [Int: String] = [:]
@@ -196,9 +198,11 @@ struct WereadNativeReaderView: View {
                 }
             }
         }
-        .safeAreaInset(edge: .top, spacing: 0) { topBar }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if !immersive { topBar }
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if !isPDF { bottomBar }
+            if !isPDF && !immersive { bottomBar }
         }
         .overlay {
             if let request = noteRequest {
@@ -329,6 +333,11 @@ struct WereadNativeReaderView: View {
                 // 或相对伪地址时也不该真的导航，统一落到本章笔记面板。
                 guard token == self.loadToken else { return }
                 handleAnnotationLink(text, href: href)
+            },
+            onToggleFullscreen: {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    immersive.toggle()
+                }
             },
             noteReply: reply,
             onNoteRequest: { text in
@@ -1171,6 +1180,8 @@ private struct WereadChapterWebView: UIViewRepresentable {
     /// 正文里批注/想法/高亮的蓝色可点元素被点击。
     /// 参数是原始 href 和元素文字，由 Swift 侧打开本章笔记面板。
     let onAnnotationLink: (String, String) -> Void
+    /// 点正文空白处：切换沉浸阅读（隐藏/显示上下栏）。
+    let onToggleFullscreen: () -> Void
     let noteReply: WereadNoteReply?
     let onNoteRequest: (String) -> Void
     let onNoteReplyApplied: () -> Void
@@ -1487,6 +1498,10 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 DispatchQueue.main.async {
                     self.parent.onAnnotationLink(href, text)
                 }
+            case "toggleFullscreen":
+                DispatchQueue.main.async {
+                    self.parent.onToggleFullscreen()
+                }
             default:
                 break
             }
@@ -1602,7 +1617,8 @@ enum WereadReaderHTML {
         :root { color-scheme: light dark; }
         html, body {
             margin: 0;
-            padding: 18px 18px 48px;
+            /* 左右留白尽量小，把屏宽让给正文；底部留出翻页栏的空间。 */
+            padding: 8px 8px 48px;
             background: transparent;
             color: #1c1c1e;
             font: 17px/1.85 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
@@ -1865,6 +1881,17 @@ enum WereadReaderHTML {
                     return;
                 }
                 var hit = chapterLinkTarget(event.target);
+                // 点正文空白处切换沉浸阅读（隐藏/显示上下栏）。只在没有选中
+                // 文字、不是链接/批注、不在浮动工具条上时触发，避免干扰划线。
+                if (!hit && !noteHit) {
+                    var sel = '';
+                    try { sel = String(window.getSelection() || '').trim(); } catch (e) { sel = ''; }
+                    var onTools = false;
+                    try { onTools = !!event.target.closest('#wr-tools'); } catch (e) { onTools = false; }
+                    if (!sel && !onTools && event.target.closest && event.target.closest('#wr-content')) {
+                        window.webkit.messageHandlers.weread.postMessage({ type: 'toggleFullscreen' });
+                    }
+                }
                 if (!hit) return;
                 // 用 stopImmediatePropagation：stopPropagation 不拦同一元素上
                 // 其它 listener，微读页面自己绑的跳转仍可能把 404 放出去。
