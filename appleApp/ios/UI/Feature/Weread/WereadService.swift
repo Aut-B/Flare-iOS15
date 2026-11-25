@@ -1110,19 +1110,20 @@ final class WereadService: @unchecked Sendable {
     /// 两种都收；整章想法不按 range 挂到某条划线上。
     private func fetchThoughts(bookId: String, cookie: String) async -> ThoughtFetchResult {
         var result = ThoughtFetchResult()
-        // 官方网页版 review/list 会带 userVid（cookie 里的 wr_vid）；
-        // `count=0` + `listMode=2` 是一次取完「本书我的想法」的常用组合。
+        // 11-25 真机对照坐实（flare-diagnostic-20261125-133336.txt）：同一 cookie 同一本书，
+        // review/list 在手机 UA 下三组参数（Flare 现用 / 官方 reader / wereadx 极简）全回
+        // 41B 空；只有「官方 reader 参数 + 桌面 UA」回 12780B / 8 条想法。
+        // 微读 review/list 按 User-Agent 区别对待，手机 UA 一律返回空。
+        // 所以这里照成功那组原样发：listMode=3 + syncKey=0（去掉 maxIdx/count），桌面 UA。
         let userVid = cookieValue(named: "wr_vid", in: cookie)
         result.hasUserVid = userVid != nil
         var components = URLComponents(string: "\(base)/web/review/list")
         var queryItems = [
             URLQueryItem(name: "bookId", value: bookId),
             URLQueryItem(name: "listType", value: "11"),
-            URLQueryItem(name: "maxIdx", value: "0"),
-            URLQueryItem(name: "count", value: "0"),
-            URLQueryItem(name: "listMode", value: "2"),
+            URLQueryItem(name: "listMode", value: "3"),
+            URLQueryItem(name: "syncKey", value: "0"),
             URLQueryItem(name: "mine", value: "1"),
-            URLQueryItem(name: "synckey", value: "0"),
         ]
         if let userVid {
             queryItems.append(URLQueryItem(name: "userVid", value: userVid))
@@ -1132,6 +1133,7 @@ final class WereadService: @unchecked Sendable {
 
         var request = URLRequest(url: url)
         request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.setValue(Self.readerUserAgent, forHTTPHeaderField: "User-Agent")
         do {
             let data = try await send(request)
             let json = try parseObject(data)
