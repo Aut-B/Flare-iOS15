@@ -76,6 +76,8 @@ private enum HomeTimelineMenuEntry: Identifiable {
 }
 
 private func homeTimelineMenuEntries(allTabs: [UiTimelineTabItem]) -> [HomeTimelineMenuEntry] {
+    // Instagram 在 Kotlin 的 TimelineSlot 里没有数据源，不能伪造一个会打开空时间线的
+    // 真实 tab；但顶部菜单必须始终保留 Swift 侧入口，连 allTabs 为空时也要能进 Instagram。
     let hasRealInstagramTab = allTabs.contains {
         !isHiddenHomeTab($0) && detectedNativeSocialTab(for: $0) == .instagram
     }
@@ -168,7 +170,9 @@ struct HomeTimelineScreen: View {
                 let allTabs: [UiTimelineTabItem] = state.cast(UiTimelineTabItem.self)
                 let tabs: [UiTimelineTabItem] = allTabs.filter { !isHiddenHomeTab($0) }
                 let menuEntries = homeTimelineMenuEntries(allTabs: allTabs)
-                if allTabs.isEmpty || menuEntries.isEmpty {
+                // menuEntries 至少包含 Instagram，只有菜单构造异常时才回退到空状态；
+                // 不能再因为 allTabs 为空就把 Instagram 入口一起挡掉。
+                if menuEntries.isEmpty {
                     BackportContentUnavailableView("tab_settings_title", systemImage: "square.grid.2x2")
                         .toolbar {
                             leadingToolbarContent
@@ -303,6 +307,7 @@ struct HomeTimelineScreen: View {
                                                             .scaledToFit()
                                                     }
                                                     .labelStyle(.titleAndIcon)
+                                                    .accessibilityIdentifier("home-timeline-instagram-entry")
                                                 }
                                             }
                                         }
@@ -381,6 +386,7 @@ struct HomeTimelineScreen: View {
                                                                 .scaledToFit()
                                                         }
                                                         .labelStyle(.titleAndIcon)
+                                                        .accessibilityIdentifier("home-timeline-instagram-entry")
                                                     }
                                                     .safeAreaInset(edge: .bottom, spacing: 3) {
                                                         if showsInstagram {
