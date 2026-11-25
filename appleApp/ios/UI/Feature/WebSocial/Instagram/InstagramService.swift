@@ -216,6 +216,7 @@ final class InstagramService {
     /// 账号行都靠它显示，不再把 `ds_user_id` 的数字当名字。
     func currentUser() async throws -> (id: String, userName: String)? {
         let endpoints = [
+            "\(base)/api/v1/accounts/current_user/?edit=false",
             "\(base)/api/v1/accounts/edit/web_form_data/",
             "\(base)/api/v1/users/\(userId)/info/",
         ]

@@ -171,6 +171,12 @@ final class InstagramStore: ObservableObject {
         defaults.removeObject(forKey: cookieKey)
         defaults.removeObject(forKey: userKey)
         pushCredentials()
+        // 网页仓库里的旧会话也清掉，否则下次登录页会「一打开就已是登录态」。
+        CookieJar.clear(domainSuffix: "instagram.com") {}
+        for cookie in HTTPCookieStorage.shared.cookies ?? []
+        where cookie.domain.lowercased().contains("instagram.com") {
+            HTTPCookieStorage.shared.deleteCookie(cookie)
+        }
         lastLoadMoreCursor = nil
         DispatchQueue.main.async {
             self.isLoggedIn = false

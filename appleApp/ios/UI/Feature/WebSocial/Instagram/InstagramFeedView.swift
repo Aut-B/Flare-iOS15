@@ -79,7 +79,8 @@ struct InstagramFeedView: View {
                 title: "登录 Instagram",
                 userAgent: Self.desktopUserAgent,
                 requiredCookieName: "sessionid",
-                cookieDomainSuffix: "instagram.com"
+                cookieDomainSuffix: "instagram.com",
+                clearCookies: true
             ) { cookies in
                 store.adopt(cookies: cookies)
                 Task { await store.refresh() }
@@ -257,7 +258,7 @@ struct InstagramFeedView: View {
 
     /// Instagram 在移动 UA 下会把登录页替换成「打开 App」的引导。
     static let desktopUserAgent =
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 }
 
 // MARK: - 卡片
