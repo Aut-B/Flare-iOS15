@@ -392,7 +392,8 @@ internal class VVODataSource(
                         ).data
                         ?.data
                         .orEmpty()
-                        .map { it.render(accountKey) }
+                        // 评论 JSON 可能不带 status；补上所属微博 key，保住评论的「转发评论」按钮。
+                        .map { it.render(accountKey, parentStatusKey = statusKey) }
 
                 return PagingResult(
                     endOfPaginationReached = true,
@@ -625,7 +626,8 @@ internal class VVODataSource(
             ).data
             ?.data
             .orEmpty()
-            .map { it.render(accountKey) }
+            // 评论 JSON 可能不带 status；补上所属微博 key，保住评论的「转发评论」按钮。
+            .map { it.render(accountKey, parentStatusKey = statusKey) }
 
     fun statusExtendedText(statusKey: MicroBlogKey): Flow<UiState<String>> =
         MemCacheable(
