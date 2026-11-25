@@ -10,6 +10,7 @@ import SwiftUI
 /// 想看网页版书架可以在右上角切过去。
 struct WereadTabView: View {
     @State private var useWeb = false
+    @ObservedObject private var store = WereadStore.shared
 
     var body: some View {
         Group {
@@ -30,18 +31,53 @@ struct WereadTabView: View {
                     extraMenuAction: { useWeb = false }
                 )
             } else {
-                WereadShelfView()
-                    .toolbar {
-                        ToolbarItem(placement: .navigationBarTrailing) {
-                            Button {
-                                useWeb = true
-                            } label: {
-                                Image(systemName: "safari")
+                ZStack {
+                    WereadShelfView()
+                        .toolbar {
+                            ToolbarItem(placement: .navigationBarTrailing) {
+                                Button {
+                                    useWeb = true
+                                } label: {
+                                    Image(systemName: "safari")
+                                }
+                                .accessibilityLabel("切到网页版书架")
                             }
-                            .accessibilityLabel("切到网页版书架")
                         }
+                    if store.shouldMaskShelfForEntryRecovery {
+                        entryRecoveryMask
                     }
+                }
+                .task {
+                    await store.recoverSessionOnEntry()
+                }
             }
         }
+    }
+
+    /// 恢复登录态期间遮住书架，避免先闪一帧「登录微信读书」。临时失败
+    /// 只显示重试，不把用户当成已退出；服务端明确判失效才露出登录入口。
+    private var entryRecoveryMask: some View {
+        VStack(spacing: 14) {
+            if store.entryRecoveryUnreachable {
+                Image(systemName: "wifi.exclamationmark")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.secondary)
+                Text("网络暂时不可用，登录信息已保留。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button("重试") {
+                    Task { await store.recoverSessionOnEntry(force: true) }
+                }
+                .buttonStyle(.borderedProminent)
+            } else {
+                ProgressView()
+                Text("正在恢复登录状态…")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemGroupedBackground))
+        .accessibilityElement(children: .combine)
     }
 }

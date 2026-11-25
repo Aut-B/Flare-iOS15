@@ -183,7 +183,11 @@ private struct WereadWebContainer: UIViewRepresentable {
             WKWebsiteDataStore.default().httpCookieStore.getAllCookies { [weak self] cookies in
                 guard let self else { return }
                 let weread = cookies.filter { $0.domain.contains("weread.qq.com") }
-                guard weread.contains(where: { $0.name == "wr_vid" && !$0.value.isEmpty }) else {
+                // adopt 同时要求账号 wr_vid 与会话 wr_skey；只看到 wr_vid 就
+                // 回调会在 wr_skey 尚未落盘时提前 adopt 失败、白关登录页。
+                let hasUser = weread.contains { $0.name == "wr_vid" && !$0.value.isEmpty }
+                let hasSession = weread.contains { $0.name == "wr_skey" && !$0.value.isEmpty }
+                guard hasUser, hasSession else {
                     return
                 }
                 self.stopPolling()
