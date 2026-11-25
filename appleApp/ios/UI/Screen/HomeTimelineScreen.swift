@@ -8,7 +8,7 @@ import Combine
 /// 这几个平台的「时间线」实际由原生页面渲染：
 /// - 微信读书只有书架，Kotlin 侧没有时间线；
 /// - Instagram / 小红书要独立的网页 cookie / 签名，Kotlin 那套在真机上容易被风控。
-private enum NativeSocialTab {
+private enum NativeSocialTab: Equatable {
     case instagram
     case xiaohongshu
     case weread
@@ -57,6 +57,52 @@ private func isHiddenHomeTab(_ tab: UiTimelineTabItem) -> Bool {
     }
 }
 
+private let homeTimelineInstagramTabId = "flare:home-timeline-instagram"
+
+/// 顶部时间线分组菜单的一项。微读的菜单槽位由 Instagram 接管，
+/// 但 Instagram 在 Kotlin 侧没有 tab 对象，所以只在 SwiftUI 展示层存在。
+private enum HomeTimelineMenuEntry: Identifiable {
+    case tab(UiTimelineTabItem)
+    case instagram
+
+    var id: String {
+        switch self {
+        case .tab(let tab):
+            return tab.id
+        case .instagram:
+            return homeTimelineInstagramTabId
+        }
+    }
+}
+
+private func homeTimelineMenuEntries(allTabs: [UiTimelineTabItem]) -> [HomeTimelineMenuEntry] {
+    let hasRealInstagramTab = allTabs.contains {
+        !isHiddenHomeTab($0) && detectedNativeSocialTab(for: $0) == .instagram
+    }
+    if hasRealInstagramTab {
+        return allTabs.filter { !isHiddenHomeTab($0) }.map { .tab($0) }
+    }
+
+    var entries: [HomeTimelineMenuEntry] = []
+    var insertedInstagram = false
+    for tab in allTabs {
+        if detectedNativeSocialTab(for: tab) == .weread {
+            // 在原微读槽位放 Instagram；多个微读分组也只保留一个 IG 入口。
+            if !insertedInstagram {
+                entries.append(.instagram)
+                insertedInstagram = true
+            }
+            continue
+        }
+        if isHiddenHomeTab(tab) { continue }
+        entries.append(.tab(tab))
+    }
+    if !insertedInstagram {
+        entries.append(.instagram)
+    }
+    return entries
+}
+
 @ViewBuilder
 private func nativeSocialView(for tab: NativeSocialTab) -> some View {
     switch tab {
@@ -82,6 +128,7 @@ struct HomeTimelineScreen: View {
     @Environment(\.timelineAppearance) private var timelineAppearance
     @Environment(\.openURL) private var openURL
     @State private var selectedTabId: String?
+    @State private var isInstagramSelected = false
     @Namespace private var selectedTabIndicatorNamespace
     @StateObject private var presenter: KotlinPresenter<HomeTimelineWithTabsPresenterState>
     @StateObject private var activeAccountPresenter = KotlinPresenter(presenter: ActiveAccountPresenter())
@@ -120,7 +167,8 @@ struct HomeTimelineScreen: View {
             StateView(state: presenter.state.tabState) { state in
                 let allTabs: [UiTimelineTabItem] = state.cast(UiTimelineTabItem.self)
                 let tabs: [UiTimelineTabItem] = allTabs.filter { !isHiddenHomeTab($0) }
-                if tabs.isEmpty {
+                let menuEntries = homeTimelineMenuEntries(allTabs: allTabs)
+                if allTabs.isEmpty || menuEntries.isEmpty {
                     BackportContentUnavailableView("tab_settings_title", systemImage: "square.grid.2x2")
                         .toolbar {
                             leadingToolbarContent
@@ -134,7 +182,7 @@ struct HomeTimelineScreen: View {
                             }
                         }
                 } else {
-                    if globalAppearance.deckMode && horizontalSizeClass == .regular {
+                    if globalAppearance.deckMode && horizontalSizeClass == .regular && !tabs.isEmpty {
                         DeckTimelineLayout(
                             tabs: tabs,
                             baseTimelineAppearance: timelineAppearance,
@@ -155,18 +203,24 @@ struct HomeTimelineScreen: View {
                             }
                         }
                     } else {
-                        let tab = (selectedTabId ?? presenter.state.initialSelectedTabId).flatMap { id in
+                        let selectedId = selectedTabId ?? presenter.state.initialSelectedTabId
+                        let resolvedTab = selectedId.flatMap { id in
                             tabs.first { $0.id == id }
-                        } ?? tabs[0]
-                        let resolvedTimelineAppearance =
-                            tab.resolveTimelineAppearance(base: timelineAppearance)
+                        } ?? tabs.first
+                        // Instagram 使用独立选中态，不依赖 tabs[0] 这类真实 tab 兜底。
+                        let showsInstagram = isInstagramSelected || resolvedTab == nil
+                        let resolvedTimelineAppearance = resolvedTab.map {
+                            showsInstagram ? timelineAppearance : $0.resolveTimelineAppearance(base: timelineAppearance)
+                        } ?? timelineAppearance
                         ZStack {
-                            // Instagram / 小红书 / 微信读书的标签直接渲染原生页，
+                            // Instagram 菜单槽位 / 小红书 / 微信读书的标签直接渲染原生页，
                             // 数据源和登录态都由 WebSocial / Weread 那套自己管。
                             Group {
-                                if let nativeTab = nativeSocialTab(for: tab) {
+                                if showsInstagram {
+                                    InstagramFeedView()
+                                } else if let tab = resolvedTab, let nativeTab = nativeSocialTab(for: tab) {
                                     nativeSocialView(for: nativeTab)
-                                } else {
+                                } else if let tab = resolvedTab {
                                     TimelineScreen(
                                         tabItem: tab,
                                         allowGalleryMode: true,
@@ -177,10 +231,15 @@ struct HomeTimelineScreen: View {
                                     )
                                 }
                             }
-                                .id("\(tab.id):\(tab.contentSourceKey)")
+                                .id(
+                                    showsInstagram
+                                        ? homeTimelineInstagramTabId
+                                        : resolvedTab.map { "\($0.id):\($0.contentSourceKey)" } ?? homeTimelineInstagramTabId
+                                )
                         }
                         .safeAreaInset(edge: .top, spacing: 0) {
-                            if resolvedTimelineAppearance.timelineDisplayMode == .gallery,
+                            if !showsInstagram,
+                               resolvedTimelineAppearance.timelineDisplayMode == .gallery,
                                shouldShowChangeLog {
                                 ChangeLogNotice(version: currentVersion) {
                                     changeLogPresenter.state.dismissChangeLog()
@@ -192,7 +251,12 @@ struct HomeTimelineScreen: View {
                             if let selectedTabId, tabIds.contains(selectedTabId) {
                                 return
                             }
-                            selectedTabId = tabIds.first(where: { $0 == presenter.state.initialSelectedTabId }) ?? tabIds.first
+                            let fallback = tabIds.first(where: { $0 == presenter.state.initialSelectedTabId }) ?? tabIds.first
+                            selectedTabId = fallback
+                            // Instagram 分支下仍保留一个真实 tab id，列表变化时同步给 Kotlin。
+                            if isInstagramSelected, let fallback {
+                                presenter.state.selectTab(tabId: fallback)
+                            }
                         }
                         .backportOnChange(of: selectedTabId) { _, id in // iOS 15 回退：上游 iOS17 目标的 onChange 闭包会解析到 iOS17 重载
                             if let id { presenter.state.selectTab(tabId: id) }
@@ -204,22 +268,42 @@ struct HomeTimelineScreen: View {
                             ToolbarItem(placement: .title) {
                                 if horizontalSizeClass == .compact {
                                     Menu {
-                                        ForEach(tabs, id: \.id) { item in
-                                            Toggle(isOn: Binding(get: {
-                                                tab.id == item.id
-                                            }, set: { value in
-                                                if value {
-                                                    selectedTabId = item.id
+                                        ForEach(menuEntries) { entry in
+                                            switch entry {
+                                            case .tab(let item):
+                                                Toggle(isOn: Binding(get: {
+                                                    !showsInstagram && resolvedTab?.id == item.id
+                                                }, set: { value in
+                                                    if value {
+                                                        selectRealTab(item.id)
+                                                    }
+                                                })) {
+                                                    Label {
+                                                        TimelineTabTitle(title: item.title)
+                                                    } icon: {
+                                                        TabIcon(tabItem: item)
+                                                            .frame(width: 24)
+                                                            .scaledToFit()
+                                                    }
+                                                    .labelStyle(.titleAndIcon)
                                                 }
-                                            })) {
-                                                Label {
-                                                    TimelineTabTitle(title: item.title)
-                                                } icon: {
-                                                    TabIcon(tabItem: item)
-                                                        .frame(width: 24)
-                                                        .scaledToFit()
+                                            case .instagram:
+                                                Toggle(isOn: Binding(get: {
+                                                    showsInstagram
+                                                }, set: { value in
+                                                    if value {
+                                                        selectInstagram(currentRealTabId: resolvedTab?.id)
+                                                    }
+                                                })) {
+                                                    Label {
+                                                        Text("Instagram")
+                                                    } icon: {
+                                                        Image(fontAwesome: .photoFilm)
+                                                            .frame(width: 24)
+                                                            .scaledToFit()
+                                                    }
+                                                    .labelStyle(.titleAndIcon)
                                                 }
-                                                .labelStyle(.titleAndIcon)
                                             }
                                         }
                                         Divider()
@@ -233,14 +317,25 @@ struct HomeTimelineScreen: View {
                                             }
                                         }
                                     } label: {
-                                        Label {
-                                            TimelineTabTitle(title: tab.title)
-                                        } icon: {
-                                            TabIcon(tabItem: tab)
+                                        if showsInstagram || resolvedTab == nil {
+                                            Label {
+                                                Text("Instagram")
+                                            } icon: {
+                                                Image(fontAwesome: .photoFilm)
+                                            }
+                                            .labelStyle(.titleAndIcon)
+                                            .accessibilityIdentifier("home-timeline-title")
+                                            .id(homeTimelineInstagramTabId)
+                                        } else if let resolvedTab {
+                                            Label {
+                                                TimelineTabTitle(title: resolvedTab.title)
+                                            } icon: {
+                                                TabIcon(tabItem: resolvedTab)
+                                            }
+                                            .labelStyle(.titleAndIcon)
+                                            .accessibilityIdentifier("home-timeline-title")
+                                            .id("\(resolvedTab.id):\(resolvedTab.contentSourceKey)")
                                         }
-                                        .labelStyle(.titleAndIcon)
-                                        .accessibilityIdentifier("home-timeline-title")
-                                        .id("\(tab.id):\(tab.contentSourceKey)")
                                     }
                                 }
                             }
@@ -248,28 +343,55 @@ struct HomeTimelineScreen: View {
                                 if horizontalSizeClass != .compact {
                                     ScrollView(.horizontal) {
                                         HStack {
-                                            ForEach(tabs, id: \.id) { item in
-                                                Button {
-                                                    selectedTabId = item.id
-                                                } label: {
-                                                    Label {
-                                                        TimelineTabTitle(title: item.title)
-                                                    } icon: {
-                                                        TabIcon(tabItem: item)
-                                                            .frame(width: 24)
-                                                            .scaledToFit()
+                                            ForEach(menuEntries) { entry in
+                                                switch entry {
+                                                case .tab(let item):
+                                                    Button {
+                                                        selectRealTab(item.id)
+                                                    } label: {
+                                                        Label {
+                                                            TimelineTabTitle(title: item.title)
+                                                        } icon: {
+                                                            TabIcon(tabItem: item)
+                                                                .frame(width: 24)
+                                                                .scaledToFit()
+                                                        }
+                                                        .labelStyle(.titleAndIcon)
                                                     }
-                                                    .labelStyle(.titleAndIcon)
-                                                }
-                                                .safeAreaInset(edge: .bottom, spacing: 3) {
-                                                    if tab.id == item.id {
-                                                        Capsule()
-                                                            .fill(Color.accentColor)
-                                                            .frame(width: 18, height: 3)
-                                                            .matchedGeometryEffect(id: "selectedTabIndicator", in: selectedTabIndicatorNamespace)
-                                                    } else {
-                                                        Capsule()
-                                                            .frame(width: 0, height: 3)
+                                                    .safeAreaInset(edge: .bottom, spacing: 3) {
+                                                        if !showsInstagram, resolvedTab?.id == item.id {
+                                                            Capsule()
+                                                                .fill(Color.accentColor)
+                                                                .frame(width: 18, height: 3)
+                                                                .matchedGeometryEffect(id: "selectedTabIndicator", in: selectedTabIndicatorNamespace)
+                                                        } else {
+                                                            Capsule()
+                                                                .frame(width: 0, height: 3)
+                                                        }
+                                                    }
+                                                case .instagram:
+                                                    Button {
+                                                        selectInstagram(currentRealTabId: resolvedTab?.id)
+                                                    } label: {
+                                                        Label {
+                                                            Text("Instagram")
+                                                        } icon: {
+                                                            Image(fontAwesome: .photoFilm)
+                                                                .frame(width: 24)
+                                                                .scaledToFit()
+                                                        }
+                                                        .labelStyle(.titleAndIcon)
+                                                    }
+                                                    .safeAreaInset(edge: .bottom, spacing: 3) {
+                                                        if showsInstagram {
+                                                            Capsule()
+                                                                .fill(Color.accentColor)
+                                                                .frame(width: 18, height: 3)
+                                                                .matchedGeometryEffect(id: "selectedTabIndicator", in: selectedTabIndicatorNamespace)
+                                                        } else {
+                                                            Capsule()
+                                                                .frame(width: 0, height: 3)
+                                                        }
                                                     }
                                                 }
                                             }
@@ -277,6 +399,7 @@ struct HomeTimelineScreen: View {
                                         .padding(.top, 6)
                                         .padding(.horizontal)
                                         .animation(.interactiveSpring(response: 0.25, dampingFraction: 0.85), value: selectedTabId)
+                                        .animation(.interactiveSpring(response: 0.25, dampingFraction: 0.85), value: isInstagramSelected)
                                     }
                                 }
                             }
@@ -309,6 +432,23 @@ struct HomeTimelineScreen: View {
             return false
         }
         return state.data.boolValue
+    }
+
+    private func selectRealTab(_ id: String) {
+        if selectedTabId == id {
+            presenter.state.selectTab(tabId: id)
+        }
+        selectedTabId = id
+        isInstagramSelected = false
+    }
+
+    private func selectInstagram(currentRealTabId: String?) {
+        if let currentRealTabId {
+            selectedTabId = currentRealTabId
+            // 进入 Instagram 前显式记录真实 tab id，Kotlin 侧不会收到哨兵值。
+            presenter.state.selectTab(tabId: currentRealTabId)
+        }
+        isInstagramSelected = true
     }
 
     private var changeLogAccessoryItems: [UITimelineCollectionViewAccessoryItem] {
