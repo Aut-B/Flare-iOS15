@@ -44,11 +44,14 @@ private func nativeSocialTab(for tab: UiTimelineTabItem) -> NativeSocialTab? {
     }
 }
 
-private func isPhoneLiteHiddenTab(_ tab: UiTimelineTabItem) -> Bool {
-    guard FlareBuildVariant.isPhoneLite else { return false }
+private func isHiddenHomeTab(_ tab: UiTimelineTabItem) -> Bool {
     switch detectedNativeSocialTab(for: tab) {
-    case .xiaohongshu, .weread:
+    case .weread:
+        // 微信读书从底栏书本入口进，不再占顶部时间线菜单。
         return true
+    case .xiaohongshu:
+        // Phone Lite 仍按原策略隐藏小红书；普通包保留顶部菜单和小红书页。
+        return FlareBuildVariant.isPhoneLite
     default:
         return false
     }
@@ -116,7 +119,7 @@ struct HomeTimelineScreen: View {
         GeometryReader { proxy in
             StateView(state: presenter.state.tabState) { state in
                 let allTabs: [UiTimelineTabItem] = state.cast(UiTimelineTabItem.self)
-                let tabs: [UiTimelineTabItem] = allTabs.filter { !isPhoneLiteHiddenTab($0) }
+                let tabs: [UiTimelineTabItem] = allTabs.filter { !isHiddenHomeTab($0) }
                 if tabs.isEmpty {
                     BackportContentUnavailableView("tab_settings_title", systemImage: "square.grid.2x2")
                         .toolbar {
