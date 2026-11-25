@@ -9,6 +9,8 @@ struct DiagnosticsScreen: View {
     @State private var showShare = false
     @State private var shareURL: URL?
     @State private var copied = false
+    @State private var probeBookId: String = ""
+    @State private var probeRunning = false
 
     var body: some View {
         List {
@@ -16,6 +18,36 @@ struct DiagnosticsScreen: View {
                 Text("先复现问题（进小红书看笔记详情 / 评论，进微信读书点重试，进 Instagram 点点赞评论，微博连续转发两次），再回来导出。报告含每个请求的状态码、返回摘要和错误原因，不含 cookie 原文。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Text("云端笔记拉取定位：用当前登录态对同一本书打多组笔记接口参数（bookmarklist 3 组 / review/list 4 组，含官方参数与桌面 UA），把每组的状态码、字节数、解析条数写进报告。只读，不改本地笔记、不写服务端。先在微读登录，再点测试。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                TextField("书 ID（留空 = 自动测最近读的 2 本）", text: $probeBookId)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button {
+                    probeRunning = true
+                    let cookie = WereadStore.shared.cookie
+                    let override = probeBookId
+                    Task {
+                        await WereadService.shared.diagnoseNoteEndpoints(
+                            cookie: cookie,
+                            bookIdOverride: override.isEmpty ? nil : override
+                        )
+                        reportText = FlareDiagnostics.shared.report()
+                        probeRunning = false
+                    }
+                } label: {
+                    Label(
+                        probeRunning ? "正在打接口…" : "跑笔记接口对照（写进报告）",
+                        systemImage: "flask"
+                    )
+                }
+                .disabled(probeRunning)
+            } header: {
+                Text("笔记接口对照测试（诊断专用）")
             }
 
             Section {

@@ -1195,6 +1195,148 @@ final class WereadService: @unchecked Sendable {
         }
     }
 
+    // MARK: - 诊断专用：笔记接口参数对照（仅诊断页手动触发）
+
+    /// 从诊断页手动触发：用当前 cookie 对最近阅读的书打多组笔记接口参数，
+    /// 把每组的 HTTP 状态 / 字节数 / 解析条数记进通用诊断报告，用于坐实
+    /// 「云端笔记拉不下来」到底卡在哪一组参数 / 哪个 UA。
+    /// 只读：不改本地状态、不写服务端。正常阅读流程不调用。
+    func diagnoseNoteEndpoints(cookie: String, bookIdOverride: String? = nil) async {
+        guard !cookie.isEmpty else {
+            FlareDiagnostics.shared.record(
+                .weread, "ERR", "笔记接口对照：无登录 cookie，请先在微读登录"
+            )
+            return
+        }
+        let books = (try? await shelf(cookie: cookie)) ?? []
+        var targets: [(id: String, title: String)] = []
+        if let override = bookIdOverride, !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let id = override.trimmingCharacters(in: .whitespacesAndNewlines)
+            targets.append((id, books.first { $0.id == id }?.title ?? "指定书"))
+        } else {
+            targets = Array(
+                books.sorted { $0.updatedAt > $1.updatedAt }
+                    .prefix(2)
+                    .map { (id: $0.id, title: $0.title) }
+            )
+        }
+        guard !targets.isEmpty else {
+            FlareDiagnostics.shared.record(
+                .weread, "ERR", "笔记接口对照：书架为空，无法选书"
+            )
+            return
+        }
+        for target in targets {
+            await diagnoseOneBook(bookId: target.id, title: target.title, cookie: cookie)
+        }
+    }
+
+    private func diagnoseOneBook(bookId: String, title: String, cookie: String) async {
+        FlareDiagnostics.shared.record(
+            .weread, "STATE",
+            "=== 笔记接口对照开始 book=\(bookId) 《\(title)》（仅诊断，非正常拉取）==="
+        )
+        let vid = cookieValue(named: "wr_vid", in: cookie)
+        let vidItems = vid.map { [URLQueryItem(name: "userVid", value: $0)] } ?? []
+
+        // bookmarklist：wereadx / Flare 都只用 bookId；另外试 syncKey 的两种大小写。
+        let bmVariants: [(String, [URLQueryItem])] = [
+            ("仅bookId", [URLQueryItem(name: "bookId", value: bookId)]),
+            (
+                "+syncKey",
+                [URLQueryItem(name: "bookId", value: bookId), URLQueryItem(name: "syncKey", value: "0")]
+            ),
+            (
+                "+synckey",
+                [URLQueryItem(name: "bookId", value: bookId), URLQueryItem(name: "synckey", value: "0")]
+            ),
+        ]
+        for (label, items) in bmVariants {
+            await probeNote(
+                api: "bookmarklist", label: label, path: "/web/book/bookmarklist",
+                items: items, cookie: cookie, desktopUA: false
+            ) { json in
+                let updated = (json["updated"] as? [[String: Any]])?.count ?? 0
+                let keys = json.keys.sorted().joined(separator: ",")
+                return "updated=\(updated) keys={\(keys)}"
+            }
+        }
+
+        // review/list：Flare 现用参数 / 官方 reader 参数 / wereadx 极简 / 官方参数+桌面 UA。
+        let rvFlare: [URLQueryItem] = [
+            URLQueryItem(name: "bookId", value: bookId),
+            URLQueryItem(name: "listType", value: "11"),
+            URLQueryItem(name: "maxIdx", value: "0"),
+            URLQueryItem(name: "count", value: "0"),
+            URLQueryItem(name: "listMode", value: "2"),
+            URLQueryItem(name: "mine", value: "1"),
+            URLQueryItem(name: "synckey", value: "0"),
+        ] + vidItems
+        let rvOfficial: [URLQueryItem] = [
+            URLQueryItem(name: "bookId", value: bookId),
+            URLQueryItem(name: "listType", value: "11"),
+            URLQueryItem(name: "listMode", value: "3"),
+            URLQueryItem(name: "syncKey", value: "0"),
+            URLQueryItem(name: "mine", value: "1"),
+        ] + vidItems
+        let rvMinimal: [URLQueryItem] = [
+            URLQueryItem(name: "bookId", value: bookId),
+            URLQueryItem(name: "listType", value: "11"),
+            URLQueryItem(name: "mine", value: "1"),
+        ]
+        let rvVariants: [(String, [URLQueryItem], Bool)] = [
+            ("Flare现用", rvFlare, false),
+            ("官方reader", rvOfficial, false),
+            ("wereadx极简", rvMinimal, false),
+            ("官方reader+桌面UA", rvOfficial, true),
+        ]
+        for (label, items, desktop) in rvVariants {
+            await probeNote(
+                api: "review/list", label: label, path: "/web/review/list",
+                items: items, cookie: cookie, desktopUA: desktop
+            ) { json in
+                let reviews = (json["reviews"] as? [[String: Any]])?.count ?? 0
+                let total = self.intValue(json["totalCount"]) ?? -1
+                let err = self.intValue(json["errCode"]) ?? self.intValue(json["errcode"]) ?? 0
+                return "reviews=\(reviews) total=\(total) err=\(err)"
+            }
+        }
+        FlareDiagnostics.shared.record(
+            .weread, "STATE", "=== 笔记接口对照结束 book=\(bookId) ==="
+        )
+    }
+
+    private func probeNote(
+        api: String, label: String, path: String,
+        items: [URLQueryItem], cookie: String, desktopUA: Bool,
+        summarize: ([String: Any]) -> String
+    ) async {
+        var components = URLComponents(string: "\(base)\(path)")
+        components?.queryItems = items
+        guard let url = components?.url else { return }
+        var request = URLRequest(url: url)
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        if desktopUA {
+            request.setValue(Self.readerUserAgent, forHTTPHeaderField: "User-Agent")
+        }
+        let query = url.query ?? ""
+        do {
+            let (data, response) = try await session.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let head = String(decoding: data.prefix(140), as: UTF8.self)
+                .replacingOccurrences(of: "\n", with: " ")
+            let summary = (try? parseObject(data)).map(summarize) ?? "非JSON"
+            FlareDiagnostics.shared.record(
+                .weread, "PROBE",
+                "对照[\(label)\(desktopUA ? "/桌面UA" : "")] \(api)?\(query) → \(status) · \(data.count)B · \(summary) · head=\(head)"
+            )
+        } catch {
+            FlareDiagnostics.shared.record(
+                .weread, "ERR", "对照[\(label)] \(api) → 失败 \(error.localizedDescription)"
+            )
+        }
+    }
+
     // MARK: - 写入服务端笔记
 
     /// 新增划线要带的书籍版本号，来自 `/web/book/info` 的 `bookInfo.version`。
