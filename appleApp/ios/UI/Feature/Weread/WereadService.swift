@@ -1418,6 +1418,16 @@ final class WereadService: @unchecked Sendable {
             FlareDiagnostics.shared.record(.weread, "ERR", message)
             throw WereadAuthFailure.rejected(failedCookie: cookie)
         }
+        // bookmarklist 为空且 review/list 临时失败时，不能把空数组当成
+        // 「云端确实没有笔记」交给面板显示。否则网络抖动会让用户误以为
+        // 笔记丢了，编辑/删除入口也会被一起藏掉。
+        if updated.isEmpty, thoughtFetch.failed {
+            let message =
+                "bookmarklist book=\(bookId) updated=0 且 review/list 失败，无法确认云端笔记"
+            Self.screenDiag(message)
+            FlareDiagnostics.shared.record(.weread, "ERR", message)
+            throw WereadError.server("云端笔记加载失败，请检查网络后重试")
+        }
         // `range` 是章内字符偏移，不同章节会重复，必须带上 chapterUid 才能对齐。
         var thoughtsByLocation: [String: [ServerThought]] = [:]
         var usedThoughtIds = Set<String>()
@@ -1440,8 +1450,10 @@ final class WereadService: @unchecked Sendable {
             guard !markText.isEmpty else { continue }
 
             let range = stringValue(item["range"])
-            let rawId = ((item["bookmarkId"] as? String) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            // 云端 id 可能是 JSON 字符串、数字或数组；统一转成字符串，
+            // 否则数字 id 会被当成缺失并生成 `bookmark-...` 合成 id，删除时
+            // 拿不到真实 bookmarkId。
+            let rawId = identifierString(item["bookmarkId"])
             let id = rawId.isEmpty ? "bookmark-\(chapterUid)-\(range)-\(index)" : rawId
             guard seen.insert(id).inserted else { continue }
 
@@ -1558,14 +1570,17 @@ final class WereadService: @unchecked Sendable {
             result.totalCount = intValue(json["totalCount"]) ?? reviews.count
             result.hasMore = intValue(json["hasMore"]) == 1
             for (index, item) in reviews.enumerated() {
+                // 标准回包把想法放在 `review` 里；个别版本会平铺到条目上，
+                // 兜底读外层，避免 totalCount/thoughts 有值却一条都解析不出。
+                let review = item["review"] as? [String: Any] ?? item
                 guard
-                    let review = item["review"] as? [String: Any],
-                    let chapterUid = intValue(review["chapterUid"]),
+                    let chapterUid =
+                        intValue(review["chapterUid"]) ?? intValue(item["chapterUid"]),
                     chapterUid > 0
                 else {
                     continue
                 }
-                let type = intValue(review["type"]) ?? 0
+                let type = intValue(review["type"]) ?? intValue(item["type"]) ?? 0
                 if type == 1 { result.type1Count += 1 }
                 if type == 4 { result.type4Count += 1 }
                 guard type == 1 || type == 4 else { continue }
@@ -1575,8 +1590,14 @@ final class WereadService: @unchecked Sendable {
                 let abstract = ((review["abstract"] as? String) ?? "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 let range = type == 1 ? stringValue(review["range"]) : ""
-                let rawId = ((review["reviewId"] as? String) ?? "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                // 服务端可能把 reviewId 序列化成数字或数组；这里必须宽读，
+                // 否则 id 变空后会被 `thought-...` 合成 id 替代，列表能显示
+                // 但编辑/删除找不到真实想法。
+                let nestedReviewId = identifierString(review["reviewId"])
+                let rawId =
+                    nestedReviewId.isEmpty
+                    ? identifierString(item["reviewId"])
+                    : nestedReviewId
                 let id = rawId.isEmpty ? "thought-\(chapterUid)-\(range)-\(index)" : rawId
                 result.thoughts.append(
                     ServerThought(
@@ -2538,6 +2559,12 @@ final class WereadService: @unchecked Sendable {
         }
         if let number = value as? NSNumber { return number.stringValue }
         return ""
+    }
+
+    /// `reviewId` / `bookmarkId` 可能是字符串、数字，个别回包是数组；统一取首个非空值。
+    private func identifierString(_ value: Any?) -> String {
+        let raw = firstIdentifier(value) ?? (value as? NSNumber)?.stringValue ?? ""
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 从 `name=value; name2=value2` 形式的 Cookie 头里取单个值。
