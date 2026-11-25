@@ -1179,8 +1179,10 @@ struct WereadNativeReaderView: View {
     private func open(_ position: Int) async {
         guard chapters.indices.contains(position) else { return }
         guard position != index else { return }
-        // 先快照旧章位置：等完时长上报后 index 已经是新章，不能再读视图状态。
-        let fallback = progressReport()
+        // 先落本机并快照旧章位置：等完时长上报后 index 已经是新章，
+        // 不能再回头读视图状态。
+        let fallback = persistLocalProgress()
+        let token = loadToken
         let outcome = await flushReadingTime()
         if let fallback {
             switch outcome {
@@ -1190,7 +1192,8 @@ struct WereadNativeReaderView: View {
             default:
                 // `{}` 只能确认请求发出，不能确认位置已落库；失败时更不能丢位置。
                 // 位置兜底不阻塞翻章：网络弱时让它在后台自己重试/失败。
-                Task { await reportLegacyProgress(fallback) }
+                // 带上快照时的加载代次，换章后旧位置不再上报。
+                Task { await reportLegacyProgress(fallback, token: token) }
             }
         }
         // 手动翻章从章首开始，不能把「打开这本书」的续读位置带过去。
@@ -1361,16 +1364,10 @@ struct WereadNativeReaderView: View {
         // 退出时也不会把刚恢复到的位置又覆盖成 0。
         scrollOffset = offset
         scrollFraction = fraction
-        // 续读目标本身也要立刻落本机：用户恢复后不再滚动就强杀时，
-        // 之前只有 onScroll/onDisappear 会写，目标位置会丢。
-        if let chapter = current, chapter.uid > 0 {
-            store.cacheProgress(
-                bookId: target.book.id,
-                chapterUid: chapter.uid,
-                offset: offset,
-                percent: Int((fraction * 100).rounded())
-            )
-        }
+        // 这里不再回写本机：恢复目标要么刚从本机读出，要么刚由
+        // `progress(for:)` 把服务端进度 remember 下来，缓存已经是它；
+        // 再用当前时间写一遍只会抬高 savedAt，压过后来的官方进度。
+        // 之后的位置落盘统一走 onScroll / persistLocalProgress。
         WereadService.screenDiag(
             "进度恢复 book=\(target.book.id) chapter=\(current?.uid ?? 0) offset=\(offset) fraction=\(Int((fraction * 100).rounded()))%"
         )
@@ -1475,7 +1472,10 @@ struct WereadNativeReaderView: View {
             offset: offset,
             chapterIndex: chapter.index,
             percent: Int((scrollFraction * 100).rounded()),
-            rt: rt
+            rt: rt,
+            // 这里是从当前视图读到的位置，但上报期间用户可能继续滚动；
+            // 本机只由 persistLocalProgress / onScroll 写，避免 await 后旧值覆盖新值。
+            cacheLocal: false
         )
         switch outcome {
         case .accepted:
@@ -1538,7 +1538,15 @@ struct WereadNativeReaderView: View {
     }
 
     @MainActor
-    private func reportLegacyProgress(_ report: WereadProgressReport) async {
+    private func reportLegacyProgress(_ report: WereadProgressReport, token: Int) async {
+        // 旧快照只对生成它的那次加载有效：翻章/重载后再发，会把服务端
+        // 进度退回上一章；同时这个位置已经过期，丢弃即可。
+        guard token == loadToken else {
+            WereadService.screenDiag(
+                "进度保存丢弃过期快照 book=\(report.bookId) chapter=\(report.chapterUid) offset=\(report.offset)"
+            )
+            return
+        }
         WereadService.screenDiag(
             "进度保存 book=\(report.bookId) chapter=\(report.chapterUid) offset=\(report.offset) percent=\(report.percent)"
         )
@@ -1547,7 +1555,9 @@ struct WereadNativeReaderView: View {
             chapterUid: report.chapterUid,
             offset: report.offset,
             chapterIndex: report.chapterIndex,
-            percent: report.percent
+            percent: report.percent,
+            // 兜底上报的是快照，不是当前视图：只发网络，绝不回写本机。
+            cacheLocal: false
         )
     }
 
@@ -1573,6 +1583,7 @@ struct WereadNativeReaderView: View {
     private func saveProgress() async {
         // 先落本机：后面的 flush 要等 getConfig / 阅读器页 / POST，
         // 切后台或退出时不能保证 await 之后还有机会写 UserDefaults。
+        let token = loadToken
         let snapshot = persistLocalProgress()
         // 有时长就先发完整上报；只有服务端明确收下才跳过旧进度上报。
         // `{}` 只代表请求已发出，仍补一次旧进度；失败/缺 token/被拒时
@@ -1589,10 +1600,14 @@ struct WereadNativeReaderView: View {
                 break
             }
         }
-        // 兜底沿用进入 saveProgress 时的快照：flush 期间可能已经翻章，
-        // 不能再把新章位置当成上一章的进度上报。
-        guard let report = snapshot ?? progressReport() else { return }
-        await reportLegacyProgress(report)
+        // 兜底只发「仍属于当前加载代次」的快照：flush 期间可能已经翻章，
+        // 旧章位置不能再上报。若确实翻章了，改发换章后的当前视图位置。
+        let currentToken = loadToken
+        if token == currentToken, let snapshot {
+            await reportLegacyProgress(snapshot, token: token)
+        } else if let report = persistLocalProgress() {
+            await reportLegacyProgress(report, token: currentToken)
+        }
     }
 }
 

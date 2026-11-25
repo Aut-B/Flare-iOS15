@@ -964,26 +964,34 @@ final class WereadStore: ObservableObject {
         )
     }
 
-    /// 落本机后再上报服务端。返回服务端结果，调用方据此决定是否还要补旧进度；
-    /// 本机进度不受上报成败影响。
+    /// 上报服务端。返回服务端结果，调用方据此决定是否还要补旧进度。
+    ///
+    /// `cacheLocal` 为 false 时只发网络、不写本机：调用方传的是异步任务里
+    /// 捕获的旧快照，写入会把用户已经滚到的新位置覆盖回去，还会刷新
+    /// `savedAt` 压过服务端更新的进度。本机缓存只允许当前视图状态写入
+    /// （`cacheProgress` / `persistLocalProgress`）。
     func report(
         bookId: String,
         chapterUid: Int,
         offset: Int,
         chapterIndex: Int,
         percent: Int = 0,
-        rt: Int = 0
+        rt: Int = 0,
+        cacheLocal: Bool = true
     ) async -> WereadReadReportOutcome {
         guard !bookId.isEmpty, chapterUid > 0 else {
             return .failed("无效进度")
         }
-        // 先落本机：断网、未登录或服务端不认上报时，重进仍能回到原位。
-        cacheProgress(
-            bookId: bookId,
-            chapterUid: chapterUid,
-            offset: offset,
-            percent: percent
-        )
+        // 只在调用方确认是「当前视图状态」时落本机。断网、未登录或服务端
+        // 不认上报时，重进仍能回到原位。
+        if cacheLocal {
+            cacheProgress(
+                bookId: bookId,
+                chapterUid: chapterUid,
+                offset: offset,
+                percent: percent
+            )
+        }
         let cookie = cookie
         guard !cookie.isEmpty else {
             return .failed("未登录")
