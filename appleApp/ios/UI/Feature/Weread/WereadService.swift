@@ -939,6 +939,7 @@ final class WereadService: @unchecked Sendable {
         let url = URL(string: "\(base)/web/book/getProgress?bookId=\(bookId)")!
         var request = URLRequest(url: url)
         request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.setValue(Self.readerUserAgent, forHTTPHeaderField: "User-Agent")
 
         let data = try await send(request)
         let json = try parseObject(data)
@@ -1114,6 +1115,7 @@ final class WereadService: @unchecked Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.setValue(Self.readerUserAgent, forHTTPHeaderField: "User-Agent")
         let now = Int(Date().timeIntervalSince1970)
         let payload: [String: Any] = [
             "b": WereadCrypto.calcHash(bookId),
