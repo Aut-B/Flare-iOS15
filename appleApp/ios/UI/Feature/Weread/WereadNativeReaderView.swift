@@ -81,6 +81,9 @@ struct WereadNativeReaderView: View {
     @State private var readingTimer: Task<Void, Never>?
     /// 是否已有一条带 `rt` 的上报在路上；避免并发 flush 把同一段秒数发两遍。
     @State private var readingFlushInFlight = false
+    /// 所有 `/web/book/read` 共用的串行任务链。前一条请求完整结束后才发下一条，
+    /// 旧章快照即使晚到也只能排在以前，不会反超新章。
+    @State private var reportTail: Task<Void, Never>?
     /// JS 点「想法」后发起的输入请求。走 SwiftUI 浮层而不是 `window.prompt`，
     /// 不依赖 WKUIDelegate 的 UIKit 弹窗回调链。
     @State private var noteRequest: WereadNoteRequest?
@@ -331,30 +334,32 @@ struct WereadNativeReaderView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             if !immersive { topBar }
         }
-        .overlay(alignment: .bottom) {
-            // 上一章/下一章只占底部两个角，不铺整条底栏；全屏(immersive)
-            // 时也保留。不要再给外层容器加 allowsHitTesting(false)：
-            // 那会把子按钮一起禁用，子视图的 true 无法把它改回来。
+        // 左下 / 右下各一个单字按钮，只占自己的命中区域，不铺整条底栏。
+        // 两个 overlay 分开做，避免再出现整层容器挡住正文的情况。
+        .overlay(alignment: .bottomLeading) {
             if !isPDF, !chapters.isEmpty {
-                HStack {
-                    pageTurnButton(
-                        title: "上一章",
-                        systemImage: "chevron.left",
-                        enabled: index > 0
-                    ) {
-                        Task { await open(index - 1) }
-                    }
-                    Spacer(minLength: 0)
-                    pageTurnButton(
-                        title: "下一章",
-                        systemImage: "chevron.right",
-                        enabled: index < chapters.count - 1
-                    ) {
-                        Task { await open(index + 1) }
-                    }
+                pageTurnButton(
+                    title: "上",
+                    accessibilityLabel: "上一章",
+                    enabled: index > 0 && !loading
+                ) {
+                    Task { await open(index - 1) }
                 }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 10)
+                .padding(.leading, 16)
+                .padding(.bottom, 12)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if !isPDF, !chapters.isEmpty {
+                pageTurnButton(
+                    title: "下",
+                    accessibilityLabel: "下一章",
+                    enabled: index < chapters.count - 1 && !loading
+                ) {
+                    Task { await open(index + 1) }
+                }
+                .padding(.trailing, 16)
+                .padding(.bottom, 12)
             }
         }
         .overlay {
@@ -628,39 +633,30 @@ struct WereadNativeReaderView: View {
         .background(.ultraThinMaterial)
     }
 
-    /// 底部「上一章 / 下一章」胶囊：实底、带描边和轻阴影，44pt 触控高度。
-    /// 不再用半透明圆角小方块；箭头 + 文字让入口一眼可读。
+    /// 左下 / 右下的单字翻章按钮：实底圆钮，48pt 触控区。
+    /// 不用半透明方块、材质或模糊；沉浸全屏时也保留。
     private func pageTurnButton(
         title: String,
-        systemImage: String,
+        accessibilityLabel: String,
         enabled: Bool,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 5) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 12, weight: .bold))
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-            }
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 15)
-            .frame(height: 44)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(Color(uiColor: .systemGray5))
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
-            )
-            .shadow(color: .black.opacity(0.14), radius: 7, y: 3)
-            .contentShape(Capsule(style: .continuous))
+            Text(title)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(enabled ? Color.primary : Color.secondary)
+                .frame(width: 48, height: 48)
+                .background(Circle().fill(Color(uiColor: .systemGray5)))
+                .overlay(
+                    Circle().strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
+                )
+                .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
+                .contentShape(Circle())
         }
         .buttonStyle(PageTurnButtonStyle())
         .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.45)
-        .accessibilityLabel(title)
+        .opacity(enabled ? 1 : 0.4)
+        .accessibilityLabel(accessibilityLabel)
     }
 
     private var loadingView: some View {
@@ -1487,6 +1483,18 @@ struct WereadNativeReaderView: View {
     @MainActor
     private func reloadChapter() async {
         guard let current else { return }
+        // 重载有可能发生在弱网下：先把上一段时长取成快照再后台上报，
+        // 不能像以前那样在 loadChapter 里 await 网络，点一下要等十几秒。
+        let leaveToken = loadToken
+        let timeReport = makeReadingTimeReport()
+        stopReadingTimer()
+        if let timeReport {
+            _ = enqueueReadingTime(
+                timeReport,
+                token: leaveToken,
+                fallback: nil
+            )
+        }
         // 清缓存要连 LRU 队列一起清，否则队列里留着一个永远不存在的条目。
         cache[current.uid] = nil
         cacheOrder.removeAll { $0 == current.uid }
@@ -1501,23 +1509,31 @@ struct WereadNativeReaderView: View {
     private func open(_ position: Int) async {
         guard chapters.indices.contains(position) else { return }
         guard position != index else { return }
-        // 先落本机并快照旧章位置：等完时长上报后 index 已经是新章，
-        // 不能再回头读视图状态。
+        // 翻章进行中（含正文还没排版完）不接第二次点击，避免连点排出一串
+        // 网络请求；按钮同时会显示为禁用态。
+        guard !loading else { return }
+        // 先落本机并快照旧章位置 / 时长。下面会立刻切 index，之后不能再
+        // 回头读 `current` 和 `scrollOffset`，所以这两个快照必须在这里取。
         let fallback = persistLocalProgress()
-        let token = loadToken
-        let outcome = await flushReadingTime()
-        if let fallback {
-            switch outcome {
-            case .accepted?:
-                // 只有服务端明确收下时才由带 rt 的上报同时携带旧章位置。
-                break
-            default:
-                // `{}` 只能确认请求发出，不能确认位置已落库；失败时更不能丢位置。
-                // 位置兜底不阻塞翻章：网络弱时让它在后台自己重试/失败。
-                // 带上快照时的加载代次，换章后旧位置不再上报。
-                Task { await reportLegacyProgress(fallback, token: token) }
+        let timeReport = makeReadingTimeReport()
+        let leaveToken = loadToken
+        stopReadingTimer()
+
+        // 在 `loadToken` 进到下一章前**同步入队**，旧章请求因此一定排在
+        // 新章请求之前；真正的切章只等本地状态准备和正文请求，不等网络。
+        if let timeReport {
+            let queued = enqueueReadingTime(
+                timeReport,
+                token: leaveToken,
+                fallback: fallback
+            )
+            if !queued, let fallback {
+                reportLegacyProgress(fallback, token: leaveToken)
             }
+        } else if let fallback {
+            reportLegacyProgress(fallback, token: leaveToken)
         }
+
         // 手动翻章从章首开始，不能把「打开这本书」的续读位置带过去。
         restoreOffset = 0
         restoreFraction = 0
@@ -1592,8 +1608,8 @@ struct WereadNativeReaderView: View {
     @MainActor
     private func loadChapter(at position: Int, token: Int) async {
         guard chapters.indices.contains(position) else { return }
-        // 先把上一章还没上报的阅读时长结掉，再换 index。
-        await flushReadingTime()
+        // 时长上报已由调用方在切 index 前取好快照、放到后台发送。
+        // 这里不再 await 网络，否则弱网下按钮会像「按不动」。
         stopReadingTimer()
         readingFlushAnchor = nil
         index = position
@@ -1754,67 +1770,133 @@ struct WereadNativeReaderView: View {
         pendingReadingSeconds = max(pendingReadingSeconds - rt, 0)
     }
 
-    /// 把累计的前台阅读时长发出去。
+    /// 把当前章待报的时长取成快照；必须在切 index / 清滚动之前调用。
     ///
-    /// - 返回 `nil`：没有待报时长（或当前不能计时），调用方按原进度上报。
-    /// - `.accepted`：服务端明确 `succ == 1`。
-    /// - `.uncertain`：2xx 但回包没有 `succ` / `errCode`，即官方 `{}` 成功形态。
-    ///   按「已发送」扣掉这段，避免重复计时；但绝不宣称已验证计入，
-    ///   调用方仍要补旧进度兜底。
-    /// - `.missingToken` / `.failed` / `.rejected`：不扣秒数，调用方继续走旧进度兜底，
-    ///   下一轮计时会带上这段未确认时长重试。
+    /// 快照里的章、位置、秒数都是取的那一刻的值，后台网络期间视图可以继续
+    /// 换章，不会再读错章节。未登录时清掉累计秒数，避免登录后补报离线时长。
     @MainActor
-    @discardableResult
-    private func flushReadingTime() async -> WereadReadReportOutcome? {
+    private func makeReadingTimeReport() -> WereadReadingTimeReport? {
+        // 已有一条时长上报在队列里等待或正在发送时，pending 还没扣减；
+        // 再取一次快照会把同一段秒数重复入队。
+        guard !readingFlushInFlight else { return nil }
         guard !isPDF, chapterReady, let chapter = current, chapter.uid > 0 else {
             return nil
         }
         guard !store.cookie.isEmpty else {
-            // 未登录就别攒时间了，避免登录后把离线时长一次性补报。
             readingFlushAnchor = Date()
             pendingReadingSeconds = 0
             return nil
         }
-        // 同一段时长只能有一条上报在路上。并发 flush 明确返回失败，
-        // 让调用方继续走旧进度兜底；pending 不扣减，下一轮仍会重发。
-        if readingFlushInFlight {
-            return .failed("上一段时长上报尚未返回")
-        }
         let rt = peekReadingSeconds()
         guard rt > 0 else { return nil }
-        readingFlushInFlight = true
-        defer { readingFlushInFlight = false }
         var offset = max(scrollOffset, 0)
         if offset <= 0, scrollFraction > 0.001 {
             offset = Int(Double(max(chapter.wordCount, 1)) * scrollFraction)
         }
-        let outcome = await store.report(
+        return WereadReadingTimeReport(
             bookId: target.book.id,
             chapterUid: chapter.uid,
-            offset: offset,
             chapterIndex: chapter.index,
+            offset: offset,
             percent: Int((scrollFraction * 100).rounded()),
-            rt: rt,
-            // 这里是从当前视图读到的位置，但上报期间用户可能继续滚动；
-            // 本机只由 persistLocalProgress / onScroll 写，避免 await 后旧值覆盖新值。
+            rt: rt
+        )
+    }
+
+    /// 把快照发出去。调用方必须已经把它排进统一上报队列。
+    @MainActor
+    @discardableResult
+    private func sendReadingTime(
+        _ report: WereadReadingTimeReport
+    ) async -> WereadReadReportOutcome {
+        let outcome = await store.report(
+            bookId: report.bookId,
+            chapterUid: report.chapterUid,
+            offset: report.offset,
+            chapterIndex: report.chapterIndex,
+            percent: report.percent,
+            rt: report.rt,
+            // 快照不是当前视图：只发网络，绝不回写本机。
             cacheLocal: false
         )
         switch outcome {
         case .accepted:
-            consumeReadingSeconds(rt)
+            consumeReadingSeconds(report.rt)
         case .uncertain:
             // 官方成功回调就是 2xx `{}`（诊断实测 200·2B·{}）。按「已发送」
             // 扣掉这段，避免每 30 秒重复累加；但它没有 succ/errCode，
             // 只能标成未确认，真机再看阅读时长是否增加。
-            consumeReadingSeconds(rt)
+            consumeReadingSeconds(report.rt)
             WereadService.screenDiag(
-                "阅读时长未确认（2xx {}），不重复发也未宣称已计入 rt=\(rt)"
+                "阅读时长未确认（2xx {}），不重复发也未宣称已计入 rt=\(report.rt)"
             )
         case .missingToken, .failed, .rejected:
             // peek 没扣减，pending 原样保留；调用方继续发旧进度兜底。
             break
         }
         return outcome
+    }
+
+    /// 把阅读时长快照追加到统一串行队列。
+    ///
+    /// `fallback` 只在这个任务里、且时长没有明确 accepted 时才补发，因此
+    /// 时长与旧进度天然一前一后，不会另起一条并发请求。已有上报在队列中
+    /// 时返回 false，调用方可以把 fallback 单独入队（仍排在它后面）。
+    @MainActor
+    @discardableResult
+    private func enqueueReadingTime(
+        _ report: WereadReadingTimeReport,
+        token: Int,
+        fallback: WereadProgressReport? = nil
+    ) -> Bool {
+        guard !readingFlushInFlight else { return false }
+        readingFlushInFlight = true
+        let queued = enqueueReadReport(token: token, label: "阅读时长") {
+            defer { readingFlushInFlight = false }
+            let outcome = await sendReadingTime(report)
+            if case .accepted = outcome { return }
+            if let fallback {
+                await postLegacyProgress(fallback)
+            }
+        }
+        if !queued {
+            readingFlushInFlight = false
+        }
+        return queued
+    }
+
+    /// 把累计的前台阅读时长追加到串行队列。
+    @MainActor
+    private func flushReadingTime() {
+        guard let report = makeReadingTimeReport() else { return }
+        _ = enqueueReadingTime(report, token: loadToken)
+    }
+
+    /// 所有 `/web/book/read` 的唯一入口：先验代次，再按调用顺序串行执行。
+    ///
+    /// 入队发生在 MainActor 上，因此旧章后台任务若在换章后才醒来，会因
+    /// `token != loadToken` 在这里被丢弃；已经排在前面的旧章请求则一定在
+    /// 新章请求之前完整结束。
+    @MainActor
+    @discardableResult
+    private func enqueueReadReport(
+        token: Int,
+        label: String,
+        operation: @escaping @MainActor () async -> Void
+    ) -> Bool {
+        guard token == loadToken else {
+            WereadService.screenDiag(
+                "\(label)丢弃过期代次 token=\(token) current=\(loadToken)"
+            )
+            return false
+        }
+        let previous = reportTail
+        let next = Task { @MainActor in
+            await previous?.value
+            await operation()
+        }
+        reportTail = next
+        return true
     }
 
     /// 前台每 30 秒上报一次阅读时长；切后台、翻章、退出都会先 flush。
@@ -1832,7 +1914,7 @@ struct WereadNativeReaderView: View {
                 try? await Task.sleep(nanoseconds: 30_000_000_000)
                 if Task.isCancelled { return }
                 guard scenePhase == .active, !showWeb, chapterReady, !isPDF else { continue }
-                await flushReadingTime()
+                flushReadingTime()
             }
         }
     }
@@ -1859,16 +1941,20 @@ struct WereadNativeReaderView: View {
         )
     }
 
+    /// 把进度兜底追加到统一串行队列；不再允许旧章在换章后补发。
     @MainActor
-    private func reportLegacyProgress(_ report: WereadProgressReport, token: Int) async {
-        // 旧快照只对生成它的那次加载有效：翻章/重载后再发，会把服务端
-        // 进度退回上一章；同时这个位置已经过期，丢弃即可。
-        guard token == loadToken else {
-            WereadService.screenDiag(
-                "进度保存丢弃过期快照 book=\(report.bookId) chapter=\(report.chapterUid) offset=\(report.offset)"
-            )
-            return
+    @discardableResult
+    private func reportLegacyProgress(
+        _ report: WereadProgressReport,
+        token: Int
+    ) -> Bool {
+        enqueueReadReport(token: token, label: "进度保存") {
+            await postLegacyProgress(report)
         }
+    }
+
+    @MainActor
+    private func postLegacyProgress(_ report: WereadProgressReport) async {
         WereadService.screenDiag(
             "进度保存 book=\(report.bookId) chapter=\(report.chapterUid) offset=\(report.offset) percent=\(report.percent)"
         )
@@ -1907,33 +1993,24 @@ struct WereadNativeReaderView: View {
         // 切后台或退出时不能保证 await 之后还有机会写 UserDefaults。
         let token = loadToken
         let snapshot = persistLocalProgress()
-        // 有时长就先发完整上报；只有服务端明确收下才跳过旧进度上报。
-        // `{}` 只代表请求已发出，仍补一次旧进度；失败/缺 token/被拒时
-        // pending 未扣减，同样继续走旧进度兜底。
-        if let outcome = await flushReadingTime() {
-            switch outcome {
-            case .accepted:
-                return
-            case .uncertain:
-                WereadService.screenDiag(
-                    "阅读时长未确认（2xx {}），继续补旧进度，不宣称已计入"
-                )
-            case .missingToken, .failed, .rejected:
-                break
+        // 有时长就把快照和兜底放进同一个队列任务；没有时长或已有上报
+        // 在队列中时，兜底也单独入队，绝不绕过串行链直接发。
+        if let timeReport = makeReadingTimeReport() {
+            let queued = enqueueReadingTime(
+                timeReport,
+                token: token,
+                fallback: snapshot
+            )
+            if !queued, let snapshot {
+                reportLegacyProgress(snapshot, token: token)
             }
-        }
-        // 兜底只发「仍属于当前加载代次」的快照：flush 期间可能已经翻章，
-        // 旧章位置不能再上报。若确实翻章了，改发换章后的当前视图位置。
-        let currentToken = loadToken
-        if token == currentToken, let snapshot {
-            await reportLegacyProgress(snapshot, token: token)
-        } else if let report = persistLocalProgress() {
-            await reportLegacyProgress(report, token: currentToken)
+        } else if let snapshot {
+            reportLegacyProgress(snapshot, token: token)
         }
     }
 }
 
-/// 翻页胶囊的按压反馈：轻微缩小，明确告诉用户这次点击被接住了。
+/// 翻章按钮的按压反馈：轻微缩小，明确告诉用户这次点击被接住了。
 private struct PageTurnButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -2039,6 +2116,17 @@ private struct WereadProgressReport: Sendable {
     let chapterIndex: Int
     let offset: Int
     let percent: Int
+}
+
+/// 离开当前章时的阅读时长快照。取完后视图可以立刻切到下一章，
+/// 后台只用这份值上报，不再读 `current` / `scrollOffset`。
+private struct WereadReadingTimeReport: Sendable {
+    let bookId: String
+    let chapterUid: Int
+    let chapterIndex: Int
+    let offset: Int
+    let percent: Int
+    let rt: Int
 }
 
 /// 一次续读滚动请求：优先按章内字符偏移定位，比例只在量不出文本长度时兜底。
