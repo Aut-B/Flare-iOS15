@@ -132,6 +132,114 @@ struct WereadReaderView: View {
     }
 }
 
+/// 只给微信读书网页阅读器用的 WKWebView。
+///
+/// 正文长按选中后，iOS 会把「拷贝 / 查询 / 翻译 / 学习 / 共享」这套系统
+/// 编辑菜单压在选区上方，正好盖住网页自己的划线工具条。JS 先用合成鼠标
+/// 事件把官方 `.reader_toolbar_container`（划线 / 想法）唤出来，确认它
+/// 真的显示在当前选区旁边之后，才通知这里临时收起系统菜单。
+/// 任何一步失败都保持/恢复系统菜单：宁可回到系统菜单，也不能让用户
+/// 两个菜单都点不到。
+///
+/// - iOS 15（6S 真机）：正文选区菜单还是 `UIMenuController`，收到展示通知
+///   后立刻收起；`canPerformAction` 再兜一层。
+/// - iOS 16+：`buildMenu(with:)` 移除标准编辑 / 查询 / 学习 / 共享菜单。
+/// - 输入框（登录、写想法）需要系统拷贝粘贴：JS 把焦点状态发过来放行。
+private final class WereadSelectionWebView: WKWebView {
+    /// 默认放行。只有 JS 明确报告「正文有选区且官方工具条已出现」时才关。
+    var allowsSystemEditMenu = true {
+        didSet {
+            if allowsSystemEditMenu {
+                failOpenWorkItem?.cancel()
+                failOpenWorkItem = nil
+                return
+            }
+            UIMenuController.shared.setMenuVisible(false, animated: false)
+            // 兜底：只在当前这次长按后短暂收起系统菜单。即使 JS 后续没能
+            // 再上报（输入框自动聚焦、跨 frame、合成事件失败等），也一定
+            // 会恢复，绝不让用户连拷贝/粘贴都没有。
+            failOpenWorkItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                self?.allowsSystemEditMenu = true
+            }
+            failOpenWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: item)
+        }
+    }
+
+    private var failOpenWorkItem: DispatchWorkItem?
+
+    /// 系统菜单项的 action 名（含私有 selector）大致都落在这些词里。
+    private static let menuSelectorKeywords = [
+        "copy", "cut", "paste", "select", "lookup", "share", "learn",
+        "translate", "define", "dictionary", "speech", "replace", "find", "delete"
+    ]
+
+    override init(frame: CGRect, configuration: WKWebViewConfiguration) {
+        super.init(frame: frame, configuration: configuration)
+        let center = NotificationCenter.default
+        center.addObserver(
+            self,
+            selector: #selector(hideSystemMenuBeforeShow),
+            name: UIMenuController.willShowMenuNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(hideSystemMenuAfterShow),
+            name: UIMenuController.didShowMenuNotification,
+            object: nil
+        )
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        failOpenWorkItem?.cancel()
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func hideSystemMenuBeforeShow() {
+        guard !allowsSystemEditMenu else { return }
+        // 同步收一次，再在下一轮主线程补一次：系统发完通知后还会再摆一次
+        // 菜单，只同步收起会闪一下。
+        UIMenuController.shared.setMenuVisible(false, animated: false)
+        DispatchQueue.main.async {
+            UIMenuController.shared.setMenuVisible(false, animated: false)
+        }
+    }
+
+    @objc private func hideSystemMenuAfterShow() {
+        guard !allowsSystemEditMenu else { return }
+        // 展示后再同步收起有时会被系统下一帧覆盖，补一次异步。
+        DispatchQueue.main.async {
+            UIMenuController.shared.setMenuVisible(false, animated: false)
+        }
+    }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if !allowsSystemEditMenu {
+            let name = NSStringFromSelector(action).lowercased()
+            if Self.menuSelectorKeywords.contains(where: { name.contains($0) }) {
+                return false
+            }
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    @available(iOS 16.0, *)
+    override func buildMenu(with builder: UIMenuBuilder) {
+        super.buildMenu(with: builder)
+        guard !allowsSystemEditMenu else { return }
+        let identifiers: [UIMenu.Identifier] = [.standardEdit, .lookup, .learn, .share]
+        for identifier in identifiers where builder.menu(for: identifier) != nil {
+            builder.remove(menu: identifier)
+        }
+    }
+}
+
 private struct WereadReaderWebView: UIViewRepresentable {
     let url: String
     let cookie: String
@@ -146,7 +254,10 @@ private struct WereadReaderWebView: UIViewRepresentable {
     /// 让阅读页的文字可以被长按选中。
     ///
     /// 微信读书会给正文容器写 `user-select: none`，CSS 用 `!important` 盖掉即可。
-    /// 事件不能拦：它自己的划词菜单（划线 / 写想法）就挂在 `selectstart` 上。
+    /// 事件不能拦：它自己的划词菜单（划线 / 写想法）也要靠选区事件触发。
+    /// 但光有选区不够：官方工具条是桌面交互，等 `mouseup`；iOS 长按只产生
+    /// touch 和系统 UIMenu。所以这里补发 mouse 事件；官方工具条确认出现后，
+    /// 才让 Swift 临时收起系统菜单，失败则继续保留系统菜单。
     private static let selectionScript = """
     (function(){
       var styleId = 'flare-select-style';
@@ -158,7 +269,8 @@ private struct WereadReaderWebView: UIViewRepresentable {
         '.readerChapterContent p, .readerChapterContent p *,' +
         '#renderTargetContent p, #renderTargetContent p *,' +
         '.app_content p, .app_content p *' +
-        ' { -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default !important; }';
+        ' { -webkit-user-select: text !important; user-select: text !important; -webkit-touch-callout: default !important; }' +
+        '.reader_toolbar_container { z-index: 2147483000 !important; pointer-events: auto !important; }';
       var pending = false;
       // iOS 15 的 WKWebView 里，祖先一旦 user-select:none，子节点常常盖不回来，
       // 表现就是「已划线的字能点，自己拖选新文段不行」。微信读书的正文层级不固定，
@@ -216,9 +328,520 @@ private struct WereadReaderWebView: UIViewRepresentable {
       apply();
       document.addEventListener('DOMContentLoaded', schedule, true);
       window.addEventListener('load', schedule, true);
-      // 这里**不要**再拦 selectstart / contextmenu。微信读书的划线、想法菜单
-      // 就是监听这两个事件的，捕获阶段一 stopPropagation，它自己的菜单也弹不
-      // 出来，用户只剩系统菜单（复制 / 查询），根本写不了想法。
+      // 桌面版阅读页的划词工具条（`.reader_toolbar_container`，里面是
+      // `.toolbarItem.underlineStraight` 直线划线 / `.toolbarItem.review` 想法）
+      // 只在「正文 mousedown → mousemove(which===1) → mouseup」之后弹出：
+      // 官方 onContentMouseMove 要求左键拖动并据此算出选中的 objs，
+      // onContentMouseUp 只有拿到非空 rects 才调用 showSelectionToolBar。
+      // iOS 长按走 WKWebView 原生选区，网页只收到 touch，三个 handler 一个
+      // 都不跑，所以只剩系统 UIMenu（拷贝 / 查询 / 翻译），还正好盖住选区。
+      // 这里按原生选区的首尾坐标补一轮合成的鼠标拖动，让官方工具条按它
+      // 自己的逻辑算选区、定位并弹出；只有确认工具条真的出来了，才让 Swift
+      // 收起系统菜单（见 resume / verify 部分），失败则继续放行系统菜单。
+      var savedRange = null;
+      var lastSelectionKey = '';
+      var revealTimer = null;
+      var revealBusy = false;
+      var revealAttempt = 0;
+      var revealFailures = 0;
+      // 合成鼠标事件在真机上不可用时，绝不能继续关系统菜单；连续失败两次
+      // 就冷却一段时间，期间只走系统菜单，过后再试（避免首次选区早于正文
+      // 渲染完成就把功能永久判死）。
+      var revealRetryAfter = 0;
+      // 官方工具条已为哪个选区成功显示，以及当时的选区矩形。用捕获的
+      // 矩形做验证，合成拖动即使清掉原生选区也不会误判失败。
+      var verifiedKey = '';
+      var verifiedRects = [];
+
+      // 官方 disableDefaultEvent 对 textarea / input / #richTextEditor 放行。
+      // 这里覆盖得更宽：登录、写想法、长评、想法详情，以及各种自定义
+      // contenteditable / ProseMirror 编辑器，都不能被误关系统拷贝粘贴。
+      var editableTags = ['input', 'textarea', 'select'];
+      var editableClasses = [
+        'readerWriteReviewPanel',
+        'writeReviewPanel',
+        'write-review-panel',
+        'reviewEditorPage_section_container',
+        'readerReviewDetailPanel',
+        'reader-float-review-create-panel',
+        'ProseMirror',
+        'ql-editor'
+      ];
+      var editorPanelSelectors = [
+        '.readerWriteReviewPanel',
+        'reader-float-review-create-panel',
+        '.reader-float-review-create-panel',
+        'write-review-panel',
+        '.write-review-panel',
+        '.reviewEditorPage_section_container',
+        '[id="readerReviewDetailPanel"]',
+        '.readerReviewDetailPanel'
+      ];
+
+      function classListContains(el, name) {
+        try {
+          return !!(el.classList && el.classList.contains(name));
+        } catch (e) { return false; }
+      }
+
+      function isEditableNode(el) {
+        if (!el || !el.tagName) return false;
+        var tag = el.tagName.toLowerCase();
+        for (var i = 0; i < editableTags.length; i++) {
+          if (tag === editableTags[i]) return true;
+        }
+        if (el.isContentEditable) return true;
+        for (var j = 0; j < editableClasses.length; j++) {
+          if (classListContains(el, editableClasses[j])) return true;
+        }
+        if (el.getAttribute) {
+          var role = (el.getAttribute('role') || '').toLowerCase();
+          if (role === 'textbox' || role === 'searchbox' || role === 'combobox') {
+            return true;
+          }
+          var editable = el.getAttribute('contenteditable');
+          if (editable !== null && editable !== 'false') return true;
+          if ((el.getAttribute('aria-multiline') || '') === 'true') return true;
+        }
+        return false;
+      }
+
+      function visibleNode(node) {
+        if (!node || !node.getBoundingClientRect) return false;
+        var rect = node.getBoundingClientRect();
+        if (rect.width <= 4 || rect.height <= 4) return false;
+        if (rect.bottom <= 0 || rect.right <= 0) return false;
+        var vw = window.innerWidth || 0;
+        var vh = window.innerHeight || 0;
+        if (vw > 0 && rect.left >= vw) return false;
+        if (vh > 0 && rect.top >= vh) return false;
+        try {
+          var style = window.getComputedStyle(node);
+          if (!style || style.display === 'none' || style.visibility === 'hidden') {
+            return false;
+          }
+          if (parseFloat(style.opacity || '1') < 0.05) return false;
+        } catch (e) {}
+        return true;
+      }
+
+      function visibleBySelector(selectors) {
+        for (var i = 0; i < selectors.length; i++) {
+          var list;
+          try { list = document.querySelectorAll(selectors[i]); } catch (e) { list = []; }
+          for (var j = 0; j < list.length; j++) {
+            if (visibleNode(list[j])) return true;
+          }
+        }
+        return false;
+      }
+
+      // shadow DOM 里 activeElement 会停在 shadow host 上，要逐层钻进去。
+      function activeElementDeep() {
+        var el = document.activeElement;
+        var depth = 0;
+        while (el && el.shadowRoot && el.shadowRoot.activeElement && depth < 8) {
+          el = el.shadowRoot.activeElement;
+          depth += 1;
+        }
+        return el;
+      }
+
+      function selectionTouchesEditable() {
+        try {
+          var sel = window.getSelection();
+          if (!sel || sel.rangeCount === 0) return false;
+          var nodes = [sel.anchorNode, sel.focusNode];
+          for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            if (el && el.nodeType !== 1) el = el.parentElement;
+            var depth = 0;
+            while (el && depth < 12) {
+              if (isEditableNode(el)) return true;
+              el = el.parentElement;
+              depth += 1;
+            }
+          }
+        } catch (e) {}
+        return false;
+      }
+
+      function isEditableActive() {
+        try {
+          // 长评编辑器走路由，不是标准 input；官方也按这个 hash 放行。
+          if ((location.hash || '').indexOf('#richTextEditor') === 0) return true;
+          var el = activeElementDeep();
+          var depth = 0;
+          while (el && el !== document.body && depth < 12) {
+            if (isEditableNode(el)) return true;
+            el = el.parentElement;
+            depth += 1;
+          }
+          // 选区落在编辑器里（contenteditable / ProseMirror）时也算编辑态。
+          if (selectionTouchesEditable()) return true;
+          // 编辑器可能把焦点留在容器上，或自动聚焦早于脚本注入；
+          // 只要可见的写想法 / 长评 / 想法详情面板在，就按编辑态处理。
+          return visibleBySelector(editorPanelSelectors);
+        } catch (e) {
+          // 判断不出来就放行系统菜单，不能把输入框的拷贝粘贴关死。
+          return true;
+        }
+      }
+
+      function selectionRects() {
+        try {
+          var sel = window.getSelection();
+          if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return [];
+          if (!String(sel.toString() || '').trim()) return [];
+          var range = sel.getRangeAt(0);
+          var list = range.getClientRects();
+          var rects = [];
+          for (var i = 0; i < list.length; i++) {
+            var rect = list[i];
+            if (rect && rect.width > 0 && rect.height > 0) { rects.push(rect); }
+          }
+          if (rects.length === 0) {
+            var fallback = range.getBoundingClientRect();
+            if (fallback && fallback.width > 0 && fallback.height > 0) {
+              rects.push(fallback);
+            }
+          }
+          return rects;
+        } catch (e) { return []; }
+      }
+
+      function toolbarNode() {
+        return document.querySelector('.reader_toolbar_container');
+      }
+
+      function toolbarVisible() {
+        var bar = toolbarNode();
+        if (!bar) return false;
+        try {
+          var style = window.getComputedStyle(bar);
+          if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+          if (parseFloat(style.opacity || '1') < 0.05) return false;
+          var rect = bar.getBoundingClientRect();
+          if (rect.width < 10 || rect.height < 10) return false;
+          return rect.bottom > 0 && rect.top < (window.innerHeight || 0);
+        } catch (e) { return false; }
+      }
+
+      // 工具条必须贴着当前选区，才能排除「上一次选区的旧工具条还挂着」。
+      // 官方把工具条摆在上方或下方，横向中心落在选区范围内。
+      function toolbarNearRects(rects) {
+        var bar = toolbarNode();
+        if (!bar) return false;
+        var br = bar.getBoundingClientRect();
+        if (!rects || !rects.length) return false;
+        var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (var i = 0; i < rects.length; i++) {
+          var rect = rects[i];
+          if (rect.left < minX) minX = rect.left;
+          if (rect.right > maxX) maxX = rect.right;
+          if (rect.top < minY) minY = rect.top;
+          if (rect.bottom > maxY) maxY = rect.bottom;
+        }
+        var centerX = (br.left + br.right) / 2;
+        if (centerX < minX - 80 || centerX > maxX + 80) return false;
+        var verticalGap = 0;
+        if (br.top > maxY) verticalGap = br.top - maxY;
+        else if (minY > br.bottom) verticalGap = minY - br.bottom;
+        return verticalGap <= 160;
+      }
+
+      function selectionKey() {
+        try {
+          var sel = window.getSelection();
+          if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return '';
+          var text = String(sel.toString() || '').trim();
+          if (!text) return '';
+          var rects = selectionRects();
+          if (rects.length === 0) return '';
+          var first = rects[0];
+          var last = rects[rects.length - 1];
+          return text.slice(0, 80) + '|' + Math.round(first.left) + ',' +
+            Math.round(first.top) + ',' + Math.round(last.right) + ',' +
+            Math.round(last.top);
+        } catch (e) { return ''; }
+      }
+
+      // 只上报两种状态：焦点在编辑器，或「正文选区 + 官方工具条已确认」。
+      // Swift 侧据此决定是否临时收起系统菜单；其余情况一律放行。
+      // 不做同值去重：Swift 的 8 秒兜底会重新放行系统菜单，之后必须能
+      // 靠后续 selectionchange / focus 再关回去。
+      function postState(reason) {
+        var editable = isEditableActive();
+        var selecting = !editable && verifiedKey !== '' &&
+          toolbarVisible() && toolbarNearRects(verifiedRects);
+        try {
+          window.webkit.messageHandlers.flareSelection.postMessage({
+            editable: editable,
+            selecting: selecting,
+            reason: reason || ''
+          });
+        } catch (e) {}
+      }
+
+      function contentElementAt(x, y) {
+        var el = document.elementFromPoint(x, y);
+        var content = document.querySelector('.readerChapterContent') ||
+          document.querySelector('#renderTargetContent') ||
+          document.querySelector('.app_content');
+        if (el && (!content || content.contains(el))) return el;
+        // 覆盖层（例如旧工具条）挡住时，按坐标找底下的文字节点。
+        try {
+          var range = document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y) : null;
+          if (range) {
+            var node = range.startContainer;
+            var candidate = node ? (node.nodeType === 1 ? node : node.parentElement) : null;
+            if (candidate && (!content || content.contains(candidate))) return candidate;
+          }
+        } catch (e) {}
+        return el;
+      }
+
+      function isLikelyContentTarget(el) {
+        if (!el) return false;
+        if (el === document.documentElement) return true;
+        var content = document.querySelector('.readerChapterContent') ||
+          document.querySelector('#renderTargetContent') ||
+          document.querySelector('.app_content');
+        // 找不到正文容器时不阻断，仍交给官方 onContentMouseDown 判断。
+        if (!content) return true;
+        return content === el || content.contains(el);
+      }
+
+      // 旧工具条如果还显示且 pointer-events:auto，合成 mousedown 会打在它身上，
+      // 官方正文 handler 收不到。拖动期间临时让工具条不参与命中。
+      function suspendToolbarHitTesting() {
+        var bars = document.querySelectorAll('.reader_toolbar_container');
+        for (var i = 0; i < bars.length; i++) {
+          var bar = bars[i];
+          if (!bar.hasAttribute('data-flare-toolbar-pe')) {
+            bar.setAttribute(
+              'data-flare-toolbar-pe',
+              bar.style.getPropertyValue('pointer-events') || ''
+            );
+          }
+          bar.style.setProperty('pointer-events', 'none', 'important');
+        }
+      }
+
+      function resumeToolbarHitTesting() {
+        var bars = document.querySelectorAll('.reader_toolbar_container');
+        for (var i = 0; i < bars.length; i++) {
+          var bar = bars[i];
+          if (!bar.hasAttribute('data-flare-toolbar-pe')) continue;
+          var old = bar.getAttribute('data-flare-toolbar-pe');
+          if (old) {
+            bar.style.setProperty('pointer-events', old, 'important');
+          } else {
+            bar.style.removeProperty('pointer-events');
+          }
+          bar.removeAttribute('data-flare-toolbar-pe');
+        }
+      }
+
+      function clampX(x) {
+        return Math.min(Math.max(x, 1), Math.max(window.innerWidth - 1, 1));
+      }
+
+      function clampY(y) {
+        return Math.min(Math.max(y, 1), Math.max(window.innerHeight - 1, 1));
+      }
+
+      function emitMouse(name, x, y, target) {
+        try {
+          var el = target || document.elementFromPoint(x, y) || document.body;
+          if (!el) return;
+          var event = new MouseEvent(name, {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: x,
+            clientY: y,
+            screenX: x,
+            screenY: y,
+            button: 0,
+            buttons: name === 'mouseup' ? 0 : 1
+          });
+          // 官方 onContentMouseMove 用 `event.which === 1` 判断左键拖动；
+          // MouseEvent 构造参数里没有 which，这里补一个同名属性。
+          try {
+            Object.defineProperty(event, 'which', { value: 1 });
+          } catch (e) {
+            try { event.which = 1; } catch (e2) {}
+          }
+          el.dispatchEvent(event);
+        } catch (e) {}
+      }
+
+      // 从选区首行左端拖到末行右端。官方 mousedown 会清空上一次的 objs，
+      // 只补 mouseup 不会产生 rects；必须走完整的按下 / 移动 / 抬起。
+      function replaySelectionDrag(rects) {
+        if (!rects || rects.length === 0) return false;
+        var first = rects[0];
+        var last = rects[rects.length - 1];
+        var startX = clampX(first.left + Math.min(2, first.width / 2));
+        var startY = clampY(first.top + Math.min(first.height, 20) / 2);
+        var endX = clampX(last.right - Math.min(2, last.width / 2));
+        var endY = clampY(last.top + Math.min(last.height, 20) / 2);
+        var startEl = contentElementAt(startX, startY);
+        var endEl = contentElementAt(endX, endY);
+        if (!startEl || !endEl) return false;
+        if (!isLikelyContentTarget(startEl)) return false;
+        // 中间点必须与起点不同：官方 mousemove 一旦拿到退化区间，会把
+        // 拖动状态清掉，后面的 mouseup 就不再有 objs/rects。
+        var midX = clampX((startX + endX) / 2);
+        var midY = clampY((startY + endY) / 2);
+        if (Math.abs(midX - startX) < 1 && Math.abs(midY - startY) < 1) {
+          midX = clampX(startX + 1);
+        }
+        var midEl = contentElementAt(midX, midY) || startEl;
+        emitMouse('mousedown', startX, startY, startEl);
+        emitMouse('mousemove', midX, midY, midEl);
+        emitMouse('mousemove', endX, endY, endEl);
+        emitMouse('mouseup', endX, endY, endEl);
+        return true;
+      }
+
+      function restoreSelection() {
+        if (!savedRange) return;
+        var sel = window.getSelection();
+        if (sel && sel.rangeCount > 0 && !sel.isCollapsed) return;
+        try {
+          if (!sel) { sel = window.getSelection(); }
+          if (!sel) return;
+          sel.removeAllRanges();
+          sel.addRange(savedRange);
+        } catch (e) {}
+      }
+
+      function revealSelectionToolbar() {
+        if (revealBusy || Date.now() < revealRetryAfter) return;
+        var key = selectionKey();
+        var rects = selectionRects();
+        if (!key || rects.length === 0) return;
+        revealBusy = true;
+        var attempt = ++revealAttempt;
+        bindToolbar();
+        suspendToolbarHitTesting();
+        var replayed = false;
+        try {
+          replayed = replaySelectionDrag(rects);
+        } finally {
+          // 拖动事件已经同步派发完，工具条必须立刻恢复可点；不能把它
+          // 留给带 attempt 守卫的延时任务，否则新选区一来就永久丢点击。
+          resumeToolbarHitTesting();
+        }
+        // 合成拖动可能让页面清掉原生选区，清掉就还原，用户仍能看到
+        // 自己选的文字和手柄；工具条按钮本身用的是页面捕获的 objs。
+        setTimeout(function () {
+          restoreSelection();
+          resumeToolbarHitTesting();
+          bindToolbar();
+          if (attempt === revealAttempt) {
+            revealBusy = false;
+            var afterKey = selectionKey();
+            if (afterKey) { lastSelectionKey = afterKey; }
+          }
+        }, 300);
+        // 先不关系统菜单：等官方工具条真的在当前选区旁出现，再让 Swift
+        // 收起系统菜单。合成事件无效时用户仍保留系统菜单，不会两个都没有。
+        setTimeout(function () {
+          if (attempt !== revealAttempt) return;
+          var ok = replayed && toolbarVisible() && toolbarNearRects(rects);
+          if (ok) {
+            revealFailures = 0;
+            verifiedKey = key;
+            verifiedRects = rects;
+            lastSelectionKey = key;
+            postState('toolbar-visible');
+          } else {
+            revealFailures += 1;
+            verifiedKey = '';
+            verifiedRects = [];
+            if (revealFailures >= 2) {
+              revealFailures = 0;
+              revealRetryAfter = Date.now() + 8000;
+            }
+            // 失败必须强制上报：此时状态通常和上一次「无选区」相同，
+            // 若被去重吞掉，Swift 可能还停留在「已关系统菜单」。
+            postState('toolbar-failed');
+          }
+        }, 550);
+      }
+
+      function scheduleReveal() {
+        if (revealTimer) { clearTimeout(revealTimer); }
+        revealTimer = setTimeout(function () {
+          revealTimer = null;
+          if (revealBusy || Date.now() < revealRetryAfter || isEditableActive()) return;
+          revealSelectionToolbar();
+        }, 320);
+      }
+
+      document.addEventListener('selectionchange', function () {
+        // 合成事件本身会改选区；这里在 busy 期间不响应，避免自己触发自己。
+        if (revealBusy) return;
+        var editable = isEditableActive();
+        var key = selectionKey();
+        if (editable || key === '') {
+          savedRange = null;
+          lastSelectionKey = '';
+          verifiedKey = '';
+          verifiedRects = [];
+          postState(editable ? 'editable' : 'empty');
+          return;
+        }
+        var sel = window.getSelection();
+        try {
+          savedRange = sel.getRangeAt(0).cloneRange();
+        } catch (e) {
+          savedRange = null;
+          verifiedKey = '';
+          postState('empty');
+          return;
+        }
+        // 新选区/选区变了先放行系统菜单；等合成拖动确认官方工具条出来，
+        // 下面的 toolbar-visible 才会重新关掉系统菜单。
+        if (verifiedKey && verifiedKey !== key) { verifiedKey = ''; }
+        postState('selection');
+        if (key !== lastSelectionKey) {
+          lastSelectionKey = key;
+          scheduleReveal();
+        }
+      }, true);
+
+      // 工具条上的按钮要按得住：iOS 点它时页面可能在 touchstart 里收起选区
+      // 或做别的处理。只 stopPropagation、不 preventDefault，保证 click 仍能
+      // 合成。工具条换章后可能重建，节点换了就重新绑。
+      var boundToolbar = null;
+      function bindToolbar() {
+        var bar = toolbarNode();
+        if (!bar || bar === boundToolbar) return;
+        boundToolbar = bar;
+        ['touchstart', 'mousedown'].forEach(function (name) {
+          bar.addEventListener(name, function (event) {
+            event.stopPropagation();
+          }, { passive: true });
+        });
+      }
+
+      // 网页里的输入框（登录、写想法、长评编辑器）仍需要系统拷贝粘贴。
+      // 每次焦点变化都立即上报，自动聚焦/脚本注入前已聚焦也能覆盖。
+      document.addEventListener('focusin', function () {
+        postState('focusin');
+      }, true);
+      document.addEventListener('focusout', function () {
+        setTimeout(function () { postState('focusout'); }, 0);
+      }, true);
+      postState('init');
+
+      // 这里**不要**再拦 mousedown / mouseup / selectstart / contextmenu。
+      // 官方划线工具条靠正文上的 mouseup 触发；这些事件被捕获阶段
+      // stopPropagation 掉，工具条就弹不出来，用户只剩系统菜单。
       try {
         var observer = new MutationObserver(schedule);
         observer.observe(document.documentElement, { childList: true, subtree: true });
@@ -248,7 +871,10 @@ private struct WereadReaderWebView: UIViewRepresentable {
                 forMainFrameOnly: false
             )
         )
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        // JS 上报「焦点是否在编辑器」以及「官方划线工具条是否已为当前
+        // 正文选区出现」；只有后者为真时才临时收起系统菜单。
+        configuration.userContentController.add(context.coordinator, name: "flareSelection")
+        let webView = WereadSelectionWebView(frame: .zero, configuration: configuration)
         // 桌面 UA：手机 UA 下微信读书会把网页换成「打开 App」引导页。
         webView.customUserAgent = WebPlatformUserAgent.desktop
         webView.navigationDelegate = context.coordinator
@@ -256,6 +882,7 @@ private struct WereadReaderWebView: UIViewRepresentable {
         webView.allowsBackForwardNavigationGestures = true
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         context.coordinator.webView = webView
+        context.coordinator.selectionWebView = webView
         context.coordinator.load()
         return webView
     }
@@ -268,9 +895,15 @@ private struct WereadReaderWebView: UIViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "flareSelection")
+        webView.stopLoading()
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         var parent: WereadReaderWebView
         weak var webView: WKWebView?
+        weak var selectionWebView: WereadSelectionWebView?
         var loadedToken = 0
 
         private var didAttemptJump = false
@@ -295,6 +928,8 @@ private struct WereadReaderWebView: UIViewRepresentable {
         func load() {
             guard let webView = webView else { return }
             guard let target = URL(string: parent.url) else { return }
+            // 新页面 JS 还没上报前一律放行：加载失败也不能把系统菜单关死。
+            selectionWebView?.allowsSystemEditMenu = true
             didAttemptJump = false
             jumpAttempts = 0
             jumpMode = parent.needsJump
@@ -319,7 +954,22 @@ private struct WereadReaderWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            selectionWebView?.allowsSystemEditMenu = true
             parent.isLoading = true
+        }
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage
+        ) {
+            guard message.name == "flareSelection" else { return }
+            guard let body = message.body as? [String: Any] else { return }
+            // 缺字段时按「编辑器 / 放行」处理，JS 漏报也不会关掉系统菜单。
+            let editable = (body["editable"] as? Bool) ?? true
+            let selecting = (body["selecting"] as? Bool) ?? false
+            // 只有「焦点不在编辑器，且官方工具条已确认在当前选区旁出现」
+            // 才收起系统菜单；其余情况一律放行。
+            selectionWebView?.allowsSystemEditMenu = editable || !selecting
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
