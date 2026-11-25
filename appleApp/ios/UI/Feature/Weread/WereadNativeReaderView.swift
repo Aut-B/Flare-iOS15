@@ -11,6 +11,17 @@ struct WereadNativeTarget: Identifiable {
     var id: String { book.id }
 }
 
+/// 原生阅读页的正文字号范围。
+///
+/// 只改生成页面的 CSS 变量让浏览器重排，不缩放整页、不引入横向滚动；
+/// 字号只存在 `@State` 内存里，切章保持，重开书回到默认，不落任何本地存储。
+private enum WereadFontSize {
+    static let minimum: CGFloat = 15
+    static let maximum: CGFloat = 25
+    static let step: CGFloat = 2
+    static let initial: CGFloat = 17
+}
+
 /// 微信读书原生阅读页。
 ///
 /// 不再先打开 `/web/shelf` 再让网页自己点书：目录走
@@ -36,6 +47,8 @@ struct WereadNativeReaderView: View {
     @State private var isPDF = false
     /// 沉浸阅读：点正文空白处切换，隐藏上下栏。
     @State private var immersive = false
+    /// 正文字号。切章时视图本身不重建，所以会保持；不写 UserDefaults。
+    @State private var fontSize: CGFloat = WereadFontSize.initial
     @State private var showChapters = false
     @State private var showWeb = false
     @State private var cache: [Int: String] = [:]
@@ -449,6 +462,7 @@ struct WereadNativeReaderView: View {
             html: html,
             baseURL: URL(string: "https://weread.qq.com/"),
             cookie: store.cookie,
+            fontSize: fontSize,
             highlights: currentHighlights,
             onHighlight: { item in
                 guard let chapter = current else { return }
@@ -592,6 +606,8 @@ struct WereadNativeReaderView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("网页版阅读器")
             } else {
+                fontSizeControls
+
                 Button {
                     showChapters = true
                 } label: {
@@ -657,6 +673,58 @@ struct WereadNativeReaderView: View {
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.4)
         .accessibilityLabel(accessibilityLabel)
+    }
+
+    /// 顶部字号按钮。放在顶栏而不是正文底部，避免和左/右下翻章按钮、
+    /// 网页里的划选工具条抢同一块区域；沉浸时随顶栏一起收起，不打断阅读。
+    private var fontSizeControls: some View {
+        HStack(spacing: 0) {
+            fontSizeButton(
+                label: "A−",
+                accessibilityLabel: "缩小字体",
+                enabled: fontSize > WereadFontSize.minimum
+            ) {
+                adjustFontSize(by: -WereadFontSize.step)
+            }
+            fontSizeButton(
+                label: "A+",
+                accessibilityLabel: "放大字体",
+                enabled: fontSize < WereadFontSize.maximum
+            ) {
+                adjustFontSize(by: WereadFontSize.step)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityValue("当前字号 \(Int(fontSize))")
+    }
+
+    private func fontSizeButton(
+        label: String,
+        accessibilityLabel: String,
+        enabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(enabled ? Color.primary : Color.secondary)
+                .frame(width: 32, height: 36)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    /// 字号按固定步长增减并夹在上下限内；不带动画，6S 上点一下立即重排。
+    private func adjustFontSize(by delta: CGFloat) {
+        let next = min(
+            max(fontSize + delta, WereadFontSize.minimum),
+            WereadFontSize.maximum
+        )
+        guard next != fontSize else { return }
+        fontSize = next
     }
 
     private var loadingView: some View {
@@ -2147,6 +2215,8 @@ private struct WereadChapterWebView: UIViewRepresentable {
     let html: String
     let baseURL: URL?
     let cookie: String
+    /// 正文字号（px）。只改页面 CSS 变量，不缩放 WKWebView。
+    let fontSize: CGFloat
     let highlights: [WereadHighlight]
     let onHighlight: (WereadHighlight) -> Void
     let onScroll: (Double, Int) -> Void
@@ -2186,6 +2256,9 @@ private struct WereadChapterWebView: UIViewRepresentable {
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
         webView.scrollView.contentInsetAdjustmentBehavior = .never
+        // 字号放大后正文只纵向重排，禁止任何横向弹性滚动。
+        webView.scrollView.alwaysBounceHorizontal = false
+        webView.scrollView.showsHorizontalScrollIndicator = false
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         return webView
@@ -2197,6 +2270,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
         context.coordinator.apply(highlights, in: webView)
         context.coordinator.applyNoteReply(noteReply, in: webView)
         context.coordinator.requestScroll(scrollRequest, in: webView)
+        context.coordinator.applyFontSize(fontSize, in: webView)
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
@@ -2212,6 +2286,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
         private var lastHTML = ""
         private var lastHighlights = ""
         private var lastNoteReplyID: Int?
+        private var lastFontSize: CGFloat?
         private var loaded = false
         /// 页面还没 ready 时收到的滚动请求，等 `markReady` 再补执行。
         private var pendingScroll: WereadScrollTarget?
@@ -2226,6 +2301,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
             guard !html.isEmpty, html != lastHTML else { return }
             lastHTML = html
             lastHighlights = ""
+            lastFontSize = nil
             loaded = false
             pendingScroll = nil
             scrollRetries = 0
@@ -2412,6 +2488,10 @@ private struct WereadChapterWebView: UIViewRepresentable {
             lastHighlights = ""
             if let webView = webView {
                 apply(parent.highlights, in: webView)
+                // 先按当前字号重排，再执行挂起的续读滚动，落点才是最终排版。
+                // 这时续读位置还没恢复，用 silent 只排版，不锚定也不上报，
+                // 否则会把刚恢复的滚动状态冲成章首。
+                applyFontSize(parent.fontSize, in: webView, silent: true)
                 // 排版完成后再补执行挂起的续读滚动。
                 if let pending = pendingScroll {
                     scrollRetries = 0
@@ -2420,6 +2500,34 @@ private struct WereadChapterWebView: UIViewRepresentable {
             }
             DispatchQueue.main.async {
                 self.parent.onReady()
+            }
+        }
+
+        /// 应用正文字号。页面还没 ready 时先跳过，等 `markReady` 再补；
+        /// 值没变化时不重复 evaluate，避免无谓的整页重排。
+        func applyFontSize(
+            _ size: CGFloat,
+            in webView: WKWebView,
+            silent: Bool = false
+        ) {
+            guard loaded else { return }
+            let clamped = min(
+                max(size, WereadFontSize.minimum),
+                WereadFontSize.maximum
+            )
+            guard lastFontSize != clamped else { return }
+            lastFontSize = clamped
+            let px = Int(clamped.rounded())
+            let silentArg = silent ? "true" : "false"
+            webView.evaluateJavaScript(
+                "window.__wrSetFont(\(px), \(silentArg));"
+            ) { _, error in
+                guard let error = error else { return }
+                // 脚本尚未装好时下次页面更新还可以重试，不能把失败值记成已应用。
+                self.lastFontSize = nil
+                Self.log.error(
+                    "weread apply font size failed: \(String(describing: error), privacy: .public)"
+                )
             }
         }
 
@@ -2590,17 +2698,31 @@ enum WereadReaderHTML {
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
         <style>
-        :root { color-scheme: light dark; }
+        :root {
+            color-scheme: light dark;
+            /* 正文字号只改这个变量，由浏览器重排；不缩放整页。 */
+            --wr-font-size: \(Int(WereadFontSize.initial))px;
+        }
+        html {
+            font-size: var(--wr-font-size);
+            max-width: 100%;
+            overflow-x: hidden;
+        }
         html, body {
             margin: 0;
             /* 左右留白尽量小，把屏宽让给正文；底部留出翻页栏的空间。 */
             padding: 8px 8px 48px;
             background: transparent;
             color: #1c1c1e;
-            font: 17px/1.85 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
+            line-height: 1.85;
             -webkit-text-size-adjust: 100%;
+            max-width: 100%;
+            overflow-x: hidden;
             word-wrap: break-word;
             overflow-wrap: break-word;
+            word-break: break-word;
             -webkit-user-select: text;
             user-select: text;
             -webkit-touch-callout: default;
@@ -2625,7 +2747,36 @@ enum WereadReaderHTML {
             user-select: none !important;
             -webkit-touch-callout: none !important;
         }
-        img { max-width: 100% !important; height: auto !important; }
+        /* 字号放大到上限时，长英文 / URL / 代码 / 表格 / 图片都不能把正文
+           撑出屏幕。正文整体只纵向重排，横向溢出直接裁掉，不出现左右滚动。 */
+        #wr-content {
+            box-sizing: border-box;
+            font-size: var(--wr-font-size);
+            line-height: 1.85;
+            max-width: 100%;
+            overflow-x: hidden;
+            overflow-wrap: break-word;
+            word-break: break-word;
+        }
+        #wr-content pre, #wr-content code {
+            max-width: 100% !important;
+            white-space: pre-wrap !important;
+            overflow-wrap: break-word !important;
+            word-break: break-word !important;
+        }
+        #wr-content table {
+            max-width: 100% !important;
+            width: 100% !important;
+            table-layout: fixed;
+        }
+        #wr-content th, #wr-content td {
+            overflow-wrap: break-word !important;
+            word-break: break-word !important;
+        }
+        img, svg, video, canvas, iframe, embed, object {
+            max-width: 100% !important;
+            height: auto !important;
+        }
         p { margin: 0 0 1em; }
         h1, h2, h3, h4 { line-height: 1.4; margin: 1.2em 0 0.6em; }
         mark.wr-hl {
@@ -3243,6 +3394,79 @@ enum WereadReaderHTML {
                 var ratio = Math.min(Math.max(window.scrollY / max, 0), 1);
                 return Math.round(total * ratio);
             }
+
+            // —— 正文字号 ——
+            // 只改 :root 的 CSS 变量，由浏览器按新字号重排；不缩放整页，
+            // 也不产生横向滚动。改前先记住视口顶部那一行的字符偏移，
+            // 改完按同一锚点恢复，避免每点一次就跳回章首。
+            // silent = true 用于章节加载完成时先按当前字号排版：
+            // 此时续读位置还没恢复，只改字号并重排，不锚定也不上报。
+            window.__wrSetFont = function (px, silent) {
+                var size = Math.round(Number(px) || 0);
+                var min = \(Int(WereadFontSize.minimum));
+                var max = \(Int(WereadFontSize.maximum));
+                size = Math.min(Math.max(size, min), max);
+                var root = document.documentElement;
+                var next = size + 'px';
+                var current = window.getComputedStyle(root)
+                    .getPropertyValue('--wr-font-size')
+                    .trim();
+                if (current === next) {
+                    return true;
+                }
+                if (silent) {
+                    root.style.setProperty('--wr-font-size', next);
+                    void document.documentElement.offsetHeight;
+                    return true;
+                }
+                // 续读落点已经用过后，用户改字号即视为接管位置：
+                // 清掉旧锚点，下面的上报才不会被 restoring() 吞掉，
+                // 图片加载完也不会再按旧锚点把人拉回去。
+                if (pendingRestore && pendingRestore.applied) {
+                    pendingRestore = null;
+                }
+                var content = document.getElementById('wr-content');
+                var offset = currentOffset();
+                var oldMax = root.scrollHeight - window.innerHeight;
+                var fraction = oldMax > 0
+                    ? Math.min(Math.max(window.scrollY / oldMax, 0), 1)
+                    : 0;
+                root.style.setProperty('--wr-font-size', next);
+                // 读一次高度，强制在量新位置前完成重排。
+                void document.documentElement.offsetHeight;
+                var target = null;
+                if (content) {
+                    var position = textNodeAt(content, offset);
+                    if (position) {
+                        try {
+                            var length = position.node.nodeValue.length;
+                            var range = document.createRange();
+                            range.setStart(position.node, position.at);
+                            range.setEnd(
+                                position.node,
+                                Math.min(position.at + 1, length)
+                            );
+                            var rect = range.getBoundingClientRect();
+                            // currentOffset 取样在 progressProbeY，这里用同一
+                            // 个锚点落回去，连续点按也不会逐次漂移。
+                            target = window.scrollY + rect.top - progressProbeY;
+                        } catch (e) { target = null; }
+                    }
+                }
+                if (target === null) {
+                    var newMax = root.scrollHeight - window.innerHeight;
+                    target = newMax > 0 ? newMax * fraction : 0;
+                }
+                var limit = root.scrollHeight - window.innerHeight;
+                if (limit < 0) limit = 0;
+                window.scrollTo(
+                    0,
+                    Math.round(Math.min(Math.max(target, 0), limit))
+                );
+                // 字号变了，旧的滚动比例已经不准，立即上报新 offset。
+                reportScroll(true);
+                return true;
+            };
 
             var lastReport = 0;
             var lastSent = null;
