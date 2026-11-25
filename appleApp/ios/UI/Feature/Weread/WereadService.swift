@@ -30,6 +30,20 @@ nonisolated enum WereadAuthFailure: Error, LocalizedError, Sendable, Equatable {
     }
 }
 
+/// 服务端「我的想法」里的一条，只保留编辑需要的字段。
+///
+/// `reviewId` 是 `/web/review/edit` 的定位字段；`chapterUid` / `range` /
+/// `abstract` 用来和本地划线、`bookmarklist` 条目对上。
+nonisolated struct WereadOwnReview: Hashable, Identifiable, Sendable {
+    let reviewId: String
+    let chapterUid: Int
+    let range: String
+    let abstract: String
+    let content: String
+
+    var id: String { reviewId }
+}
+
 /// 微信读书 Web 接口封装。
 ///
 /// 全部走 `weread.qq.com` 的网页接口，登录态就是浏览器那套 cookie
@@ -1101,10 +1115,13 @@ final class WereadService: @unchecked Sendable {
         var type4Count = 0
         var hasUserVid = false
         var authRejected = false
+        /// 非鉴权失败（网络 / 解密 / 解析）：调用方不能把空数组当成「确实没有想法」。
+        var failed = false
     }
 
     /// 拉取自己的「想法」。失败只记日志并返回空数组，不影响划线；
-    /// 登录态被拒绝时额外标记 `authRejected`，由 caller 决定是否续期。
+    /// 非鉴权失败用 `failed` 标出，登录态被拒绝时用 `authRejected` 标出，
+    /// 由 caller 决定是否续期或把空数组当成「确实没有想法」。
     ///
     /// `type == 1` 是划线想法，`type == 4` 是整章想法（官方也会展示），
     /// 两种都收；整章想法不按 range 挂到某条划线上。
@@ -1185,6 +1202,7 @@ final class WereadService: @unchecked Sendable {
             )
             return result
         } catch {
+            result.failed = true
             log.notice(
                 "weread diag: review/list failed: \(String(describing: error), privacy: .public)"
             )
@@ -1195,6 +1213,28 @@ final class WereadService: @unchecked Sendable {
             )
             return result
         }
+    }
+
+    /// 拉取「我的想法」，给编辑入口定位 `reviewId`。
+    ///
+    /// 复用 `fetchThoughts`（与笔记合并同一套参数：`listMode=3` + 桌面 UA）。
+    /// 返回 `nil` 表示请求失败或登录态被拒，调用方不能把它当成「服务端没有
+    /// 这条想法」，否则会把编辑误降级成新建、在官方端留下重复想法。
+    func ownReviews(bookId: String, cookie: String) async -> [WereadOwnReview]? {
+        guard !bookId.isEmpty, !cookie.isEmpty else { return nil }
+        let fetch = await fetchThoughts(bookId: bookId, cookie: cookie)
+        if fetch.failed || fetch.authRejected { return nil }
+        return fetch.thoughts
+            .filter { !$0.id.hasPrefix("thought-") }
+            .map {
+                WereadOwnReview(
+                    reviewId: $0.id,
+                    chapterUid: $0.chapterUid,
+                    range: $0.range,
+                    abstract: $0.abstract,
+                    content: $0.content
+                )
+            }
     }
 
     // MARK: - 诊断专用：笔记接口参数对照（仅诊断页手动触发）
@@ -1579,6 +1619,71 @@ final class WereadService: @unchecked Sendable {
             return false
         } catch {
             let line = "addReview \(context) FAIL 请求异常: \(error.localizedDescription)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
+            return false
+        }
+    }
+
+    /// 修改一条已发布的想法：`POST /web/review/edit`。
+    ///
+    /// 网页端路由实测：`/web/review/useredit` 是 404，`/web/review/edit`
+    /// 存在（未登录回 `errCode -2010`）。不要和 E-Ink / 手机端的
+    /// `i.weread.qq.com/review/useredit`、`/review/edit`（后者是「简单编辑
+    /// 书评基本信息」）混用，那两套需要另一套鉴权和字段。
+    ///
+    /// 请求体照官方阅读器 webpack action `FETCH_BOOK_REVIEW_EDIT` 的形状
+    /// （`js/2.*.js` 里直接 `$http('/web/review/edit', payload)`，payload 由
+    /// 编辑页组出来）：`reviewId` + `content` + `htmlContent`（编辑页还会带
+    /// `newRatingLevel` / `isPrivate` / `friendship` / `notVisibleToFriends`，
+    /// 这些是「点评本书」的评分和可见性设置，这里故意不发，避免把用户已有
+    /// 的设置覆盖成默认值）。
+    /// 官方编辑页以回包 `data.reviewId` 非空为成功判据，这里保持一致；
+    /// 只有 `errCode == 0` 但没回 reviewId 时按失败处理，不谎报已同步。
+    /// 失败只记诊断并返回 false，草稿留在输入框里让用户重试。
+    func editReview(reviewId: String, content: String, cookie: String) async -> Bool {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reviewId.isEmpty, !trimmed.isEmpty, !cookie.isEmpty else {
+            let line =
+                "editReview 跳过参数不完整 reviewIdEmpty=\(reviewId.isEmpty) " +
+                "contentLen=\(trimmed.count) cookieEmpty=\(cookie.isEmpty)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
+            return false
+        }
+        let context = "reviewId=\(reviewId) contentLen=\(trimmed.count)"
+        Self.screenDiag("editReview 请求 \(context)")
+        var request = URLRequest(url: URL(string: "\(base)/web/review/edit")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        let payload: [String: Any] = [
+            "reviewId": reviewId,
+            "content": trimmed,
+            "htmlContent": trimmed,
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        do {
+            let data = try await send(request)
+            let json = try parseObject(data)
+            try checkError(json)
+            let container = json["data"] as? [String: Any] ?? json
+            let savedId =
+                firstIdentifier(container["reviewId"])
+                ?? firstIdentifier(json["reviewId"])
+            guard let savedId else {
+                let line = "editReview FAIL \(context) 未返回 reviewId"
+                Self.screenDiag(line)
+                FlareDiagnostics.shared.record(.weread, "ERR", line)
+                return false
+            }
+            let line = "editReview OK \(context) id=\(savedId)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "RES", line)
+            return true
+        } catch {
+            let line = "editReview FAIL \(context) \(error.localizedDescription)"
             Self.screenDiag(line)
             FlareDiagnostics.shared.record(.weread, "ERR", line)
             return false

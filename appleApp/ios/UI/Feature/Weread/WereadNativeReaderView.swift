@@ -77,6 +77,16 @@ struct WereadNativeReaderView: View {
     /// 不依赖 WKUIDelegate 的 UIKit 弹窗回调链。
     @State private var noteRequest: WereadNoteRequest?
     @State private var noteDraft = ""
+    /// 从笔记面板保存已有想法时置 true，避免重复提交。
+    @State private var noteSaving = false
+    /// 保存失败的提示。失败时编辑器不关闭，草稿还在。
+    @State private var noteError: String?
+    /// 服务端「我的想法」索引，用来把笔记面板里的一条对上 `reviewId`。
+    @State private var ownReviews: [WereadOwnReview] = []
+    /// `ownReviews` 是否至少成功拉过一次（空数组也是有效结果）。
+    @State private var ownReviewsLoaded = false
+    /// 点了笔记面板里的条目后先收起面板，等 `onDismiss` 再弹编辑器。
+    @State private var pendingEdit: WereadHighlight?
     /// 回传给 JS 的想法内容；`text == nil` 表示取消。
     @State private var noteReply: WereadNoteReply?
     @State private var noteReplyToken = 0
@@ -236,8 +246,14 @@ struct WereadNativeReaderView: View {
         .sheet(isPresented: $showChapters) {
             chapterList
         }
-        .sheet(isPresented: $showNotes) {
+        .sheet(isPresented: $showNotes, onDismiss: {
+            // 笔记面板里的条目在面板上层拿不到主视图的编辑浮层，先收面板再编辑。
+            guard let entry = pendingEdit else { return }
+            pendingEdit = nil
+            beginEditing(entry)
+        }) {
             notesSheet
+                .task { await loadOwnReviews() }
         }
         .fullScreenCover(isPresented: $showWeb) {
             WereadReaderView(target: webReaderTarget)
@@ -366,6 +382,8 @@ struct WereadNativeReaderView: View {
                 // 浮层已经开着时忽略重复请求，避免 JS 的待处理选区被覆盖。
                 guard noteRequest == nil, !text.isEmpty else { return }
                 noteDraft = ""
+                noteSaving = false
+                noteError = nil
                 noteRequest = WereadNoteRequest(text: text)
             },
             onNoteReplyApplied: {
@@ -647,26 +665,20 @@ struct WereadNativeReaderView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     List {
-                        ForEach(currentNoteEntries) { item in
-                            VStack(alignment: .leading, spacing: 6) {
-                                if !item.text.isEmpty {
-                                    Text(item.text)
-                                        .font(.system(size: 15))
-                                        .textSelection(.enabled)
+                        Section {
+                            ForEach(currentNoteEntries) { item in
+                                Button {
+                                    // 面板还开着时主视图的编辑浮层会被盖住，先收起面板。
+                                    pendingEdit = item
+                                    showNotes = false
+                                } label: {
+                                    noteRow(item)
                                 }
-                                if !item.note.isEmpty {
-                                    HStack(alignment: .top, spacing: 6) {
-                                        Image(systemName: "text.bubble")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                        Text(item.note)
-                                            .font(.footnote)
-                                            .foregroundStyle(.secondary)
-                                            .textSelection(.enabled)
-                                    }
-                                }
+                                .buttonStyle(.plain)
                             }
-                            .padding(.vertical, 4)
+                        } footer: {
+                            Text("点任意一条可以改想法，保存后会同步到微信读书")
+                                .font(.caption2)
                         }
                     }
                     .listStyle(.plain)
@@ -682,6 +694,41 @@ struct WereadNativeReaderView: View {
         }
     }
 
+    /// 笔记面板里的一行。整行可点，所以不再开 `textSelection` ——
+    /// 文本选择会吞掉点击，用户会以为「点不进去」。
+    private func noteRow(_ item: WereadHighlight) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
+                if !item.text.isEmpty {
+                    Text(item.text)
+                        .font(.system(size: 15))
+                        .multilineTextAlignment(.leading)
+                }
+                if !item.note.isEmpty {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "text.bubble")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(item.note)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.leading)
+                    }
+                } else {
+                    Text("点一下写想法")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "square.and.pencil")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+
     // MARK: - 写想法
 
     /// 原生输入浮层：JS 只负责上报「用户点了想法 + 选中的文字」，
@@ -692,12 +739,14 @@ struct WereadNativeReaderView: View {
                 .ignoresSafeArea()
                 .onTapGesture { cancelNote() }
             VStack(alignment: .leading, spacing: 12) {
-                Text("写想法")
+                Text(request.isEditing ? "编辑想法" : "写想法")
                     .font(.headline)
-                Text(request.text)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
+                if !request.text.isEmpty {
+                    Text(request.text)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                }
                 TextEditor(text: $noteDraft)
                     .font(.system(size: 15))
                     .frame(height: 110)
@@ -705,11 +754,20 @@ struct WereadNativeReaderView: View {
                     .background(Color(.secondarySystemBackground))
                     .cornerRadius(8)
                     .focused($noteDraftFocused)
+                if let noteError {
+                    Text(noteError)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                }
                 HStack {
                     Button("取消") { cancelNote() }
+                        .disabled(noteSaving)
                     Spacer(minLength: 12)
-                    Button("保存") { saveNote() }
-                        .disabled(noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button(noteSaving ? "保存中…" : "保存") { saveNote() }
+                        .disabled(
+                            noteSaving
+                                || noteDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        )
                 }
                 .font(.system(size: 15, weight: .medium))
             }
@@ -728,21 +786,204 @@ struct WereadNativeReaderView: View {
 
     private func saveNote() {
         let text = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        noteReplyToken += 1
-        noteReply = WereadNoteReply(id: noteReplyToken, text: text)
-        noteRequest = nil
-        noteDraft = ""
-        noteDraftFocused = false
+        guard !text.isEmpty, let request = noteRequest else { return }
+        guard let entry = request.entry else {
+            // JS 选文新建：保持原来的回传链路，本地落盘和上传仍由 onHighlight 完成。
+            noteReplyToken += 1
+            noteReply = WereadNoteReply(id: noteReplyToken, text: text)
+            noteRequest = nil
+            noteDraft = ""
+            noteDraftFocused = false
+            return
+        }
+        guard !noteSaving else { return }
+        noteSaving = true
+        noteError = nil
+        let chapterUid = current?.uid ?? 0
+        let chapterIdx = current?.index ?? 0
+        Task {
+            await performSave(
+                text: text,
+                entry: entry,
+                reviewId: request.reviewId,
+                chapterUid: chapterUid,
+                chapterIdx: chapterIdx
+            )
+        }
     }
 
     private func cancelNote() {
-        guard noteRequest != nil else { return }
+        guard noteRequest != nil, !noteSaving else { return }
         noteReplyToken += 1
         noteReply = WereadNoteReply(id: noteReplyToken, text: nil)
         noteRequest = nil
         noteDraft = ""
+        noteError = nil
         noteDraftFocused = false
+    }
+
+    /// 从笔记面板点一条笔记进入编辑。
+    ///
+    /// 打开面板时会先拉一次「我的想法」；没拉到才在这里补拉，避免用户
+    /// 点得太快时把「编辑」误判成「新建」。
+    private func beginEditing(_ entry: WereadHighlight) {
+        guard current != nil else { return }
+        noteError = nil
+        noteSaving = false
+        if ownReviewsLoaded || store.cookie.isEmpty {
+            presentEditor(for: entry)
+            return
+        }
+        Task { await prepareEditor(for: entry) }
+    }
+
+    @MainActor
+    private func prepareEditor(for entry: WereadHighlight) async {
+        await loadOwnReviews()
+        presentEditor(for: entry)
+    }
+
+    private func presentEditor(for entry: WereadHighlight) {
+        let matched = matchedReview(for: entry)
+        noteDraft = matched?.content ?? entry.note
+        noteRequest = WereadNoteRequest(
+            text: entry.text,
+            entry: entry,
+            reviewId: matched?.reviewId,
+            isEditing: matched != nil || !entry.note.isEmpty
+        )
+    }
+
+    /// 把一条笔记对上服务端 review：章内 range 优先，原文兜底。
+    private func matchedReview(for entry: WereadHighlight) -> WereadOwnReview? {
+        guard let chapter = current else { return nil }
+        let text = normalizedText(entry.text)
+        let candidates = ownReviews.filter { $0.chapterUid == chapter.uid }
+        if let range = entry.range, !range.isEmpty {
+            if let exact = candidates.first(where: {
+                $0.range == range && normalizedText($0.abstract) == text
+            }) {
+                return exact
+            }
+            if let byRange = candidates.first(where: { $0.range == range }) {
+                return byRange
+            }
+        }
+        guard !text.isEmpty else {
+            // 整章想法没有划线原文，按想法正文兜底。
+            let note = normalizedText(entry.note)
+            guard !note.isEmpty else { return nil }
+            return candidates.first(where: { normalizedText($0.content) == note })
+        }
+        return candidates.first(where: { normalizedText($0.abstract) == text })
+    }
+
+    /// 打开笔记面板时顺手拉一次「我的想法」，只用于定位 reviewId。
+    /// 失败时保持 `ownReviewsLoaded == false`，下次点条目会再试。
+    @MainActor
+    private func loadOwnReviews() async {
+        guard !store.cookie.isEmpty else {
+            ownReviews = []
+            ownReviewsLoaded = true
+            return
+        }
+        let reviews = await WereadService.shared.ownReviews(
+            bookId: target.book.id,
+            cookie: store.cookie
+        )
+        ownReviews = reviews ?? []
+        ownReviewsLoaded = reviews != nil
+    }
+
+    /// 笔记面板里的保存：有 reviewId 就改那条想法；没有就按原有
+    /// `addReview` 路径补一条（例如只是划线、或本地想法还没上传成功）。
+    @MainActor
+    private func performSave(
+        text: String,
+        entry: WereadHighlight,
+        reviewId: String?,
+        chapterUid: Int,
+        chapterIdx: Int
+    ) async {
+        let service = WereadService.shared
+        let cookie = store.cookie
+        // 云端索引没拉到、或这条笔记本来就是服务端下发的，却仍没定位到
+        // `reviewId` 时，不要降级成新建 —— 硬建会多出一条重复笔记。
+        // 只有确实只存在于本机、还没上传过的想法才继续走新建。
+        if reviewId == nil,
+           !entry.note.isEmpty,
+           (!ownReviewsLoaded || hasServerNote(entry, chapterUid: chapterUid)) {
+            noteSaving = false
+            noteError = "没能从云端定位到这条想法，先不新建以免重复，请稍后重试"
+            return
+        }
+        let ok: Bool
+        if let reviewId, !reviewId.isEmpty {
+            ok = await service.editReview(
+                reviewId: reviewId,
+                content: text,
+                cookie: cookie
+            )
+        } else {
+            ok = await service.uploadHighlight(
+                bookId: target.book.id,
+                chapterUid: chapterUid,
+                chapterIdx: chapterIdx,
+                range: entry.range ?? "",
+                markText: entry.text,
+                note: text,
+                cookie: cookie
+            )
+        }
+        noteSaving = false
+        guard ok else {
+            noteError = "同步到微信读书失败，内容还在输入框里，可以稍后重试"
+            return
+        }
+        applyNote(text, to: entry, chapterUid: chapterUid)
+        noteRequest = nil
+        noteDraft = ""
+        noteError = nil
+        noteDraftFocused = false
+        // 服务端条目的显示以 bookmarklist 为准，重新拉一次刷新列表。
+        retryBookmarks()
+        Task { await loadOwnReviews() }
+    }
+
+    /// 这条内容是否已由 `bookmarklist` 下发（说明云端已有想法）。
+    private func hasServerNote(_ entry: WereadHighlight, chapterUid: Int) -> Bool {
+        let text = normalizedText(entry.text)
+        let note = normalizedText(entry.note)
+        guard !text.isEmpty || !note.isEmpty else { return false }
+        return (serverNotes[chapterUid] ?? []).contains {
+            if !text.isEmpty {
+                return normalizedText($0.markText) == text && !$0.note.isEmpty
+            }
+            // 整章想法没有划线原文，用想法正文判断是否来自服务端。
+            return normalizedText($0.note) == note
+        }
+    }
+
+    /// 编辑成功后把内容写回本地划线（如果这条笔记在本机也有一份）。
+    /// 纯服务端条目不在本地伪造，交给 `retryBookmarks()` 刷新。
+    private func applyNote(_ note: String, to entry: WereadHighlight, chapterUid: Int) {
+        guard chapterUid > 0 else { return }
+        var list = highlights[chapterUid] ?? []
+        let text = normalizedText(entry.text)
+        guard let position = list.firstIndex(where: { item in
+            item.id == entry.id || (!text.isEmpty && normalizedText(item.text) == text)
+        }) else {
+            return
+        }
+        let item = list[position]
+        list[position] = WereadHighlight(
+            id: item.id,
+            text: item.text,
+            note: note,
+            range: item.range ?? entry.range
+        )
+        highlights[chapterUid] = list
+        WereadHighlightStore.save(list, bookId: target.book.id, chapterUid: chapterUid)
     }
 
     // MARK: - 加载
@@ -760,6 +1001,8 @@ struct WereadNativeReaderView: View {
             cacheOrder = []
             highlights = [:]
             serverNotes = [:]
+            ownReviews = []
+            ownReviewsLoaded = false
             isPDF = true
             loading = false
             errorMessage = nil
@@ -774,7 +1017,11 @@ struct WereadNativeReaderView: View {
         let token = loadToken
         notesToken += 1
         let bookmarkToken = notesToken
-        if force { serverNotes = [:] }
+        if force {
+            serverNotes = [:]
+            ownReviews = []
+            ownReviewsLoaded = false
+        }
         notesError = nil
         loading = true
         errorMessage = nil
@@ -1161,10 +1408,17 @@ enum WereadHighlightStore {
     }
 }
 
-/// JS 发起的一次「写想法」请求：只带选中的文字，原始 Range 留在 JS 侧。
+/// 一次「写想法 / 编辑想法」请求。
+///
+/// JS 新建时只带选中的文字（原始 Range 留在 JS 侧）；从笔记面板点进来时
+/// 还带原条目和匹配到的服务端 `reviewId`。
 private struct WereadNoteRequest: Identifiable {
     let id = UUID()
     let text: String
+    var entry: WereadHighlight? = nil
+    var reviewId: String? = nil
+    /// 编辑已有想法；否则是给划线补想法（或新建）。
+    var isEditing: Bool = false
 }
 
 /// 一次续读滚动请求：优先按章内字符偏移定位，比例只在量不出文本长度时兜底。
