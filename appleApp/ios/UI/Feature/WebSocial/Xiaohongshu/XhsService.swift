@@ -321,7 +321,7 @@ final class XhsService {
             } catch let error as XhsError {
                 FlareDiagnostics.shared.record(
                     .xhs, "ERR",
-                    "\(method) \(path) 签名/网络失败: \(error.message) · cookie=\(cookie.isEmpty ? "空" : "\(cookie.count)字符")"
+                    "\(method) \(path) 签名/网络失败: \(error.message) · cookie=\(sessionSummary())"
                 )
                 throw error
             } catch {
@@ -336,10 +336,14 @@ final class XhsService {
                 "\(method) \(path) → \(result.status) · \(result.text.count)字符 · \(head)"
             )
             // 把这次请求实际用的登录态指纹记下来：cookie 为空 / xsec 缺失都能看出来。
-            let hasXsec = result.text.contains("xsec") || query?.contains("xsec") == true
+            // xsec 要看「请求有没有带」，不能只看响应正文：详情/评论的 token
+            // 在 query 或 POST payload 里，响应常常一个字都不回，旧判据会误报「无」。
+            let hasXsec = Self.requestCarriesXsec(query: query, payload: payload)
+                || result.text.contains("xsec_token")
+                || result.text.contains("xsec_source")
             FlareDiagnostics.shared.record(
                 .xhs, "STATE",
-                "cookie=\(cookie.isEmpty ? "空" : "\(cookie.count)字符") · xsec=\(hasXsec ? "有" : "无")"
+                "cookie=\(sessionSummary()) · xsec=\(hasXsec ? "请求携带/响应含" : "未携带")"
             )
 
             if result.status == 401 {
@@ -356,7 +360,7 @@ final class XhsService {
             else {
                 if result.status == 403 || result.status == 461 {
                     throw XhsError(
-                        message: "小红书风控拦截（HTTP \(result.status)），请稍后重试；一直失败就重新登录一次",
+                        message: restrictionMessage(status: result.status),
                         needLogin: false
                     )
                 }
@@ -387,10 +391,58 @@ final class XhsService {
                 throw error
             }
             guard (200..<300).contains(result.status) else {
+                if result.status == 403 || result.status == 461 {
+                    throw XhsError(
+                        message: restrictionMessage(status: result.status),
+                        needLogin: false
+                    )
+                }
                 throw XhsError(message: "请求失败（HTTP \(result.status)）", needLogin: false)
             }
             return json
         }
+    }
+
+    /// 461 / 403 是服务端风控或人机验证，客户端没法绕过。
+    /// 但本地 cookie 缺 `web_session` / `a1` 时，先把「登录态不完整」说清楚，
+    /// 别让用户把客户端问题误当成账号被永久封禁。
+    private func restrictionMessage(status: Int? = nil, code: Int? = nil) -> String {
+        let hasSession = !(CookieJar.value(inHeader: cookie, named: "web_session") ?? "").isEmpty
+        let hasA1 = !(CookieJar.value(inHeader: cookie, named: "a1") ?? "").isEmpty
+        let tags = [status.map { "HTTP \($0)" }, code.map { "code \($0)" }]
+            .compactMap { $0 }
+        let suffix = tags.isEmpty ? "" : "（\(tags.joined(separator: " "))）"
+        if !hasSession || !hasA1 {
+            let missing = hasSession ? "a1" : "web_session"
+            return "小红书登录态不完整\(suffix)：本地 cookie 缺 \(missing)。先在「网页版」完成登录/验证，再回来重试"
+        }
+        return "小红书服务端风控/人机验证\(suffix)，客户端无法绕过。去网页版完成验证后再回来；一直失败就是账号或出口 IP 被限"
+    }
+
+    /// 只记 cookie 的字段是否存在，不把值写进诊断日志。
+    private func sessionSummary() -> String {
+        guard !cookie.isEmpty else { return "空" }
+        let hasSession = !(CookieJar.value(inHeader: cookie, named: "web_session") ?? "").isEmpty
+        let hasA1 = !(CookieJar.value(inHeader: cookie, named: "a1") ?? "").isEmpty
+        let hasWebId = !(CookieJar.value(inHeader: cookie, named: "webId") ?? "").isEmpty
+        return "\(cookie.count)字符(web_session=\(hasSession ? "有" : "无"),"
+            + "a1=\(hasA1 ? "有" : "无"),webId=\(hasWebId ? "有" : "无"))"
+    }
+
+    private static func requestCarriesXsec(query: String?, payload: [String: Any]?) -> Bool {
+        if let query = query, !query.isEmpty,
+           query.contains("xsec_token=") || query.contains("xsec_source=") {
+            return true
+        }
+        guard let payload = payload else { return false }
+        if payload["xsec_token"] != nil || payload["xsec_source"] != nil {
+            return true
+        }
+        if let extra = payload["extra"] as? [String: Any],
+           extra["xsec_token"] != nil || extra["xsec_source"] != nil {
+            return true
+        }
+        return false
     }
 
     /// 401 / code -100 的恢复：把最新 cookie 写回隐藏页并重载一次。
@@ -421,7 +473,7 @@ final class XhsService {
         }
         if code == 461 {
             throw XhsError(
-                message: "小红书要求人机验证，去网页版刷一下再回来",
+                message: restrictionMessage(code: code),
                 needLogin: false
             )
         }

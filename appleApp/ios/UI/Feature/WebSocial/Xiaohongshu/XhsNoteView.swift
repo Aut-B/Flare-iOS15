@@ -199,6 +199,14 @@ struct XhsNoteView: View {
                     player = makeVideoPlayer(urlString)
                 }
             }
+            // 首页卡片给的是兜底地址，详情接口回来后 videoURL 会换成已验证的直链。
+            // 不重建播放器的话，AVPlayer 还会继续拿着旧（常已失效）的 item。
+            .onChange(of: urlString) { newValue in
+                player?.pause()
+                player = nil
+                videoError = nil
+                player = makeVideoPlayer(newValue)
+            }
             .onReceive(
                 NotificationCenter.default.publisher(
                     for: .AVPlayerItemFailedToPlayToEndTime
@@ -669,6 +677,27 @@ struct XhsNoteView: View {
         }
         if !mergedImages.isEmpty {
             merged.images = mergedImages
+        }
+        // 详情接口的直链已验证：优先保留详情地址，卡片兜底只在详情缺失时用。
+        if let video = full.videoURL, !video.isEmpty {
+            merged.videoURL = video
+        } else if let video = note.videoURL, !video.isEmpty {
+            merged.videoURL = video
+        }
+        if merged.likedCount.isEmpty {
+            merged.likedCount = note.likedCount
+        }
+        if merged.commentCount.isEmpty {
+            merged.commentCount = note.commentCount
+        }
+        if merged.shareCount.isEmpty {
+            merged.shareCount = note.shareCount
+        }
+        if !merged.liked, note.liked {
+            merged.liked = true
+        }
+        if !merged.collected, note.collected {
+            merged.collected = true
         }
         return merged
     }

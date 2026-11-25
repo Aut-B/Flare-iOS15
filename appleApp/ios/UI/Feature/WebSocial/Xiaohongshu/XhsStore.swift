@@ -583,6 +583,24 @@ final class XhsStore: ObservableObject {
                 isLoading = false
                 return
             }
+            if code == 461 {
+                if notes.isEmpty {
+                    errorMessage =
+                        "小红书首页流要求人机验证（code 461），客户端绕不过。去网页版完成验证后点「重试」；登录态已保留"
+                }
+                isLoading = false
+                isLoadingMore = false
+                return
+            }
+            if code == -1 {
+                if notes.isEmpty {
+                    errorMessage =
+                        "小红书拒绝了首页流请求（code -1），多半是风控。稍后点「重试」；持续失败就重新登录一次"
+                }
+                isLoading = false
+                isLoadingMore = false
+                return
+            }
             // 网页自己发的那次 homefeed 被风控挡了，不代表一条都拿不到：
             // DOM / `__INITIAL_STATE__` 兜底经常还有数据。有内容就别拿
             // 「请求失败 code -1」去盖住正常列表。
@@ -1062,7 +1080,12 @@ final class XhsStore: ObservableObject {
         else { return nil }
         // 详情只补全首页已有卡片：从作者主页/搜索进来的笔记不在首页流里，
         // 不能因为看了详情就被追加进首页，也不能把 refresh 的加载状态提前收掉。
-        merge([result.note], appendUnknown: false, affectsFeedState: false)
+        merge(
+            [result.note],
+            appendUnknown: false,
+            affectsFeedState: false,
+            preferIncomingVideo: true
+        )
         // 缺作者 id 的结果不缓存，否则 5 分钟内重试都拿到同一份不完整数据。
         if !requireUserID || !result.note.user.id.isEmpty {
             rememberDetail(result.note)
@@ -1106,7 +1129,8 @@ final class XhsStore: ObservableObject {
         _ batch: [XhsNote],
         replace: Bool = false,
         appendUnknown: Bool = true,
-        affectsFeedState: Bool = true
+        affectsFeedState: Bool = true,
+        preferIncomingVideo: Bool = false
     ) {
         let work: () -> Void = { [weak self] in
             guard let self = self else { return }
@@ -1143,6 +1167,47 @@ final class XhsStore: ObservableObject {
                 }
                 if existing.xsecToken.isEmpty, !note.xsecToken.isEmpty {
                     existing.xsecToken = note.xsecToken
+                    enriched = true
+                }
+                // 详情返回的多图 / 视频直链比首页卡片更全：把结果并进列表，
+                // 用户退出详情再进来（或详情缓存过期）时不会退回只剩封面。
+                if !note.images.isEmpty {
+                    var seen = Set<String>()
+                    var mergedImages: [String] = []
+                    for url in (note.images + existing.images) where !url.isEmpty {
+                        if seen.insert(url).inserted { mergedImages.append(url) }
+                    }
+                    if mergedImages != existing.images {
+                        existing.images = mergedImages
+                        enriched = true
+                    }
+                }
+                // 详情接口选出来的直链已验证；即使卡片兜底先塞了 currentSrc，
+                // 也要让详情地址覆盖它。普通列表合并仍只在空缺时补。
+                if let video = note.videoURL, !video.isEmpty,
+                   preferIncomingVideo || existing.videoURL == nil,
+                   existing.videoURL != video {
+                    existing.videoURL = video
+                    enriched = true
+                }
+                if existing.commentCount.isEmpty, !note.commentCount.isEmpty {
+                    existing.commentCount = note.commentCount
+                    enriched = true
+                }
+                if existing.likedCount.isEmpty, !note.likedCount.isEmpty {
+                    existing.likedCount = note.likedCount
+                    enriched = true
+                }
+                if existing.shareCount.isEmpty, !note.shareCount.isEmpty {
+                    existing.shareCount = note.shareCount
+                    enriched = true
+                }
+                if !existing.liked, note.liked {
+                    existing.liked = true
+                    enriched = true
+                }
+                if !existing.collected, note.collected {
+                    existing.collected = true
                     enriched = true
                 }
                 if enriched {
@@ -1293,27 +1358,77 @@ final class XhsStore: ObservableObject {
           }
           return res;
         }
+        function isStreaming(u) {
+          var s = text(u).toLowerCase();
+          return s.indexOf('.m3u8') >= 0 || s.indexOf('.mpd') >= 0;
+        }
+        function backupOf(item) {
+          var list = item && item.backup_urls;
+          if (!list || !list.length) { return ''; }
+          for (var b = 0; b < list.length; b++) {
+            if (list[b]) { return norm(list[b]); }
+          }
+          return '';
+        }
+        // 与 XhsModels.videoURL 同一套规则：h264→h265→av1，渐进式 mp4 优先，
+        // 同编码里短边 <= 720 选最大档，没有就选最小档，免得 6S 先拉高清/HLS。
+        function pickStream(list) {
+          var all = [];
+          for (var i = 0; i < list.length; i++) {
+            var item = list[i];
+            if (!item || typeof item !== 'object') { continue; }
+            var u = norm(item.master_url || item.masterUrl || '');
+            if (!u) { u = backupOf(item); }
+            if (!u) { continue; }
+            var w = Number(item.width || 0);
+            var h = Number(item.height || 0);
+            var shortEdge = (w > 0 && h > 0) ? Math.min(w, h) : 0;
+            all.push({ url: u, shortEdge: shortEdge, streaming: isStreaming(u) });
+          }
+          if (!all.length) { return ''; }
+          var progressive = [];
+          for (var p = 0; p < all.length; p++) {
+            if (!all[p].streaming) { progressive.push(all[p]); }
+          }
+          var pool = progressive.length ? progressive : all;
+          var sized = [];
+          for (var s = 0; s < pool.length; s++) {
+            if (pool[s].shortEdge > 0) { sized.push(pool[s]); }
+          }
+          if (!sized.length) { return pool[0].url; }
+          var capped = [];
+          for (var c = 0; c < sized.length; c++) {
+            if (sized[c].shortEdge <= 720) { capped.push(sized[c]); }
+          }
+          var chosen = null;
+          if (capped.length) {
+            chosen = capped[0];
+            for (var c2 = 1; c2 < capped.length; c2++) {
+              if (capped[c2].shortEdge > chosen.shortEdge) { chosen = capped[c2]; }
+            }
+          } else {
+            chosen = sized[0];
+            for (var m = 1; m < sized.length; m++) {
+              if (sized[m].shortEdge < chosen.shortEdge) { chosen = sized[m]; }
+            }
+          }
+          return chosen.url;
+        }
         function videoOf(card) {
           var v = card.video || card.videoInfo || card.video_info || null;
           if (!v || typeof v !== 'object') { return ''; }
           var media = v.media || v.mediaInfo || null;
           var stream = media ? (media.stream || media.streams || null) : null;
           if (!stream) {
-            return norm(v.masterUrl || v.master_url || v.url || '');
+            var direct = norm(v.masterUrl || v.master_url || v.url || '');
+            return direct && !isStreaming(direct) ? direct : '';
           }
           var codecs = ['h264', 'h265', 'av1'];
           for (var c = 0; c < codecs.length; c++) {
             var arr = stream[codecs[c]];
             if (!arr || !arr.length) { continue; }
-            for (var j = 0; j < arr.length && j < 3; j++) {
-              var item = arr[j];
-              if (!item) { continue; }
-              var u = norm(item.master_url || item.masterUrl || '');
-              if (!u && item.backup_urls && item.backup_urls.length) {
-                u = norm(item.backup_urls[0]);
-              }
-              if (u) { return u; }
-            }
+            var picked = pickStream(arr);
+            if (picked) { return picked; }
           }
           return '';
         }
@@ -1397,6 +1512,59 @@ final class XhsStore: ObservableObject {
         var t = node.innerText || node.textContent || '';
         return String(t).replace(/\\s+/g, ' ').trim();
       }
+      function streamingVideo(u) {
+        var s = String(u || '').toLowerCase();
+        return s.indexOf('.m3u8') >= 0 || s.indexOf('.mpd') >= 0;
+      }
+      // DOM 里没有编码信息，但同样排除 HLS/MPD 与 blob:，有尺寸时按短边 <= 720 选档。
+      function videoCandidates(vid) {
+        var list = [];
+        function add(u, w, h) {
+          u = String(u || '').trim();
+          if (!u) { return; }
+          if (u.indexOf('//') === 0) { u = 'https:' + u; }
+          if (u.indexOf('blob:') === 0 || u.indexOf('data:') === 0) { return; }
+          if (streamingVideo(u)) { return; }
+          for (var i = 0; i < list.length; i++) {
+            if (list[i].url === u) { return; }
+          }
+          list.push({ url: u, shortEdge: (w > 0 && h > 0) ? Math.min(w, h) : 0 });
+        }
+        var vw = Number(vid.videoWidth || 0);
+        var vh = Number(vid.videoHeight || 0);
+        add(vid.currentSrc, vw, vh);
+        add(vid.getAttribute('src'), vw, vh);
+        add(vid.getAttribute('data-src'), vw, vh);
+        var sources = vid.querySelectorAll ? vid.querySelectorAll('source') : [];
+        for (var s = 0; s < sources.length; s++) {
+          var w = Number(sources[s].getAttribute('data-width') || 0);
+          var h = Number(sources[s].getAttribute('data-height') || 0);
+          add(sources[s].getAttribute('src'), w || vw, h || vh);
+          add(sources[s].getAttribute('data-src'), w || vw, h || vh);
+        }
+        if (!list.length) { return ''; }
+        var sized = [];
+        for (var k = 0; k < list.length; k++) {
+          if (list[k].shortEdge > 0) { sized.push(list[k]); }
+        }
+        if (!sized.length) { return list[0].url; }
+        var capped = [];
+        for (var c = 0; c < sized.length; c++) {
+          if (sized[c].shortEdge <= 720) { capped.push(sized[c]); }
+        }
+        if (capped.length) {
+          var best = capped[0];
+          for (var b = 1; b < capped.length; b++) {
+            if (capped[b].shortEdge > best.shortEdge) { best = capped[b]; }
+          }
+          return best.url;
+        }
+        var smallest = sized[0];
+        for (var m = 1; m < sized.length; m++) {
+          if (sized[m].shortEdge < smallest.shortEdge) { smallest = sized[m]; }
+        }
+        return smallest.url;
+      }
       var anchors = document.querySelectorAll('a[href*="/explore/"], a[href*="/discovery/item/"]');
       for (var i = 0; i < anchors.length; i++) {
         var a = anchors[i];
@@ -1452,16 +1620,8 @@ final class XhsStore: ObservableObject {
           if (imgs.indexOf(iu) < 0) { imgs.push(iu); }
         }
         if (imgs.length === 0) { imgs = [cover]; }
-        var videoURL = '';
         var vid = card.querySelector ? card.querySelector('video') : null;
-        if (vid) {
-          videoURL = vid.getAttribute('src') || vid.currentSrc || '';
-          if (!videoURL) {
-            var vs = vid.querySelector('source');
-            if (vs) { videoURL = vs.getAttribute('src') || ''; }
-          }
-          if (videoURL.indexOf('//') === 0) { videoURL = 'https:' + videoURL; }
-        }
+        var videoURL = vid ? videoCandidates(vid) : '';
         var w = img.naturalWidth || 0;
         var h = img.naturalHeight || 0;
         var aspect = (w > 0 && h > 0) ? (w / h) : 0.75;
