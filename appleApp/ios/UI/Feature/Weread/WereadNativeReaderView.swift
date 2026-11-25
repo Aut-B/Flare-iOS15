@@ -219,29 +219,30 @@ struct WereadNativeReaderView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             if !immersive { topBar }
         }
-        .overlay {
-            // 翻页按钮做成左下/右下两个玻璃小按钮，浮在正文上，不占整条底栏。
-            // 全屏(immersive)时仍保留——用户要求上一章/下一章不能消失。
-            if !isPDF {
-                VStack {
-                    Spacer()
-                    HStack {
-                        pageTurnButton(systemImage: "chevron.left", label: "上", enabled: index > 0) {
-                            Task { await open(index - 1) }
-                        }
-                        .allowsHitTesting(true)
-                        Spacer()
-                        pageTurnButton(systemImage: "chevron.right", label: "下", enabled: index < chapters.count - 1) {
-                            Task { await open(index + 1) }
-                        }
-                        .allowsHitTesting(true)
+        .overlay(alignment: .bottom) {
+            // 上一章/下一章只占底部两个角，不铺整条底栏；全屏(immersive)
+            // 时也保留。不要再给外层容器加 allowsHitTesting(false)：
+            // 那会把子按钮一起禁用，子视图的 true 无法把它改回来。
+            if !isPDF, !chapters.isEmpty {
+                HStack {
+                    pageTurnButton(
+                        title: "上一章",
+                        systemImage: "chevron.left",
+                        enabled: index > 0
+                    ) {
+                        Task { await open(index - 1) }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 12)
+                    Spacer(minLength: 0)
+                    pageTurnButton(
+                        title: "下一章",
+                        systemImage: "chevron.right",
+                        enabled: index < chapters.count - 1
+                    ) {
+                        Task { await open(index + 1) }
+                    }
                 }
-                // 容器整体不拦截点击，只让两个按钮可点——否则会挡住
-                // 正文的"点中间进全屏"和划词选区。
-                .allowsHitTesting(false)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
             }
         }
         .overlay {
@@ -515,31 +516,39 @@ struct WereadNativeReaderView: View {
         .background(.ultraThinMaterial)
     }
 
-    /// 左下/右下角的玻璃质感翻页小按钮：只放一个字，不占整条底栏，
-    /// 全屏时也保留（上一章/下一章不能消失）。
+    /// 底部「上一章 / 下一章」胶囊：实底、带描边和轻阴影，44pt 触控高度。
+    /// 不再用半透明圆角小方块；箭头 + 文字让入口一眼可读。
     private func pageTurnButton(
+        title: String,
         systemImage: String,
-        label: String,
         enabled: Bool,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            ZStack {
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .frame(width: 40, height: 40)
-                Circle()
-                    .stroke(.white.opacity(0.25), lineWidth: 0.5)
-                    .frame(width: 40, height: 40)
-                Text(label)
-                    .font(.system(size: 17, weight: .semibold))
+            HStack(spacing: 5) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .bold))
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
             }
-            .opacity(enabled ? 0.85 : 0.3)
-            .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 15)
+            .frame(height: 44)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color(uiColor: .systemGray5))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
+            )
+            .shadow(color: .black.opacity(0.14), radius: 7, y: 3)
+            .contentShape(Capsule(style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PageTurnButtonStyle())
         .disabled(!enabled)
-        .accessibilityLabel(systemImage == "chevron.left" ? "上一章" : "下一章")
+        .opacity(enabled ? 1 : 0.45)
+        .accessibilityLabel(title)
     }
 
     private var loadingView: some View {
@@ -1584,6 +1593,16 @@ struct WereadNativeReaderView: View {
         // 不能再把新章位置当成上一章的进度上报。
         guard let report = snapshot ?? progressReport() else { return }
         await reportLegacyProgress(report)
+    }
+}
+
+/// 翻页胶囊的按压反馈：轻微缩小，明确告诉用户这次点击被接住了。
+private struct PageTurnButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
