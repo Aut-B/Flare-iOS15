@@ -226,6 +226,220 @@ private struct WereadReaderWebView: UIViewRepresentable {
     })();
     """
 
+    /// iOS 长按正文只会弹 UIKit 的「拷贝 / 查询 / 翻译 / 学习 / 共享」菜单，
+    /// 微信读书官方的「划线 / 写想法」工具条不会出现：官方工具条是网页自己
+    /// 在鼠标抬起后调 `showSelectionToolBar` 渲染的，而 iOS 长按不会派发
+    /// 那条鼠标流程。这里把 DOM 选区映射回官方渲染对象，再调用官方阅读组件
+    /// 自己的 `showSelectionToolBar`，由官方逻辑负责划线、写想法和云端同步。
+    /// 工具条确认出现后才清掉网页选区并通知原生收起系统菜单；找不到官方
+    /// 组件或映射失败时完全不动选区，系统菜单照旧可用。
+    private static let selectionBridgeScript = """
+    (function(){
+      if (window.__flareSelectionBridge) { return; }
+      window.__flareSelectionBridge = true;
+      var touchActive = false;
+      var pendingTimer = 0;
+      var lastKey = '';
+      var failures = 0;
+      var cooldownUntil = 0;
+
+      function postHideMenu() {
+        try {
+          if (window.webkit && window.webkit.messageHandlers &&
+              window.webkit.messageHandlers.flareSelection) {
+            window.webkit.messageHandlers.flareSelection.postMessage('hideMenu');
+          }
+        } catch (e) {}
+      }
+
+      function toolbarShowing() {
+        var el = document.querySelector('.reader_toolbar_container[data-wr-role="selectionToolbar"]');
+        if (!el) { return false; }
+        var r = el.getBoundingClientRect();
+        var style = window.getComputedStyle(el);
+        return r.width > 8 && r.height > 8 &&
+          style.display !== 'none' && style.visibility !== 'hidden' &&
+          style.opacity !== '0';
+      }
+
+      function inEditable(el) {
+        while (el && el !== document.body) {
+          var tag = (el.tagName || '').toLowerCase();
+          if (tag === 'input' || tag === 'textarea' || el.isContentEditable) { return true; }
+          el = el.parentElement;
+        }
+        return false;
+      }
+
+      // 返回 null 一律表示「不要介入」：空选区、非正文、输入框 / 想法编辑器、
+      // 或没有可用的行矩形。
+      function currentSelection() {
+        var sel = window.getSelection();
+        if (!sel || sel.rangeCount < 1 || sel.isCollapsed) { return null; }
+        var text = (sel.toString() || '').replace(/\\s+/g, ' ').trim();
+        if (!text || text.length > 3000) { return null; }
+        var range = sel.getRangeAt(0);
+        var startNode = range.startContainer;
+        var endNode = range.endContainer;
+        var startEl = startNode && startNode.nodeType === 3 ? startNode.parentElement : startNode;
+        var endEl = endNode && endNode.nodeType === 3 ? endNode.parentElement : endNode;
+        if (!startEl || !endEl || !startEl.closest) { return null; }
+        var content = startEl.closest('.readerChapterContent, #renderTargetContent, #renderTargetContainer, .app_content');
+        if (!content || !content.contains(endEl)) { return null; }
+        if (startEl.closest('.reader_toolbar_container, .readerReviewDetailPanel, [contenteditable="true"], input, textarea')) {
+          return null;
+        }
+        if (inEditable(startEl) || inEditable(endEl)) { return null; }
+        var raw = range.getClientRects();
+        var rects = [];
+        for (var i = 0; i < raw.length && i < 80; i++) {
+          var r = raw[i];
+          if (r.width > 1 && r.height > 1) { rects.push(r); }
+        }
+        if (!rects.length) { return null; }
+        return { text: text, startEl: startEl, rects: rects };
+      }
+
+      // 微信读书每个组件根节点都带 Vue 2 的 `__vue__`。从选区起点向上爬，
+      // 再顺着 `$parent` 找阅读页组件，不赌单一挂载点。
+      function candidates(startEl) {
+        var out = [];
+        var seen = [];
+        function add(vm) {
+          if (!vm || seen.indexOf(vm) >= 0) { return; }
+          seen.push(vm);
+          out.push(vm);
+        }
+        var el = startEl;
+        var hops = 0;
+        while (el && el !== document.documentElement && hops < 20) {
+          var vm = el.__vue__;
+          var depth = 0;
+          while (vm && depth < 20) {
+            add(vm);
+            vm = vm.$parent;
+            depth += 1;
+          }
+          el = el.parentElement;
+          hops += 1;
+        }
+        return out;
+      }
+
+      function findReader(info) {
+        var list = candidates(info.startEl);
+        var best = null;
+        for (var i = 0; i < list.length; i++) {
+          var vm = list[i];
+          if (!vm || typeof vm.showSelectionToolBar !== 'function') { continue; }
+          if (typeof vm.clientXY2RenderAreaXY !== 'function') { continue; }
+          if (typeof vm.findObjsWithPointsOnPointer !== 'function' &&
+              typeof vm.findObjsWithPoints !== 'function') { continue; }
+          if (!vm.$refs || !vm.$refs.renderTargetContainer || !vm.$refs.appContent) { continue; }
+          if (!best) { best = vm; continue; }
+          var el = vm.$el;
+          if (el && el.contains && el.contains(info.startEl) &&
+              (!best.$el || !best.$el.contains || !best.$el.contains(info.startEl))) {
+            best = vm;
+          }
+        }
+        return best;
+      }
+
+      function mapObjs(vm, rects) {
+        var first = rects[0];
+        var last = rects[rects.length - 1];
+        var p1 = vm.clientXY2RenderAreaXY({ x: first.left + 1, y: first.top + 1 });
+        var p2 = vm.clientXY2RenderAreaXY({ x: last.right - 1, y: last.bottom - 1 });
+        if (!p1 || !p2) { return null; }
+        var objs = null;
+        if (typeof vm.findObjsWithPoints === 'function') {
+          objs = vm.findObjsWithPoints(p1, p2);
+        } else {
+          objs = vm.findObjsWithPointsOnPointer(p1, p2);
+        }
+        if (!objs || !objs.length) { return null; }
+        var contentRects = null;
+        if (typeof vm.getRectsByContentObjs === 'function') {
+          contentRects = vm.getRectsByContentObjs(objs);
+        }
+        if (!contentRects || !contentRects.length) {
+          contentRects = [];
+          for (var i = 0; i < objs.length; i++) {
+            if (objs[i] && objs[i].rect) { contentRects.push(objs[i].rect); }
+          }
+        }
+        if (!contentRects.length) { return null; }
+        return { objs: objs, rects: contentRects };
+      }
+
+      function fail() {
+        failures += 1;
+        if (failures >= 2) {
+          cooldownUntil = Date.now() + 1200;
+          failures = 0;
+        }
+      }
+
+      function trigger() {
+        pendingTimer = 0;
+        if (touchActive || Date.now() < cooldownUntil) { return; }
+        var info = currentSelection();
+        if (!info) { lastKey = ''; return; }
+        var last = info.rects[info.rects.length - 1];
+        var key = info.text.slice(0, 60) + '|' + info.rects.length + '|' +
+          Math.round(info.rects[0].left) + ',' + Math.round(info.rects[0].top) + '|' +
+          Math.round(last.right) + ',' + Math.round(last.bottom);
+        if (key === lastKey) { return; }
+        var vm = findReader(info);
+        if (!vm) { fail(); return; }
+        var mapped = null;
+        try { mapped = mapObjs(vm, info.rects); } catch (e) { mapped = null; }
+        if (!mapped) { fail(); return; }
+        try {
+          vm.showSelectionToolBar({ objs: mapped.objs, rects: mapped.rects, existBookmark: null });
+        } catch (e) {
+          fail();
+          return;
+        }
+        lastKey = key;
+        failures = 0;
+        var attempts = 0;
+        var verify = function() {
+          attempts += 1;
+          if (toolbarShowing()) {
+            try { window.getSelection().removeAllRanges(); } catch (e) {}
+            postHideMenu();
+            return;
+          }
+          if (attempts < 6) { setTimeout(verify, 120); }
+        };
+        setTimeout(verify, 80);
+      }
+
+      function schedule(delay) {
+        if (pendingTimer) { clearTimeout(pendingTimer); }
+        pendingTimer = setTimeout(trigger, delay);
+      }
+
+      document.addEventListener('touchstart', function() {
+        touchActive = true;
+        if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = 0; }
+      }, { capture: true, passive: true });
+      document.addEventListener('touchend', function() {
+        touchActive = false;
+        schedule(320);
+      }, { capture: true, passive: true });
+      document.addEventListener('touchcancel', function() {
+        touchActive = false;
+      }, { capture: true, passive: true });
+      document.addEventListener('selectionchange', function() {
+        if (touchActive) { return; }
+        schedule(320);
+      });
+    })();
+    """
+
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
     }
@@ -248,6 +462,14 @@ private struct WereadReaderWebView: UIViewRepresentable {
                 forMainFrameOnly: false
             )
         )
+        configuration.userContentController.add(context.coordinator, name: "flareSelection")
+        configuration.userContentController.addUserScript(
+            WKUserScript(
+                source: Self.selectionBridgeScript,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: true
+            )
+        )
         let webView = WKWebView(frame: .zero, configuration: configuration)
         // 桌面 UA：手机 UA 下微信读书会把网页换成「打开 App」引导页。
         webView.customUserAgent = WebPlatformUserAgent.desktop
@@ -268,7 +490,11 @@ private struct WereadReaderWebView: UIViewRepresentable {
         }
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "flareSelection")
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         var parent: WereadReaderWebView
         weak var webView: WKWebView?
         var loadedToken = 0
@@ -320,6 +546,16 @@ private struct WereadReaderWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             parent.isLoading = true
+        }
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage
+        ) {
+            guard message.name == "flareSelection" else { return }
+            // 网页已经把官方工具条显示出来并清掉选区；这里再把 iOS 原生的
+            // 编辑菜单收起，避免它盖住官方「划线 / 写想法」。
+            UIMenuController.shared.hideMenu()
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
