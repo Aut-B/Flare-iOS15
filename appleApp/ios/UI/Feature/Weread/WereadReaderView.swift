@@ -229,13 +229,19 @@ private final class WereadSelectionWebView: WKWebView {
         return super.canPerformAction(action, withSender: sender)
     }
 
-    @available(iOS 16.0, *)
+    // UIResponder.buildMenu(with:) 自 iOS 13 起可用；重写方法的可用性不能低于
+    // 它重写的声明，否则 iOS 15 部署目标下编译报
+    // "overriding 'buildMenu' must be as available as declaration it overrides"。
+    // 实际移除菜单的逻辑仍只在 iOS 16+ 执行（iOS 15 走上面的 UIMenuController 路径）。
+    @available(iOS 13.0, *)
     override func buildMenu(with builder: UIMenuBuilder) {
         super.buildMenu(with: builder)
         guard !allowsSystemEditMenu else { return }
-        let identifiers: [UIMenu.Identifier] = [.standardEdit, .lookup, .learn, .share]
-        for identifier in identifiers where builder.menu(for: identifier) != nil {
-            builder.remove(menu: identifier)
+        if #available(iOS 16.0, *) {
+            let identifiers: [UIMenu.Identifier] = [.standardEdit, .lookup, .learn, .share]
+            for identifier in identifiers where builder.menu(for: identifier) != nil {
+                builder.remove(menu: identifier)
+            }
         }
     }
 }
