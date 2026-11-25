@@ -94,7 +94,11 @@ struct WereadNativeReaderView: View {
     /// `ownReviews` 是否至少成功拉过一次（空数组也是有效结果）。
     @State private var ownReviewsLoaded = false
     /// 点了笔记面板里的条目后先收起面板，等 `onDismiss` 再弹编辑器。
-    @State private var pendingEdit: WereadHighlight?
+    @State private var pendingEdit: WereadCloudNote?
+    /// 删除确认中的云端条目 / 正在删除的条目 id / 删除失败提示。
+    @State private var pendingDelete: WereadCloudNote?
+    @State private var deletingNoteID: String?
+    @State private var deleteError: String?
     /// 回传给 JS 的想法内容；`text == nil` 表示取消。
     @State private var noteReply: WereadNoteReply?
     @State private var noteReplyToken = 0
@@ -120,7 +124,9 @@ struct WereadNativeReaderView: View {
             let key = normalizedText(bookmark.markText)
             if let position = indexByText[key] {
                 let item = merged[position]
-                if item.note.isEmpty, !bookmark.note.isEmpty {
+                // 服务端有想法时以服务端为准：本机 UserDefaults 里的旧想法
+                // 不能盖过云端内容，也不能反过来冒充成已同步笔记。
+                if !bookmark.note.isEmpty {
                     merged[position] = WereadHighlight(
                         id: item.id,
                         text: item.text,
@@ -143,42 +149,148 @@ struct WereadNativeReaderView: View {
         return merged
     }
 
-    /// 本章能展示的笔记列表：本地 + 服务端，按 markText 去重。
-    /// 同一条划线本地没写想法、服务端有，就补上服务端的想法。
-    private var currentNoteEntries: [WereadHighlight] {
-        guard let current else { return [] }
-        var result = highlights[current.uid] ?? []
-        var indexByText: [String: Int] = [:]
-        for (position, item) in result.enumerated() {
-            let key = normalizedText(item.text)
-            if !key.isEmpty { indexByText[key] = position }
+    /// 全书云端笔记 / 划线 / 想法。
+    ///
+    /// 只由 `serverNotes` 和 `ownReviews` 构造，**不读本地 UserDefaults
+    /// 里的划线**，避免把本机记录冒充成云端已同步内容。条目按目录顺序、
+    /// 创建时间排序；同一段划线上的多条想法各占一行，编辑/删除才不会
+    /// 误改到别的想法。
+    private var cloudNoteEntries: [WereadCloudNote] {
+        var rows: [WereadCloudNote] = []
+        var usedReviewIds = Set<String>()
+        var coveredBookmarkIds = Set<String>()
+        // 一次建好章节索引，避免每条笔记都线性扫一遍目录（6S 上章节多时很贵）。
+        let chapterByUid = Dictionary(
+            chapters.map { ($0.uid, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        func chapterIndex(for uid: Int) -> Int {
+            chapterByUid[uid]?.index ?? 0
         }
-        for bookmark in serverNotes[current.uid] ?? [] {
-            let key = normalizedText(bookmark.markText)
-            if !key.isEmpty, let position = indexByText[key] {
-                if result[position].note.isEmpty, !bookmark.note.isEmpty {
-                    let item = result[position]
-                    result[position] = WereadHighlight(
-                        id: item.id,
-                        text: item.text,
-                        note: bookmark.note,
-                        range: item.range ?? bookmark.range
-                    )
-                }
-                continue
+        func chapterSortKey(for uid: Int) -> Int {
+            chapterByUid[uid]?.index ?? Int.max
+        }
+        func chapterTitle(for uid: Int) -> String {
+            let title = chapterByUid[uid]?.title ?? ""
+            return title.isEmpty ? "章节 \(uid)" : title
+        }
+
+        // 想法是编辑/删除的最小单位，先按 review 建行；能对上划线时把
+        // bookmarkId 一起带上，删除整条（划线 + 想法）才有依据。
+        let reviews = ownReviews.sorted { lhs, rhs in
+            let left = chapterSortKey(for: lhs.chapterUid)
+            let right = chapterSortKey(for: rhs.chapterUid)
+            if left != right { return left < right }
+            return lhs.reviewId < rhs.reviewId
+        }
+        for review in reviews {
+            guard !review.content.isEmpty else { continue }
+            let bookmark = serverNotes[review.chapterUid]?.first { item in
+                let text = normalizedText(item.markText)
+                let byRange = !review.range.isEmpty && item.range == review.range
+                let byText =
+                    !review.abstract.isEmpty
+                    && text == normalizedText(review.abstract)
+                return byRange || byText
             }
-            guard !key.isEmpty || !bookmark.note.isEmpty else { continue }
-            if !key.isEmpty { indexByText[key] = result.count }
-            result.append(
-                WereadHighlight(
-                    id: bookmark.id,
-                    text: bookmark.markText,
-                    note: bookmark.note,
-                    range: bookmark.range
+            let bookmarkId = bookmark.flatMap(serverBookmarkId)
+            if let bookmarkId { coveredBookmarkIds.insert(bookmarkId) }
+            usedReviewIds.insert(review.reviewId)
+            rows.append(
+                WereadCloudNote(
+                    id: "review:\(review.reviewId)",
+                    chapterUid: review.chapterUid,
+                    chapterIndex: chapterIndex(for: review.chapterUid),
+                    chapterTitle: chapterTitle(for: review.chapterUid),
+                    text: normalizedText(review.abstract),
+                    note: review.content,
+                    range: review.range,
+                    createTime: bookmark?.createTime ?? 0,
+                    kind: .thought,
+                    bookmarkId: bookmarkId,
+                    reviewId: review.reviewId
                 )
             )
         }
-        return result
+
+        // 再补纯划线和「想法索引没拉到时」的服务端条目。
+        for (chapterUid, list) in serverNotes {
+            for bookmark in list {
+                let text = normalizedText(bookmark.markText)
+                let note = normalizedText(bookmark.note)
+                guard !text.isEmpty || !note.isEmpty else { continue }
+                let bookmarkId = serverBookmarkId(bookmark)
+                if note.isEmpty {
+                    rows.append(
+                        WereadCloudNote(
+                            id: "mark:\(bookmark.id)",
+                            chapterUid: chapterUid,
+                            chapterIndex: chapterIndex(for: chapterUid),
+                            chapterTitle: chapterTitle(for: chapterUid),
+                            text: text,
+                            note: "",
+                            range: bookmark.range,
+                            createTime: bookmark.createTime,
+                            kind: .highlight,
+                            bookmarkId: bookmarkId,
+                            reviewId: nil
+                        )
+                    )
+                    continue
+                }
+                // id 本身就是 reviewId 的条目已经在上面按想法建过行。
+                if usedReviewIds.contains(bookmark.id) { continue }
+                if let bookmarkId, coveredBookmarkIds.contains(bookmarkId) { continue }
+                // 这条 note 已经由上面的 ownReviews 行覆盖时不再重复；
+                // 仅存在于 bookmarklist 的内联 note 仍然要展示。
+                let coveredByNote = ownReviews.contains { review in
+                    guard review.chapterUid == chapterUid else { return false }
+                    let content = normalizedText(review.content)
+                    return !content.isEmpty && (content == note || note.contains(content))
+                }
+                if coveredByNote { continue }
+                rows.append(
+                    WereadCloudNote(
+                        id: "server:\(bookmark.id)",
+                        chapterUid: chapterUid,
+                        chapterIndex: chapterIndex(for: chapterUid),
+                        chapterTitle: chapterTitle(for: chapterUid),
+                        text: text,
+                        note: note,
+                        range: bookmark.range,
+                        createTime: bookmark.createTime,
+                        kind: .thought,
+                        bookmarkId: bookmarkId,
+                        reviewId: nil
+                    )
+                )
+            }
+        }
+
+        return rows.sorted { lhs, rhs in
+            let left = chapterSortKey(for: lhs.chapterUid)
+            let right = chapterSortKey(for: rhs.chapterUid)
+            if left != right { return left < right }
+            let lTime = lhs.createTime > 0 ? lhs.createTime : TimeInterval.greatestFiniteMagnitude
+            let rTime = rhs.createTime > 0 ? rhs.createTime : TimeInterval.greatestFiniteMagnitude
+            if lTime != rTime { return lTime < rTime }
+            return lhs.id < rhs.id
+        }
+    }
+
+    /// `bookmarklist` 的真实划线 id；`bookmark-...` / `thought-...`
+    /// 是拉取失败时的合成 id，或本身是想法 id，不能拿去删划线。
+    private func serverBookmarkId(_ bookmark: WereadBookmark) -> String? {
+        let id = bookmark.id
+        guard
+            !id.isEmpty,
+            !id.hasPrefix("bookmark-"),
+            !id.hasPrefix("thought-"),
+            !ownReviews.contains(where: { $0.reviewId == id })
+        else {
+            return nil
+        }
+        return id
     }
 
     private func normalizedText(_ text: String) -> String {
@@ -402,7 +514,7 @@ struct WereadNativeReaderView: View {
             },
             onAnnotationLink: { href, text in
                 // 正文里批注/想法/高亮的蓝色可点元素指向 /web/review/...
-                // 或相对伪地址时也不该真的导航，统一落到本章笔记面板。
+                // 或相对伪地址时也不该真的导航，统一落到笔记面板。
                 guard token == self.loadToken else { return }
                 handleAnnotationLink(text, href: href)
             },
@@ -500,7 +612,7 @@ struct WereadNativeReaderView: View {
                     Button {
                         showNotes = true
                     } label: {
-                        Label("本章笔记（\(currentNoteEntries.count)）", systemImage: "text.quote")
+                        Label("笔记（\(cloudNoteEntries.count)）", systemImage: "text.quote")
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -666,7 +778,7 @@ struct WereadNativeReaderView: View {
     private var notesSheet: some View {
         NavigationView {
             Group {
-                if notesLoading, currentNoteEntries.isEmpty {
+                if notesLoading, cloudNoteEntries.isEmpty {
                     VStack(spacing: 12) {
                         ProgressView()
                         Text("正在同步微读笔记…")
@@ -674,7 +786,7 @@ struct WereadNativeReaderView: View {
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let notesError, currentNoteEntries.isEmpty {
+                } else if let notesError, cloudNoteEntries.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "exclamationmark.circle")
                             .font(.system(size: 30))
@@ -686,16 +798,16 @@ struct WereadNativeReaderView: View {
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 30)
-                        Button("重试") { retryBookmarks() }
+                        Button("重试") { Task { await refreshNotes() } }
                             .buttonStyle(.borderedProminent)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if currentNoteEntries.isEmpty {
+                } else if cloudNoteEntries.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "text.quote")
                             .font(.system(size: 30))
                             .foregroundStyle(.secondary)
-                        Text("本章还没有同步的笔记")
+                        Text("这本书还没有同步的笔记")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                         Text("在微读官方 App 或网页里做的划线和想法，会同步到这里")
@@ -708,39 +820,128 @@ struct WereadNativeReaderView: View {
                 } else {
                     List {
                         Section {
-                            ForEach(currentNoteEntries) { item in
+                            ForEach(cloudNoteEntries) { item in
                                 Button {
                                     // 面板还开着时主视图的编辑浮层会被盖住，先收起面板。
+                                    guard deletingNoteID == nil else { return }
                                     pendingEdit = item
                                     showNotes = false
                                 } label: {
                                     noteRow(item)
                                 }
                                 .buttonStyle(.plain)
+                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                    Button(role: .destructive) {
+                                        pendingDelete = item
+                                    } label: {
+                                        Label("删除", systemImage: "trash")
+                                    }
+                                }
+                                .contextMenu {
+                                    Button(role: .destructive) {
+                                        pendingDelete = item
+                                    } label: {
+                                        Label("删除云端笔记", systemImage: "trash")
+                                    }
+                                }
                             }
                         } footer: {
-                            Text("点任意一条可以改想法，保存后会同步到微信读书")
-                                .font(.caption2)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(
+                                    "全书 \(cloudNoteEntries.count) 条，来自微信读书云端。" +
+                                        "点一条编辑或补想法，左滑 / 长按删除。"
+                                )
+                                if !ownReviewsLoaded, !store.cookie.isEmpty {
+                                    Text("想法索引未同步，编辑/删除可能暂不可用；点左上角刷新或稍后重试。")
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+                            .font(.caption2)
                         }
                     }
                     .listStyle(.plain)
                 }
             }
-            .navigationTitle(current?.title.isEmpty == false ? "本章笔记" : "笔记")
+            .navigationTitle("笔记")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        Task { await refreshNotes() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(notesLoading || deletingNoteID != nil)
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("完成") { showNotes = false }
                 }
+            }
+            .confirmationDialog(
+                "从微信读书云端删除？",
+                isPresented: Binding(
+                    get: { pendingDelete != nil },
+                    set: { if !$0 { pendingDelete = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: pendingDelete
+            ) { item in
+                // 想法索引没拉到时不给会误导的删除按钮，只留取消和说明。
+                if !(item.reviewId == nil && !item.note.isEmpty) {
+                    if item.reviewId?.isEmpty == false {
+                        Button("删除想法", role: .destructive) {
+                            Task { await deleteCloudNote(item, removeHighlight: false) }
+                        }
+                    }
+                    if item.bookmarkId?.isEmpty == false {
+                        Button(
+                            item.reviewId == nil ? "删除划线" : "删除划线及想法",
+                            role: .destructive
+                        ) {
+                            Task { await deleteCloudNote(item, removeHighlight: true) }
+                        }
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            } message: { item in
+                if item.reviewId == nil, !item.note.isEmpty {
+                    Text("这条想法的云端索引还没同步，先刷新列表再删除；现在不会执行删除。")
+                } else {
+                    Text("会直接同步到微信读书云端，官方 App 里也会消失，且不可撤销。")
+                }
+            }
+            .alert(
+                "删除失败",
+                isPresented: Binding(
+                    get: { deleteError != nil },
+                    set: { if !$0 { deleteError = nil } }
+                )
+            ) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text(deleteError ?? "")
             }
         }
     }
 
     /// 笔记面板里的一行。整行可点，所以不再开 `textSelection` ——
     /// 文本选择会吞掉点击，用户会以为「点不进去」。
-    private func noteRow(_ item: WereadHighlight) -> some View {
+    private func noteRow(_ item: WereadCloudNote) -> some View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text(item.chapterTitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Text(item.kind.title)
+                        .font(.caption2)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.secondary.opacity(0.12))
+                        .clipShape(Capsule())
+                    Spacer(minLength: 0)
+                }
                 if !item.text.isEmpty {
                     Text(item.text)
                         .font(.system(size: 15))
@@ -763,9 +964,14 @@ struct WereadNativeReaderView: View {
                 }
             }
             Spacer(minLength: 0)
-            Image(systemName: "square.and.pencil")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+            if deletingNoteID == item.id {
+                ProgressView()
+                    .scaleEffect(0.7)
+            } else {
+                Image(systemName: "square.and.pencil")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
@@ -841,8 +1047,10 @@ struct WereadNativeReaderView: View {
         guard !noteSaving else { return }
         noteSaving = true
         noteError = nil
-        let chapterUid = current?.uid ?? 0
-        let chapterIdx = current?.index ?? 0
+        // 云端条目的章节跟着条目本身走，不能读 `current`：用户可能已经
+        // 翻到别的章，按当前章保存会把想法写到错误章节。
+        let chapterUid = request.chapterUid > 0 ? request.chapterUid : (current?.uid ?? 0)
+        let chapterIdx = request.chapterIdx
         Task {
             await performSave(
                 text: text,
@@ -868,8 +1076,7 @@ struct WereadNativeReaderView: View {
     ///
     /// 打开面板时会先拉一次「我的想法」；没拉到才在这里补拉，避免用户
     /// 点得太快时把「编辑」误判成「新建」。
-    private func beginEditing(_ entry: WereadHighlight) {
-        guard current != nil else { return }
+    private func beginEditing(_ entry: WereadCloudNote) {
         noteError = nil
         noteSaving = false
         if ownReviewsLoaded || store.cookie.isEmpty {
@@ -880,28 +1087,41 @@ struct WereadNativeReaderView: View {
     }
 
     @MainActor
-    private func prepareEditor(for entry: WereadHighlight) async {
+    private func prepareEditor(for entry: WereadCloudNote) async {
         await loadOwnReviews()
         presentEditor(for: entry)
     }
 
-    private func presentEditor(for entry: WereadHighlight) {
-        let matched = matchedReview(for: entry)
+    private func presentEditor(for entry: WereadCloudNote) {
+        let matched =
+            entry.reviewId.flatMap { id in
+                ownReviews.first { $0.reviewId == id }
+            }
+            ?? matchedReview(for: entry)
+        let reviewId = entry.reviewId ?? matched?.reviewId
         noteDraft = matched?.content ?? entry.note
+        let highlight = WereadHighlight(
+            id: entry.id,
+            text: entry.text,
+            note: entry.note,
+            range: entry.range.isEmpty ? nil : entry.range
+        )
         noteRequest = WereadNoteRequest(
             text: entry.text,
-            entry: entry,
-            reviewId: matched?.reviewId,
-            isEditing: matched != nil || !entry.note.isEmpty
+            entry: highlight,
+            reviewId: reviewId,
+            chapterUid: entry.chapterUid,
+            chapterIdx: entry.chapterIndex,
+            isEditing: reviewId != nil || !entry.note.isEmpty
         )
     }
 
-    /// 把一条笔记对上服务端 review：章内 range 优先，原文兜底。
-    private func matchedReview(for entry: WereadHighlight) -> WereadOwnReview? {
-        guard let chapter = current else { return nil }
+    /// 把一条笔记对上服务端 review：章内 range 优先，原文 / 想法兜底。
+    private func matchedReview(for entry: WereadCloudNote) -> WereadOwnReview? {
         let text = normalizedText(entry.text)
-        let candidates = ownReviews.filter { $0.chapterUid == chapter.uid }
-        if let range = entry.range, !range.isEmpty {
+        let candidates = ownReviews.filter { $0.chapterUid == entry.chapterUid }
+        let range = entry.range
+        if !range.isEmpty {
             if let exact = candidates.first(where: {
                 $0.range == range && normalizedText($0.abstract) == text
             }) {
@@ -959,6 +1179,13 @@ struct WereadNativeReaderView: View {
             noteError = "没能从云端定位到这条想法，先不新建以免重复，请稍后重试"
             return
         }
+        // 纯划线也可能已经在云端带了想法，只是想法索引没拉到。此时新建
+        // 会多出一条重复想法，必须先让用户刷新索引。
+        if reviewId == nil, !ownReviewsLoaded, !cookie.isEmpty {
+            noteSaving = false
+            noteError = "还没拉到云端想法索引，先刷新笔记列表再保存，避免重复新建"
+            return
+        }
         let ok: Bool
         if let reviewId, !reviewId.isEmpty {
             ok = await service.editReview(
@@ -982,14 +1209,13 @@ struct WereadNativeReaderView: View {
             noteError = "同步到微信读书失败，内容还在输入框里，可以稍后重试"
             return
         }
-        applyNote(text, to: entry, chapterUid: chapterUid)
         noteRequest = nil
         noteDraft = ""
         noteError = nil
         noteDraftFocused = false
-        // 服务端条目的显示以 bookmarklist 为准，重新拉一次刷新列表。
-        retryBookmarks()
-        Task { await loadOwnReviews() }
+        // 笔记只以服务端为准：保存成功后重新拉全书笔记和想法索引，
+        // 不再把想法写进本机 UserDefaults。
+        await refreshNotes()
     }
 
     /// 这条内容是否已由 `bookmarklist` 下发（说明云端已有想法）。
@@ -1006,26 +1232,125 @@ struct WereadNativeReaderView: View {
         }
     }
 
-    /// 编辑成功后把内容写回本地划线（如果这条笔记在本机也有一份）。
-    /// 纯服务端条目不在本地伪造，交给 `retryBookmarks()` 刷新。
-    private func applyNote(_ note: String, to entry: WereadHighlight, chapterUid: Int) {
-        guard chapterUid > 0 else { return }
-        var list = highlights[chapterUid] ?? []
-        let text = normalizedText(entry.text)
-        guard let position = list.firstIndex(where: { item in
-            item.id == entry.id || (!text.isEmpty && normalizedText(item.text) == text)
-        }) else {
+    /// 删除一条云端笔记。想法和划线分别调官方 Web 删除接口；
+    /// 删除成功后重新拉列表核对，不能只凭 HTTP 200 谎报已同步。
+    @MainActor
+    private func deleteCloudNote(_ note: WereadCloudNote, removeHighlight: Bool) async {
+        guard deletingNoteID == nil else { return }
+        guard !store.cookie.isEmpty else {
+            deleteError = "微信读书登录已失效，请重新登录后再删除"
             return
         }
-        let item = list[position]
-        list[position] = WereadHighlight(
-            id: item.id,
-            text: item.text,
-            note: note,
-            range: item.range ?? entry.range
+        let reviewId = note.reviewId
+        let bookmarkId = note.bookmarkId
+        if reviewId == nil, !note.note.isEmpty {
+            deleteError = "这条想法的云端索引还没同步，先刷新笔记列表再删除，避免误删划线"
+            return
+        }
+        guard reviewId != nil || (removeHighlight && bookmarkId != nil) else {
+            deleteError = "这条笔记没有可用的云端 ID，刷新列表后再试"
+            return
+        }
+        deletingNoteID = note.id
+        deleteError = nil
+        defer { deletingNoteID = nil }
+
+        let service = WereadService.shared
+        let cookie = store.cookie
+        var deletedReview = false
+        var deletedBookmark = false
+
+        if let reviewId, !reviewId.isEmpty {
+            guard await service.deleteReview(reviewId: reviewId, cookie: cookie) else {
+                deleteError = "删除想法失败：微信读书没有确认删除，请稍后重试"
+                return
+            }
+            deletedReview = true
+        }
+
+        if removeHighlight, let bookmarkId, !bookmarkId.isEmpty {
+            guard await service.removeBookmark(bookmarkId: bookmarkId, cookie: cookie) else {
+                if deletedReview {
+                    clearLocalMirror(of: note, removeHighlight: false)
+                    await refreshNotes()
+                    deleteError = "想法已删除，但划线删除失败；列表已刷新，可以再删一次划线"
+                } else {
+                    deleteError = "删除划线失败：微信读书没有确认删除，请稍后重试"
+                }
+                return
+            }
+            deletedBookmark = true
+        }
+
+        guard deletedReview || deletedBookmark else {
+            deleteError = "这条笔记没有可删除的云端内容"
+            return
+        }
+        clearLocalMirror(of: note, removeHighlight: deletedBookmark)
+        await refreshNotes()
+
+        // 刷新失败时列表还是旧数据，不能把「请求发出去了」当成「已经删掉」。
+        if deletedReview, !ownReviewsLoaded {
+            deleteError = "删除想法请求已发出，但想法索引刷新失败，无法确认；请刷新列表或到官方 App 确认"
+            return
+        }
+        if deletedBookmark, notesError != nil {
+            deleteError = "划线删除请求已发出，但重新拉取失败，无法确认；请刷新列表或到官方 App 确认"
+            return
+        }
+        var reviewStillThere = false
+        if deletedReview, let reviewId {
+            reviewStillThere = cloudNoteEntries.contains { $0.reviewId == reviewId }
+        }
+        var bookmarkStillThere = false
+        if deletedBookmark, let bookmarkId {
+            bookmarkStillThere = cloudNoteEntries.contains { $0.bookmarkId == bookmarkId }
+        }
+        if reviewStillThere || bookmarkStillThere {
+            deleteError = "微信读书返回成功，但重新拉取仍看到这条笔记；请到官方 App 确认后再试"
+        }
+    }
+
+    /// 只清理本机已有的旧划线镜像，不新增任何笔记落盘。
+    /// 删除想法时只清 note，删除整条时把本地镜像一起移除。
+    private func clearLocalMirror(of note: WereadCloudNote, removeHighlight: Bool) {
+        let chapterUid = note.chapterUid
+        guard chapterUid > 0 else { return }
+        var list = highlights[chapterUid] ?? WereadHighlightStore.load(
+            bookId: target.book.id,
+            chapterUid: chapterUid
         )
+        guard !list.isEmpty else { return }
+        let text = normalizedText(note.text)
+        let ids = Set([note.id, note.bookmarkId, note.reviewId].compactMap { $0 })
+        let matches: (WereadHighlight) -> Bool = { item in
+            ids.contains(item.id) || (!text.isEmpty && normalizedText(item.text) == text)
+        }
+        if removeHighlight {
+            let filtered = list.filter { !matches($0) }
+            guard filtered.count != list.count else { return }
+            list = filtered
+        } else {
+            var changed = false
+            for position in list.indices where matches(list[position]) {
+                if !list[position].note.isEmpty {
+                    list[position] = WereadHighlight(
+                        id: list[position].id,
+                        text: list[position].text,
+                        note: "",
+                        range: list[position].range
+                    )
+                    changed = true
+                }
+            }
+            guard changed else { return }
+        }
         highlights[chapterUid] = list
-        WereadHighlightStore.save(list, bookId: target.book.id, chapterUid: chapterUid)
+        if list.isEmpty {
+            WereadHighlightStore.remove(bookId: target.book.id, chapterUid: chapterUid)
+        } else {
+            WereadHighlightStore.save(list, bookId: target.book.id, chapterUid: chapterUid)
+        }
     }
 
     // MARK: - 加载
@@ -1149,17 +1474,14 @@ struct WereadNativeReaderView: View {
         }
     }
 
+    /// 编辑 / 删除后重新拉全书划线和「我的想法」索引，供列表与核对使用。
     @MainActor
-    private func retryBookmarks() {
+    private func refreshNotes() async {
         notesToken += 1
         let token = notesToken
         notesError = nil
-        Task {
-            await loadBookmarks(
-                bookId: target.book.id,
-                token: token
-            )
-        }
+        await loadBookmarks(bookId: target.book.id, token: token)
+        await loadOwnReviews()
     }
 
     @MainActor
@@ -1247,11 +1569,11 @@ struct WereadNativeReaderView: View {
     }
 
     /// 正文里批注/想法/高亮的蓝色可点元素：不请求它指向的地址，
-    /// 打开本章笔记面板。能按文字对上一条笔记时只记诊断，面板里可直接看。
+    /// 打开笔记面板。能按文字对上一条笔记时只记诊断，面板里可直接看。
     private func handleAnnotationLink(_ text: String, href: String = "") {
         let link = href.isEmpty ? "-" : String(href.prefix(120))
         let key = normalizedText(text)
-        let matched = !key.isEmpty && currentNoteEntries.contains {
+        let matched = !key.isEmpty && cloudNoteEntries.contains {
             normalizedText($0.text) == key
         }
         WereadService.screenDiag(
@@ -1640,6 +1962,34 @@ struct WereadHighlight: Codable, Hashable, Identifiable {
     }
 }
 
+/// 笔记面板里的一条**服务端**笔记。只由 `serverNotes` / `ownReviews`
+/// 构造，不读也不写 UserDefaults；6S 存储硬约束下笔记只留云端。
+private struct WereadCloudNote: Identifiable, Hashable {
+    enum Kind: String, Hashable {
+        case thought
+        case highlight
+
+        var title: String {
+            switch self {
+            case .thought: return "想法"
+            case .highlight: return "划线"
+            }
+        }
+    }
+
+    let id: String
+    let chapterUid: Int
+    let chapterIndex: Int
+    let chapterTitle: String
+    let text: String
+    let note: String
+    let range: String
+    let createTime: TimeInterval
+    let kind: Kind
+    let bookmarkId: String?
+    let reviewId: String?
+}
+
 enum WereadHighlightStore {
     private static func key(bookId: String, chapterUid: Int) -> String {
         "weread.highlights.\(bookId).\(chapterUid)"
@@ -1659,6 +2009,11 @@ enum WereadHighlightStore {
         guard let data = try? JSONEncoder().encode(list) else { return }
         UserDefaults.standard.set(data, forKey: key(bookId: bookId, chapterUid: chapterUid))
     }
+
+    /// 只用于删除云端内容后清理本机旧镜像，不参与新增笔记。
+    static func remove(bookId: String, chapterUid: Int) {
+        UserDefaults.standard.removeObject(forKey: key(bookId: bookId, chapterUid: chapterUid))
+    }
 }
 
 /// 一次「写想法 / 编辑想法」请求。
@@ -1670,6 +2025,9 @@ private struct WereadNoteRequest: Identifiable {
     let text: String
     var entry: WereadHighlight? = nil
     var reviewId: String? = nil
+    /// 编辑云端条目时必须带上条目自己的章节，不能读当前阅读章。
+    var chapterUid: Int = 0
+    var chapterIdx: Int = 0
     /// 编辑已有想法；否则是给划线补想法（或新建）。
     var isEditing: Bool = false
 }
@@ -1708,7 +2066,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
     /// 参数是原始 href 和链接文字，由 Swift 侧对回目录再跳章。
     let onChapterLink: (String, String) -> Void
     /// 正文里批注/想法/高亮的蓝色可点元素被点击。
-    /// 参数是原始 href 和元素文字，由 Swift 侧打开本章笔记面板。
+    /// 参数是原始 href 和元素文字，由 Swift 侧打开笔记面板。
     let onAnnotationLink: (String, String) -> Void
     /// 点正文空白处：切换沉浸阅读（隐藏/显示上下栏）。
     let onToggleFullscreen: () -> Void
@@ -2307,7 +2665,7 @@ enum WereadReaderHTML {
             // data-review-id / data-note-id / .wr_highlight_char 标出想法
             // 或高亮，官方阅读器的点按逻辑会跳到 `/web/review/...`。
             // 静态章节页没有那套路由，点了就 404；这里统一拦下来交给 Swift
-            // 打开本章笔记面板。脚注（data-wr-footernote）是原地气泡，不拦。
+            // 打开笔记面板。脚注（data-wr-footernote）是原地气泡，不拦。
             var NOTE_ATTRS = [
                 'data-review-id', 'data-reviewid',
                 'data-note-id', 'data-noteid',

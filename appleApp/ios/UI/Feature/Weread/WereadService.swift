@@ -2086,6 +2086,106 @@ final class WereadService: @unchecked Sendable {
         }
     }
 
+    /// 删除一条已发布的想法：`POST /web/review/delete`。
+    ///
+    /// 2026-11-25 未登录探测确认路由存在：`/web/review/delete` 回
+    /// `errCode -2010`（和已知存在的 `/web/review/edit` 一致），而
+    /// `/web/review/del`、`/web/review/remove` 都是 HTTP 404。
+    /// 请求体只带 `reviewId`。
+    ///
+    /// 成功判据：HTTP 2xx + `errCode == 0`/缺省；回包显式带 `succ` 时必须为 1。
+    /// 删除会立刻作用到云端，调用方拿到 true 后必须重新拉 `bookmarklist`
+    /// 核对条目确实消失，不能只凭 HTTP 200 报「已同步删除」。
+    func deleteReview(reviewId: String, cookie: String) async -> Bool {
+        let trimmed = reviewId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !cookie.isEmpty else {
+            let line =
+                "deleteReview 跳过参数不完整 reviewIdEmpty=\(trimmed.isEmpty) " +
+                "cookieEmpty=\(cookie.isEmpty)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
+            return false
+        }
+        let context = "reviewId=\(trimmed)"
+        Self.screenDiag("deleteReview 请求 \(context)")
+        var request = URLRequest(url: URL(string: "\(base)/web/review/delete")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.setValue(Self.readerUserAgent, forHTTPHeaderField: "User-Agent")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["reviewId": trimmed])
+
+        do {
+            let data = try await send(request)
+            let json = try parseObject(data)
+            try checkError(json)
+            let container = json["data"] as? [String: Any] ?? json
+            if let succ = intValue(json["succ"]) ?? intValue(container["succ"]), succ != 1 {
+                let line = "deleteReview FAIL \(context) succ=\(succ)"
+                Self.screenDiag(line)
+                FlareDiagnostics.shared.record(.weread, "ERR", line)
+                return false
+            }
+            let line = "deleteReview OK \(context)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "RES", line)
+            return true
+        } catch {
+            let line = "deleteReview FAIL \(context) \(error.localizedDescription)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
+            return false
+        }
+    }
+
+    /// 删除一条云端划线：`POST /web/book/removeBookmark`。
+    ///
+    /// 2026-11-25 未登录探测确认路由存在：`/web/book/removeBookmark` 回
+    /// `errCode -2010`，而 `deleteBookmark` / `delBookmark` 都是 HTTP 404。
+    /// 请求体只带 `bookmarkId`；成功判据与 `deleteReview` 相同，调用方
+    /// 删除后要重新拉列表核对。
+    func removeBookmark(bookmarkId: String, cookie: String) async -> Bool {
+        let trimmed = bookmarkId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !cookie.isEmpty else {
+            let line =
+                "removeBookmark 跳过参数不完整 bookmarkIdEmpty=\(trimmed.isEmpty) " +
+                "cookieEmpty=\(cookie.isEmpty)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
+            return false
+        }
+        let context = "bookmarkId=\(trimmed)"
+        Self.screenDiag("removeBookmark 请求 \(context)")
+        var request = URLRequest(url: URL(string: "\(base)/web/book/removeBookmark")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.setValue(Self.readerUserAgent, forHTTPHeaderField: "User-Agent")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["bookmarkId": trimmed])
+
+        do {
+            let data = try await send(request)
+            let json = try parseObject(data)
+            try checkError(json)
+            let container = json["data"] as? [String: Any] ?? json
+            if let succ = intValue(json["succ"]) ?? intValue(container["succ"]), succ != 1 {
+                let line = "removeBookmark FAIL \(context) succ=\(succ)"
+                Self.screenDiag(line)
+                FlareDiagnostics.shared.record(.weread, "ERR", line)
+                return false
+            }
+            let line = "removeBookmark OK \(context)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "RES", line)
+            return true
+        } catch {
+            let line = "removeBookmark FAIL \(context) \(error.localizedDescription)"
+            Self.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "ERR", line)
+            return false
+        }
+    }
+
     /// 把一条本地划线 / 想法同步到微读服务端。
     ///
     /// 调用方已经完成本地保存，这里只做尽力上传：没有 range、没登录、
