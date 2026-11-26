@@ -343,7 +343,11 @@ jobs:
   ipa:
     name: Release IPA
     needs: smoke
-    if: needs.smoke.result == 'success'
+    # 按本 job 设计意图：编译成功（smoke 的 mark step 输出 built=true）就照出包，
+    # 供 6S 真机验；模拟器「启动后 30s launchctl grep 不到 bundle id」是假阴性
+    # （截图/日志证明 App 正常在跑），不该拦住 IPA。编译失败时 built 未设置，
+    # 这里自然跳过，仍省下一小时设备编译。
+    if: needs.smoke.outputs.built == 'true'
     runs-on: macos-26
     timeout-minutes: 150
 
