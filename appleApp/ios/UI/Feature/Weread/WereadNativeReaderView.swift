@@ -577,6 +577,7 @@ struct WereadNativeReaderView: View {
             html: html,
             baseURL: URL(string: "https://weread.qq.com/"),
             cookie: store.cookie,
+            isDark: colorScheme == .dark,
             fontSize: fontSize,
             translationVisible: translationVisible,
             highlights: currentHighlights,
@@ -2241,7 +2242,7 @@ struct WereadNativeReaderView: View {
                     "请重试，或点「用网页版打开」查看官方页面"
                 return
             }
-            let wrapped = WereadReaderHTML.wrap(raw)
+            let wrapped = WereadReaderHTML.wrap(raw, dark: colorScheme == .dark)
             rememberInCache(chapter.uid, wrapped)
             html = wrapped
             // 不再「赋完 html 就算加载完」：那时候 WebView 还没排版，
@@ -2333,13 +2334,14 @@ struct WereadNativeReaderView: View {
         let chapter = chapters[next]
         guard cache[chapter.uid] == nil else { return }
         let bookId = target.book.id
+        let dark = colorScheme == .dark
         Task {
             guard let raw = try? await store.content(bookId: bookId, chapterUid: chapter.uid),
                   WereadReaderHTML.hasVisibleContent(raw)
             else {
                 return
             }
-            let wrapped = WereadReaderHTML.wrap(raw)
+            let wrapped = WereadReaderHTML.wrap(raw, dark: dark)
             await MainActor.run {
                 if self.cache[chapter.uid] == nil {
                     // 预取也走 LRU：否则预取会把缓存撑到无上限，
@@ -3117,6 +3119,8 @@ private struct WereadChapterWebView: UIViewRepresentable {
     let html: String
     let baseURL: URL?
     let cookie: String
+    /// 当前系统外观。显式传给页面切 CSS 主题，不依赖 WKWebView 的 prefers-color-scheme。
+    let isDark: Bool
     /// 正文字号（px）。只改页面 CSS 变量，不缩放 WKWebView。
     let fontSize: CGFloat
     /// 官方译文默认隐藏，打开时只切 CSS class；译文文本始终留在 DOM 里。
@@ -3158,9 +3162,9 @@ private struct WereadChapterWebView: UIViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "weread")
 
         let webView = WereadChapterWKWebView(frame: .zero, configuration: configuration)
-        webView.isOpaque = false
-        webView.backgroundColor = .clear
-        webView.scrollView.backgroundColor = .clear
+        webView.isOpaque = true
+        webView.backgroundColor = .systemBackground
+        webView.scrollView.backgroundColor = .systemBackground
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         // 字号放大后正文只纵向重排，禁止任何横向弹性滚动。
         webView.scrollView.alwaysBounceHorizontal = false
@@ -3172,12 +3176,17 @@ private struct WereadChapterWebView: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
+        let style: UIUserInterfaceStyle = isDark ? .dark : .light
+        if webView.overrideUserInterfaceStyle != style {
+            webView.overrideUserInterfaceStyle = style
+        }
         context.coordinator.load(html, in: webView, baseURL: baseURL, cookie: cookie)
         context.coordinator.apply(highlights, in: webView)
         context.coordinator.applyNoteReply(noteReply, in: webView)
         context.coordinator.requestScroll(scrollRequest, in: webView)
         context.coordinator.applyFontSize(fontSize, in: webView)
         context.coordinator.applyTranslation(translationVisible, in: webView)
+        context.coordinator.applyTheme(isDark, in: webView)
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
@@ -3195,6 +3204,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
         private var lastNoteReplyID: Int?
         private var lastFontSize: CGFloat?
         private var lastTranslationVisible: Bool?
+        private var lastDark: Bool?
         private var loaded = false
         /// 页面还没 ready 时收到的滚动请求，等 `markReady` 再补执行。
         private var pendingScroll: WereadScrollTarget?
@@ -3211,6 +3221,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
             lastHighlights = ""
             lastFontSize = nil
             lastTranslationVisible = nil
+            lastDark = nil
             loaded = false
             pendingScroll = nil
             scrollRetries = 0
@@ -3402,6 +3413,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 // 否则会把刚恢复的滚动状态冲成章首。
                 applyFontSize(parent.fontSize, in: webView, silent: true)
                 applyTranslation(parent.translationVisible, in: webView)
+                applyTheme(parent.isDark, in: webView)
                 // 排版完成后再补执行挂起的续读滚动。
                 if let pending = pendingScroll {
                     scrollRetries = 0
@@ -3462,6 +3474,24 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 DispatchQueue.main.async {
                     self.parent.onTranslationCount(count)
                 }
+            }
+        }
+
+        /// 只切 html 上的主题 class；背景、文字和划线底色都由页面 CSS 变量决定。
+        func applyTheme(_ dark: Bool, in webView: WKWebView) {
+            guard loaded else { return }
+            guard lastDark != dark else { return }
+            lastDark = dark
+            let value = dark ? "true" : "false"
+            webView.evaluateJavaScript(
+                "document.documentElement.classList.toggle('wr-dark', \(value));"
+            ) { _, error in
+                guard let error = error else { return }
+                // 页面切换或脚本尚未就绪时，下次更新再试。
+                self.lastDark = nil
+                Self.log.error(
+                    "weread apply theme failed: \(String(describing: error), privacy: .public)"
+                )
             }
         }
 
@@ -3630,19 +3660,30 @@ private enum WereadCookieParser {
 // MARK: - 章节 HTML
 
 enum WereadReaderHTML {
-    static func wrap(_ body: String) -> String {
+    static func wrap(_ body: String, dark: Bool) -> String {
         let normalized = normalize(body)
+        let themeClass = dark ? "wr-dark" : "wr-light"
         return """
         <!doctype html>
-        <html>
+        <html class="\(themeClass)">
         <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
         <style>
         :root {
-            color-scheme: light dark;
+            color-scheme: light;
+            /* 固定的前景/背景色对，由 Swift 按当前 colorScheme 切 wr-dark class。 */
+            --wr-bg: #ffffff;
+            --wr-fg: #1c1c1e;
+            --wr-hl-bg: #ffe58a;
             /* 正文字号只改这个变量，由浏览器重排；不缩放整页。 */
             --wr-font-size: \(Int(WereadFontSize.initial))px;
+        }
+        html.wr-dark {
+            color-scheme: dark;
+            --wr-bg: #000000;
+            --wr-fg: #e5e5e7;
+            --wr-hl-bg: #6b5a00;
         }
         html {
             font-size: var(--wr-font-size);
@@ -3653,8 +3694,8 @@ enum WereadReaderHTML {
             margin: 0;
             /* 左右留白尽量小，把屏宽让给正文；底部留出翻页栏的空间。 */
             padding: 8px 8px 48px;
-            background: transparent;
-            color: #1c1c1e;
+            background: var(--wr-bg);
+            color: var(--wr-fg);
             box-sizing: border-box;
             font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
             line-height: 1.85;
@@ -3729,7 +3770,7 @@ enum WereadReaderHTML {
         p { margin: 0 0 1em; }
         h1, h2, h3, h4 { line-height: 1.4; margin: 1.2em 0 0.6em; }
         mark.wr-hl {
-            background: #ffe58a;
+            background: var(--wr-hl-bg);
             color: inherit;
             border-radius: 2px;
             padding: 0 1px;
@@ -3756,10 +3797,6 @@ enum WereadReaderHTML {
             background: transparent;
         }
         #wr-tools button:active { background: rgba(255, 255, 255, 0.16); }
-        @media (prefers-color-scheme: dark) {
-            html, body { color: #e5e5e7; }
-            mark.wr-hl { background: #6b5a00; }
-        }
         </style>
         </head>
         <body>
