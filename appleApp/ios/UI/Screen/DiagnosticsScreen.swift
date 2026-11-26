@@ -10,6 +10,8 @@ struct DiagnosticsScreen: View {
     @State private var showShare = false
     @State private var shareURL: URL?
     @State private var copied = false
+    /// 非 nil 时表示后台正在采集 / 导出，按钮禁用并显示进度，避免重复点导致排队。
+    @State private var busyText: String?
 
     var body: some View {
         List {
@@ -20,44 +22,47 @@ struct DiagnosticsScreen: View {
             }
 
             Section {
+                if let busyText {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text(busyText)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Button {
-                    FlareDiagnostics.shared.captureSnapshot()
-                    reportText = FlareDiagnostics.shared.report()
+                    Task { await captureOnly() }
                 } label: {
                     Label("抓当前状态快照", systemImage: "camera.viewfinder")
                 }
+                .disabled(busyText != nil)
                 Button {
-                    FlareDiagnostics.shared.captureSnapshot()
-                    reportText = FlareDiagnostics.shared.report()
-                    shareURL = FlareDiagnostics.shared.exportZip()
-                        ?? FlareDiagnostics.shared.exportFileURL()
-                    showShare = true
+                    Task { await captureAndExportZip() }
                 } label: {
                     Label("导出诊断 zip（推荐）", systemImage: "square.and.arrow.up")
                 }
+                .disabled(busyText != nil)
                 Button {
-                    shareURL = FlareDiagnostics.shared.exportFileURL()
-                    showShare = true
+                    Task { await exportTextOnly() }
                 } label: {
                     Label("只导出文本（txt）", systemImage: "doc.text")
                 }
+                .disabled(busyText != nil)
                 Button {
-                    // 剪贴板可能跨 App / 跨设备同步，只复制落盘安全版（无响应体、无笔记正文）。
-                    UIPasteboard.general.string = FlareDiagnostics.shared.exportText()
-                    copied = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                    Task { await copyReport() }
                 } label: {
                     Label(
                         copied ? "已复制" : "复制报告全文",
                         systemImage: copied ? "checkmark.circle" : "doc.on.doc"
                     )
                 }
+                .disabled(busyText != nil)
                 Button(role: .destructive) {
-                    FlareDiagnostics.shared.clear()
-                    reportText = FlareDiagnostics.shared.report()
+                    Task { await clearRecords() }
                 } label: {
                     Label("清空本轮记录", systemImage: "trash")
                 }
+                .disabled(busyText != nil)
             } header: {
                 Text("导出")
             } footer: {
@@ -67,7 +72,7 @@ struct DiagnosticsScreen: View {
 
             Section {
                 ScrollView {
-                    Text(reportText.isEmpty ? "本轮暂无记录" : reportText)
+                    Text(reportText.isEmpty ? (busyText == nil ? "本轮暂无记录" : "正在采集…") : reportText)
                         .font(.system(size: 11, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -78,14 +83,57 @@ struct DiagnosticsScreen: View {
             }
         }
         .navigationTitle("诊断报告")
-        .onAppear {
-            FlareDiagnostics.shared.captureSnapshot()
-            reportText = FlareDiagnostics.shared.report()
-        }
+        .task { await captureOnly() }
         .sheet(isPresented: $showShare) {
             if let shareURL {
                 IGShareSheet(items: [shareURL])
             }
         }
+    }
+
+    private func captureOnly() async {
+        guard busyText == nil else { return }
+        busyText = "正在采集快照…"
+        defer { busyText = nil }
+        reportText = await FlareDiagnostics.shared.captureSnapshot()
+    }
+
+    private func captureAndExportZip() async {
+        guard busyText == nil else { return }
+        busyText = "正在采集并生成诊断包…"
+        defer { busyText = nil }
+        reportText = await FlareDiagnostics.shared.captureSnapshot()
+        if let zip = await FlareDiagnostics.shared.exportZip() {
+            shareURL = zip
+        } else {
+            shareURL = await FlareDiagnostics.shared.exportFileURL()
+        }
+        showShare = true
+    }
+
+    private func exportTextOnly() async {
+        guard busyText == nil else { return }
+        busyText = "正在生成文本…"
+        defer { busyText = nil }
+        shareURL = await FlareDiagnostics.shared.exportFileURL()
+        showShare = true
+    }
+
+    private func copyReport() async {
+        guard busyText == nil else { return }
+        busyText = "正在整理报告…"
+        defer { busyText = nil }
+        // 剪贴板可能跨 App / 跨设备同步，只复制落盘安全版（无响应体、无笔记正文）。
+        UIPasteboard.general.string = await FlareDiagnostics.shared.exportText()
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+    }
+
+    private func clearRecords() async {
+        guard busyText == nil else { return }
+        busyText = "正在清空…"
+        defer { busyText = nil }
+        FlareDiagnostics.shared.clear()
+        reportText = await FlareDiagnostics.shared.currentReport()
     }
 }

@@ -13,14 +13,12 @@ import UIKit
 /// 设计约束：
 /// - 只依赖 Foundation / UIKit / AVFAudio，不碰 Kotlin，避免跨层编译风险。
 /// - 线程安全（NSLock），写入来自任意请求回调线程。
-/// - 内存环形缓冲 + 节流落盘；落盘内容必须脱敏，且不带成功响应体
-///   （6S 存储硬约束：笔记正文、划线、想法一律不落本地）。
+/// - 内存环形缓冲；只有用户主动导出时才写文件，落盘内容必须脱敏，且不带
+///   成功响应体（6S 存储硬约束：笔记正文、划线、想法一律不落本地）。
 nonisolated final class FlareDiagnostics: @unchecked Sendable {
     static let shared = FlareDiagnostics()
 
-    private init() {
-        loadPersisted()
-    }
+    private init() {}
 
     // MARK: - 模块
 
@@ -66,12 +64,9 @@ nonisolated final class FlareDiagnostics: @unchecked Sendable {
     private let lock = NSLock()
     private var events: [Event] = []
     private let maxEvents = 600
-    private var lastPersistAt = Date.distantPast
-    private var flushScheduled = false
     private var environment = EnvironmentSnapshot()
-    private static let persistInterval: TimeInterval = 1.2
 
-    private nonisolated struct EnvironmentSnapshot {
+    private nonisolated struct EnvironmentSnapshot: Sendable {
         var capturedAt: Date?
         var deviceModel = "未采集"
         var systemVersion = "?"
@@ -108,36 +103,106 @@ nonisolated final class FlareDiagnostics: @unchecked Sendable {
             events.removeFirst(events.count - maxEvents)
         }
         lock.unlock()
-        schedulePersist()
+        // 不自动落盘：6S 存储硬约束，诊断数据只在用户主动导出时写文件。
     }
 
-    /// 用户点「清空」时调用；同时清内存与磁盘快照。
+    /// 用户点「清空」时调用；只清内存，不碰业务数据。
     func clear() {
         lock.lock()
         events.removeAll()
         lock.unlock()
-        try? FileManager.default.removeItem(at: snapshotURL)
     }
 
-    // MARK: - 状态快照（主线程）
+    // MARK: - 状态快照（主线程只做轻量读取，重活在后台）
 
-    /// 抓一次各模块当前状态。只读 Store / Service 的已发布字段，不改任何业务状态；
-    /// 电量监控开关会临时打开再恢复。
+    /// 主线程只读取 UIKit 必须主线程的标量和 Store 的轻量字段；
+    /// 磁盘容量、音频会话、内存统计、报告拼接全部在后台队列完成。
+    private nonisolated struct SnapshotInput: Sendable {
+        var capturedAt = Date()
+        var deviceModel = "未采集"
+        var systemVersion = "?"
+        var appVersion = "?"
+        var appBuild = "?"
+        var appState = "未采集"
+        var battery = "未采集"
+
+        var wereadLoggedIn = false
+        var wereadNicknamePresent = false
+        var wereadBookCount = 0
+        var wereadProgressedCount = 0
+        var wereadReaderLinkCount = 0
+        var wereadRecoveryText = "idle"
+        var wereadLoading = false
+        var wereadError: String?
+        var wereadCookieLength = 0
+
+        var xhsLoggedIn = false
+        var xhsNoteCount = 0
+        var xhsLoading = false
+        var xhsLoadingMore = false
+        var xhsHasMore = false
+        var xhsLoadMoreFailed = false
+        var xhsFollowing = false
+        var xhsCookieLength = 0
+        var xhsUserAgentLength = 0
+        var xhsError: String?
+
+        var instagramLoggedIn = false
+        var instagramUserNamePresent = false
+        var instagramFeedCount = 0
+        var instagramLoading = false
+        var instagramLoadingMore = false
+        var instagramLikeOverrideCount = 0
+        var instagramCookieLength = 0
+        var instagramCsrfPresent = false
+        var instagramUserIdPresent = false
+        var instagramNeedsQuarantine = false
+        var instagramSuppressAdoption = false
+        var instagramEpoch = 0
+        var instagramError: String?
+    }
+
+    /// 抓一次当前状态并返回报告文本。主线程只做必要的 UIKit / Store 字段读取，
+    /// 磁盘遍历、音频会话查询、内存统计与报告拼接都在后台完成，避免 6S 卡死。
+    @discardableResult
+    func captureSnapshot() async -> String {
+        let input = await MainActor.run { Self.readMainActorSnapshot() }
+        return await Task.detached(priority: .utility) {
+            self.apply(input)
+            return self.report()
+        }.value
+    }
+
+    private func apply(_ input: SnapshotInput) {
+        let env = Self.collectEnvironment(from: input)
+        lock.lock()
+        environment = env
+        lock.unlock()
+
+        recordEnvironment(env)
+        recordWereadState(input)
+        recordXhsState(input)
+        recordInstagramState(input)
+        recordWeiboState()
+    }
+
+    /// 只在主线程调用：电量/前台状态必须走 UIKit；Store 字段只做值拷贝。
     @MainActor
-    func captureSnapshot() {
+    private static func readMainActorSnapshot() -> SnapshotInput {
+        var input = SnapshotInput()
+        input.capturedAt = Date()
+
         let device = UIDevice.current
-        var env = EnvironmentSnapshot()
-        env.capturedAt = Date()
-        env.deviceModel = UIDevice.modelName
-        env.systemVersion = device.systemVersion
-        env.appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-        env.appBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        input.deviceModel = UIDevice.modelName
+        input.systemVersion = device.systemVersion
+        input.appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        input.appBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
 
         switch UIApplication.shared.applicationState {
-        case .active: env.appState = "active(前台)"
-        case .inactive: env.appState = "inactive(切换中)"
-        case .background: env.appState = "background(后台)"
-        @unknown default: env.appState = "unknown"
+        case .active: input.appState = "active(前台)"
+        case .inactive: input.appState = "inactive(切换中)"
+        case .background: input.appState = "background(后台)"
+        @unknown default: input.appState = "unknown"
         }
 
         let batteryWasEnabled = device.isBatteryMonitoringEnabled
@@ -152,7 +217,63 @@ nonisolated final class FlareDiagnostics: @unchecked Sendable {
         @unknown default: charging = "未知"
         }
         device.isBatteryMonitoringEnabled = batteryWasEnabled
-        env.battery = level < 0 ? "未知" : String(format: "%.0f%% · %@", level * 100, charging)
+        input.battery = level < 0 ? "未知" : String(format: "%.0f%% · %@", level * 100, charging)
+
+        let weread = WereadStore.shared
+        let books = weread.books
+        input.wereadLoggedIn = weread.isLoggedIn
+        input.wereadNicknamePresent = !weread.nickname.isEmpty
+        input.wereadBookCount = books.count
+        input.wereadProgressedCount = books.reduce(into: 0) { count, book in
+            if book.progress > 0 { count += 1 }
+        }
+        input.wereadReaderLinkCount = weread.readerLinks.count
+        input.wereadRecoveryText = Self.recoveryText(weread.entryRecoveryState)
+        input.wereadLoading = weread.isLoading
+        input.wereadError = weread.errorMessage
+        input.wereadCookieLength = weread.cookie.count
+
+        let xhs = XhsStore.shared
+        input.xhsLoggedIn = xhs.isLoggedIn
+        input.xhsNoteCount = xhs.notes.count
+        input.xhsLoading = xhs.isLoading
+        input.xhsLoadingMore = xhs.isLoadingMore
+        input.xhsHasMore = xhs.hasMore
+        input.xhsLoadMoreFailed = xhs.loadMoreFailed
+        input.xhsFollowing = xhs.following
+        input.xhsCookieLength = xhs.cookie.count
+        input.xhsUserAgentLength = XhsSigner.desktopUserAgent.count
+        input.xhsError = xhs.errorMessage
+
+        let instagram = InstagramStore.shared
+        let service = InstagramService.shared
+        input.instagramLoggedIn = instagram.isLoggedIn
+        input.instagramUserNamePresent = !instagram.userName.isEmpty
+        input.instagramFeedCount = instagram.feed.count
+        input.instagramLoading = instagram.isLoading
+        input.instagramLoadingMore = instagram.isLoadingMore
+        input.instagramLikeOverrideCount = instagram.likeOverrides.count
+        input.instagramCookieLength = service.cookie.count
+        input.instagramCsrfPresent = !service.csrfToken.isEmpty
+        input.instagramUserIdPresent = !service.userId.isEmpty
+        input.instagramNeedsQuarantine = InstagramStateIsolator.needsQuarantine
+        input.instagramSuppressAdoption = InstagramStateIsolator.suppressAdoptionThisLaunch
+        input.instagramEpoch = InstagramStateIsolator.quarantineEpoch
+        input.instagramError = instagram.errorMessage
+
+        return input
+    }
+
+    /// 后台采集：磁盘容量、音频会话、内存占用都是可能阻塞的调用，禁止回主线程。
+    private static func collectEnvironment(from input: SnapshotInput) -> EnvironmentSnapshot {
+        var env = EnvironmentSnapshot()
+        env.capturedAt = input.capturedAt
+        env.deviceModel = input.deviceModel
+        env.systemVersion = input.systemVersion
+        env.appVersion = input.appVersion
+        env.appBuild = input.appBuild
+        env.appState = input.appState
+        env.battery = input.battery
 
         switch ProcessInfo.processInfo.thermalState {
         case .nominal: env.thermal = "nominal"
@@ -173,39 +294,29 @@ nonisolated final class FlareDiagnostics: @unchecked Sendable {
         env.audioOptions = Self.describe(options: audio.categoryOptions)
         env.audioOutput = audio.currentRoute.outputs.first?.portType.rawValue ?? "无"
         env.otherAudio = audio.isOtherAudioPlaying ? "是" : "否"
+        return env
+    }
 
-        lock.lock()
-        environment = env
-        lock.unlock()
-
+    private func recordEnvironment(_ env: EnvironmentSnapshot) {
         record(.pip, "STATE", "环境 · \(env.deviceModel) · iOS \(env.systemVersion) · App \(env.appVersion)(\(env.appBuild))")
         record(.pip, "STATE", "应用 · \(env.appState) · 运行 \(env.uptime) · 热状态 \(env.thermal) · 电量 \(env.battery)")
         record(.pip, "STATE", "内存 · 物理 \(env.physicalMB)MB · 占用 \(env.footprintMB)MB · 磁盘剩余 \(env.diskFreeMB)MB/\(env.diskTotalMB)MB")
         record(.pip, "STATE", "音频 · category=\(env.audioCategory) · options=\(env.audioOptions) · 输出=\(env.audioOutput) · 其他音频=\(env.otherAudio)")
         record(.pip, "STATE", "画中画 · App 未使用原生 AVPictureInPictureController；并存状态按音频会话/前后台/内存判断")
-
-        captureWereadState()
-        captureXhsState()
-        captureInstagramState()
-        captureWeiboState()
     }
 
-    @MainActor
-    private func captureWereadState() {
-        let store = WereadStore.shared
-        let books = store.books
-        let progressed = books.filter { $0.progress > 0 }.count
+    private func recordWereadState(_ input: SnapshotInput) {
         record(
             .weread, "STATE",
-            "书架 · 登录=\(Self.onOff(store.isLoggedIn)) · 昵称=\(store.nickname.isEmpty ? "空" : "有") · 书 \(books.count) 本 · 进度>0 \(progressed) 本 · 阅读器链接 \(store.readerLinks.count) 条"
+            "书架 · 登录=\(Self.onOff(input.wereadLoggedIn)) · 昵称=\(input.wereadNicknamePresent ? "有" : "空") · 书 \(input.wereadBookCount) 本 · 进度>0 \(input.wereadProgressedCount) 本 · 阅读器链接 \(input.wereadReaderLinkCount) 条"
         )
         record(
             .weread, "STATE",
-            "恢复态 · \(Self.recoveryText(store.entryRecoveryState)) · 加载中=\(Self.onOff(store.isLoading)) · 错误=\(store.errorMessage ?? "无")"
+            "恢复态 · \(input.wereadRecoveryText) · 加载中=\(Self.onOff(input.wereadLoading)) · 错误=\(input.wereadError ?? "无")"
         )
         record(
             .weread, "STATE",
-            "凭据 · cookie=\(store.cookie.isEmpty ? "无" : "\(store.cookie.count)字符")"
+            "凭据 · cookie=\(input.wereadCookieLength == 0 ? "无" : "\(input.wereadCookieLength)字符")"
         )
 
         let rows = snapshotEvents().filter { $0.module == Module.weread.rawValue }
@@ -218,36 +329,30 @@ nonisolated final class FlareDiagnostics: @unchecked Sendable {
         )
     }
 
-    @MainActor
-    private func captureXhsState() {
-        let store = XhsStore.shared
+    private func recordXhsState(_ input: SnapshotInput) {
         record(
             .xhs, "STATE",
-            "首页 · 登录=\(Self.onOff(store.isLoggedIn)) · 笔记 \(store.notes.count) 条 · 加载中=\(Self.onOff(store.isLoading)) · 更多中=\(Self.onOff(store.isLoadingMore)) · hasMore=\(Self.onOff(store.hasMore)) · 加载更多失败=\(Self.onOff(store.loadMoreFailed)) · 关注流=\(Self.onOff(store.following))"
+            "首页 · 登录=\(Self.onOff(input.xhsLoggedIn)) · 笔记 \(input.xhsNoteCount) 条 · 加载中=\(Self.onOff(input.xhsLoading)) · 更多中=\(Self.onOff(input.xhsLoadingMore)) · hasMore=\(Self.onOff(input.xhsHasMore)) · 加载更多失败=\(Self.onOff(input.xhsLoadMoreFailed)) · 关注流=\(Self.onOff(input.xhsFollowing))"
         )
         record(
             .xhs, "STATE",
-            "凭据 · cookie=\(store.cookie.isEmpty ? "无" : "\(store.cookie.count)字符") · UA=\(XhsSigner.desktopUserAgent.isEmpty ? "空" : "\(XhsSigner.desktopUserAgent.count)字符") · 错误=\(store.errorMessage ?? "无")"
+            "凭据 · cookie=\(input.xhsCookieLength == 0 ? "无" : "\(input.xhsCookieLength)字符") · UA=\(input.xhsUserAgentLength == 0 ? "空" : "\(input.xhsUserAgentLength)字符") · 错误=\(input.xhsError ?? "无")"
         )
     }
 
-    @MainActor
-    private func captureInstagramState() {
-        let store = InstagramStore.shared
-        let service = InstagramService.shared
+    private func recordInstagramState(_ input: SnapshotInput) {
         record(
             .instagram, "STATE",
-            "时间线 · 登录=\(Self.onOff(store.isLoggedIn)) · 用户=\(store.userName.isEmpty ? "空" : "有") · feed \(store.feed.count) 条 · 加载中=\(Self.onOff(store.isLoading)) · 更多中=\(Self.onOff(store.isLoadingMore)) · 点赞覆盖 \(store.likeOverrides.count)"
+            "时间线 · 登录=\(Self.onOff(input.instagramLoggedIn)) · 用户=\(input.instagramUserNamePresent ? "有" : "空") · feed \(input.instagramFeedCount) 条 · 加载中=\(Self.onOff(input.instagramLoading)) · 更多中=\(Self.onOff(input.instagramLoadingMore)) · 点赞覆盖 \(input.instagramLikeOverrideCount)"
         )
         record(
             .instagram, "STATE",
-            "会话 · cookie=\(service.cookie.isEmpty ? "无" : "\(service.cookie.count)字符") · csrf=\(service.csrfToken.isEmpty ? "无" : "有") · userId=\(service.userId.isEmpty ? "无" : "有") · 需要隔离=\(Self.onOff(InstagramStateIsolator.needsQuarantine)) · 本次抑制收养=\(Self.onOff(InstagramStateIsolator.suppressAdoptionThisLaunch)) · epoch=\(InstagramStateIsolator.quarantineEpoch)"
+            "会话 · cookie=\(input.instagramCookieLength == 0 ? "无" : "\(input.instagramCookieLength)字符") · csrf=\(input.instagramCsrfPresent ? "有" : "无") · userId=\(input.instagramUserIdPresent ? "有" : "无") · 需要隔离=\(Self.onOff(input.instagramNeedsQuarantine)) · 本次抑制收养=\(Self.onOff(input.instagramSuppressAdoption)) · epoch=\(input.instagramEpoch)"
         )
-        record(.instagram, "STATE", "失败态 · \(store.errorMessage ?? "无")")
+        record(.instagram, "STATE", "失败态 · \(input.instagramError ?? "无")")
     }
 
-    @MainActor
-    private func captureWeiboState() {
+    private func recordWeiboState() {
         let rows = snapshotEvents().filter { $0.module == Module.weibo.rawValue }
         let successes = rows.filter { $0.level == "RES" }.count
         let failures = rows.filter { $0.level == "ERR" }.count
@@ -264,8 +369,21 @@ nonisolated final class FlareDiagnostics: @unchecked Sendable {
         buildReport(diskSafe: false)
     }
 
+    /// 清空后重算报告；拼接放后台，避免卡住诊断页。
+    func currentReport() async -> String {
+        await Task.detached(priority: .utility) {
+            self.report()
+        }.value
+    }
+
     /// 写入磁盘 / zip 用。成功响应体不落盘，避免带出笔记正文。
-    func exportText() -> String {
+    func exportText() async -> String {
+        await Task.detached(priority: .userInitiated) {
+            self.buildExportText()
+        }.value
+    }
+
+    private func buildExportText() -> String {
         buildReport(diskSafe: true)
     }
 
@@ -402,23 +520,35 @@ nonisolated final class FlareDiagnostics: @unchecked Sendable {
 
     // MARK: - 导出
 
-    /// 报告文件 URL（纯文本，作为 zip 失败时的兜底）。
-    func exportFileURL() -> URL {
+    /// 报告文件 URL（纯文本，作为 zip 失败时的兜底）；写盘在后台完成。
+    func exportFileURL() async -> URL {
+        await Task.detached(priority: .userInitiated) {
+            self.exportFileURLSync()
+        }.value
+    }
+
+    private func exportFileURLSync() -> URL {
         let directory = FileManager.default.temporaryDirectory
         cleanOldExports(in: directory)
         let url = directory.appendingPathComponent("flare-diag-\(Self.stamp()).txt")
-        try? exportText().write(to: url, atomically: true, encoding: .utf8)
+        try? buildExportText().write(to: url, atomically: true, encoding: .utf8)
         return url
     }
 
-    /// 通用诊断 zip。返回 nil 表示写入失败，调用方可退回纯文本。
-    func exportZip() -> URL? {
+    /// 通用诊断 zip。返回 nil 表示写入失败，调用方可退回纯文本；生成与写盘在后台。
+    func exportZip() async -> URL? {
+        await Task.detached(priority: .userInitiated) {
+            self.exportZipSync()
+        }.value
+    }
+
+    private func exportZipSync() -> URL? {
         let directory = FileManager.default.temporaryDirectory
         cleanOldExports(in: directory)
         let url = directory.appendingPathComponent("flare-diag-\(Self.stamp()).zip")
         let entries: [(name: String, data: Data)] = [
             ("README.txt", Data(readmeText().utf8)),
-            ("report.txt", Data(exportText().utf8)),
+            ("report.txt", Data(buildExportText().utf8)),
             ("device.txt", Data(deviceText().utf8)),
             ("weread.txt", Data(moduleText(.weread).utf8)),
             ("xhs.txt", Data(moduleText(.xhs).utf8)),
@@ -507,71 +637,6 @@ nonisolated final class FlareDiagnostics: @unchecked Sendable {
             let name = item.lastPathComponent
             guard name.hasPrefix("flare-diag-") || name.hasPrefix("flare-diagnostic-") else { continue }
             try? FileManager.default.removeItem(at: item)
-        }
-    }
-
-    // MARK: - 落盘
-
-    private var snapshotURL: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Documents")
-        return docs.appendingPathComponent("flare-diagnostic-snapshot.json")
-    }
-
-    private func schedulePersist() {
-        lock.lock()
-        let now = Date()
-        if now.timeIntervalSince(lastPersistAt) >= Self.persistInterval {
-            lastPersistAt = now
-            let snapshot = events
-            lock.unlock()
-            writePersisted(snapshot)
-            return
-        }
-        if flushScheduled {
-            lock.unlock()
-            return
-        }
-        flushScheduled = true
-        lock.unlock()
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.persistInterval) { [weak self] in
-            self?.flushPersist()
-        }
-    }
-
-    private func flushPersist() {
-        lock.lock()
-        flushScheduled = false
-        lastPersistAt = Date()
-        let snapshot = events
-        lock.unlock()
-        writePersisted(snapshot)
-    }
-
-    private func writePersisted(_ snapshot: [Event]) {
-        let safe = snapshot.map { event in
-            Event(
-                ts: event.ts,
-                module: event.module,
-                level: event.level,
-                detail: Redaction.diskSafe(level: event.level, detail: event.detail)
-            )
-        }
-        guard let data = try? JSONEncoder().encode(safe) else { return }
-        try? data.write(to: snapshotURL, options: .atomic)
-    }
-
-    private func loadPersisted() {
-        guard let data = try? Data(contentsOf: snapshotURL),
-              let stored = try? JSONDecoder().decode([Event].self, from: data)
-        else { return }
-        events = stored.suffix(maxEvents).map { event in
-            Event(
-                ts: event.ts,
-                module: event.module,
-                level: event.level,
-                detail: Redaction.diskSafe(level: event.level, detail: event.detail)
-            )
         }
     }
 
