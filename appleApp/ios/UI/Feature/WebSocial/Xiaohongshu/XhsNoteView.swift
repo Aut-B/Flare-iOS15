@@ -28,6 +28,7 @@ struct XhsNoteView: View {
     @State private var videoError: String?
     @State private var showShare = false
     @State private var profileTarget: XhsUserTarget?
+    @State private var unresolvedProfile: UnresolvedProfile?
     @State private var resolvingAuthor = false
     @State private var detailFailed = false
 
@@ -41,6 +42,12 @@ struct XhsNoteView: View {
     @State private var draft = ""
     @State private var sending = false
     @State private var actionError: String?
+
+    /// 点到的用户没带主页 id。不能拿空 id 去开 `XhsUserView`，
+    /// 那里的空 id 被约定成「我的主页」，会显示成用户自己的资料。
+    private struct UnresolvedProfile {
+        let name: String
+    }
 
     init(note: XhsNote) {
         self.note = note
@@ -134,6 +141,26 @@ struct XhsNoteView: View {
                 XhsUserView(userId: target.id, name: target.name, showsClose: true)
             }
             .navigationViewStyle(.stack)
+        }
+        .alert(
+            "没拿到主页 id",
+            isPresented: Binding(
+                get: { unresolvedProfile != nil },
+                set: { if !$0 { unresolvedProfile = nil } }
+            ),
+            presenting: unresolvedProfile
+        ) { target in
+            if !target.name.isEmpty {
+                Button("网页版搜索") { openProfileSearch(target.name) }
+            }
+            Button("打开网页版笔记") { openWebNote() }
+            Button("取消", role: .cancel) {}
+        } message: { target in
+            if target.name.isEmpty {
+                Text("没拿到这个用户的主页 id。可以打开网页版，在笔记里点作者或评论者头像。")
+            } else {
+                Text("这个用户没带主页 id。可以在网页版按昵称「\(target.name)」搜索，或打开这条笔记的评论。")
+            }
         }
         .onDisappear {
             player?.pause()
@@ -367,10 +394,28 @@ struct XhsNoteView: View {
                     Self.profileLog.error(
                         "author id missing for note \(requestNote.id, privacy: .public), name \(author.name, privacy: .public)"
                     )
-                    actionError = "没拿到作者的主页 id，稍后再试；也可以先点「网页版」查看"
+                    openUserProfile(XhsUserTarget(id: "", name: author.name))
                 }
             }
         }
+    }
+
+    /// 有 id 直接开主页；没 id 时不拿空 id 去开（会变成「我的主页」），
+    /// 而是给网页版出口，避免整行看起来可点、点下去却没反应。
+    private func openUserProfile(_ target: XhsUserTarget) {
+        if !target.id.isEmpty {
+            profileTarget = target
+            return
+        }
+        let name = target.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        unresolvedProfile = UnresolvedProfile(name: name)
+    }
+
+    private func openProfileSearch(_ name: String) {
+        var components = URLComponents(string: "https://www.xiaohongshu.com/search_result")
+        components?.queryItems = [URLQueryItem(name: "keyword", value: name)]
+        guard let url = components?.url else { return }
+        UIApplication.shared.open(url)
     }
 
     private var authorRow: some View {
@@ -475,7 +520,7 @@ struct XhsNoteView: View {
             } else {
                 ForEach(comments) { comment in
                     XhsCommentRow(comment: comment) { target in
-                        profileTarget = target
+                        openUserProfile(target)
                     }
                         .padding(.horizontal, 14)
                 }
@@ -1055,7 +1100,7 @@ struct XhsCommentRow: View {
 
     @ViewBuilder
     private var nameLink: some View {
-        if comment.user.id.isEmpty {
+        if comment.user.id.isEmpty, comment.user.name.isEmpty {
             nameText
         } else {
             Button {
@@ -1075,7 +1120,7 @@ struct XhsCommentRow: View {
 
     @ViewBuilder
     private func subNameLink(_ sub: XhsComment) -> some View {
-        if sub.user.id.isEmpty {
+        if sub.user.id.isEmpty, sub.user.name.isEmpty {
             subNameText(sub)
         } else {
             Button {
@@ -1089,7 +1134,7 @@ struct XhsCommentRow: View {
 
     @ViewBuilder
     private var avatar: some View {
-        if comment.user.id.isEmpty {
+        if comment.user.id.isEmpty, comment.user.name.isEmpty {
             avatarImage
         } else {
             Button {

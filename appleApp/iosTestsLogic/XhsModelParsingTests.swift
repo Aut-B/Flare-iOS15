@@ -156,6 +156,22 @@ final class XhsModelParsingTests: XCTestCase {
         XCTAssertEqual(comment?.subComments.first?.user.name, "B")
     }
 
+    /// 评论者只有昵称、没有 `user_id` 时，昵称和头像不能被一起丢掉：
+    /// 详情页要靠这个昵称给出「网页版搜索」的出口，缺 id 也不至于整行不可点。
+    func testCommentKeepsNicknameWithoutUserId() {
+        let payload: [String: Any] = [
+            "id": "c2",
+            "content": "同问",
+            "user_info": ["nickname": "只有昵称", "image": "https://img.example/u9.jpg"],
+        ]
+
+        let comment = XhsJSON.comment(payload)
+
+        XCTAssertEqual(comment?.user.id, "")
+        XCTAssertEqual(comment?.user.name, "只有昵称")
+        XCTAssertEqual(comment?.user.avatar, "https://img.example/u9.jpg")
+    }
+
     func testProfileFindsNestedBasicInfo() {
         let payload: [String: Any] = [
             "data": [
