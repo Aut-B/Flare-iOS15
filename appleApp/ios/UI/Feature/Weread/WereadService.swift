@@ -329,6 +329,7 @@ final class WereadService: @unchecked Sendable {
     private func performRenewal(cookie: String) async -> WereadRenewalOutcome {
         var request = URLRequest(url: URL(string: "\(base)/web/login/renewal")!)
         request.httpMethod = "POST"
+        request.timeoutInterval = Self.authProbeTimeout
         request.setValue("application/json;charset=UTF-8", forHTTPHeaderField: "Content-Type")
         request.setValue(cookie, forHTTPHeaderField: "Cookie")
         request.httpBody = try? JSONSerialization.data(
@@ -429,25 +430,32 @@ final class WereadService: @unchecked Sendable {
 
     // MARK: - 书架
 
-    func shelf(cookie: String) async throws -> [WereadBook] {
+    /// 鉴权探活、续期与书架分页的单项超时。会话默认 20 秒对进页恢复太久：
+    /// 网络黑洞时要尽快落到「重试」，超时按临时失败处理，cookie 不会被清。
+    private static let authProbeTimeout: TimeInterval = 10
+
+    /// 拉书架。`maxPages` 限制翻页数：进页恢复会话时只要 1 页先抢首屏，
+    /// 等书架可见后由调用方再补全；普通刷新默认拉满 4 页。
+    func shelf(cookie: String, maxPages: Int = 4) async throws -> [WereadBook] {
         do {
-            return try await fetchShelf(cookie: cookie)
+            return try await fetchShelf(cookie: cookie, maxPages: maxPages)
         } catch WereadError.notLoggedIn {
             throw WereadAuthFailure.rejected(failedCookie: cookie)
         }
     }
 
-    private func fetchShelf(cookie: String) async throws -> [WereadBook] {
+    private func fetchShelf(cookie: String, maxPages: Int) async throws -> [WereadBook] {
         // `synckeys=0` 只给第一页，书架大的人会少一截（用户说的「没还原全」）。
         // 接口会在响应里回一个新的 synckey，带着它再要一页，直到没有新书。
         var result: [WereadBook] = []
         var seen = Set<String>()
         var syncKey = "0"
         var pages: [[String: Any]] = []
-        for _ in 0..<4 {
+        for _ in 0..<max(1, min(maxPages, 4)) {
             let url = URL(string: "\(base)/web/shelf/sync?synckeys=\(syncKey)&teenmode=0&album=1")!
             var request = URLRequest(url: url)
             request.setValue(cookie, forHTTPHeaderField: "Cookie")
+            request.timeoutInterval = Self.authProbeTimeout
 
             let data = try await send(request)
             let json = try parseObject(data)

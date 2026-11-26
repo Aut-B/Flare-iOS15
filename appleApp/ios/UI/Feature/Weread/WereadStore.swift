@@ -73,6 +73,11 @@ final class WereadStore: ObservableObject {
     private var entryProbeInFlight = false
     private var lastEntryProbeAt: TimeInterval = 0
     private let entryProbeCooldown: TimeInterval = 30
+    /// 同一会话下的书架刷新只跑一份：进页时标签页、书架视图、cookie 补刷
+    /// 可能同时调 `refreshShelf`，合并后只打一次 `shelf/sync`。
+    private let refreshLock = NSLock()
+    private var refreshTaskSeed = 0
+    private var inFlightRefresh: (generation: Int, token: Int, task: Task<Void, Never>)?
 
     private init() {
         // 旧版把「主动退出」和「自动鉴权失败」都写成 weread.loggedOut，
@@ -681,16 +686,61 @@ final class WereadStore: ObservableObject {
     /// 再逐份试系统仓库里还活着的会话。临时网络失败保留登录态，只有服务端
     /// 明确拒绝才回到「重新登录」。
     func refreshShelf() async {
+        await sharedRefreshTask().value
+    }
+
+    /// 同一会话 generation 下所有调用共享同一条刷新任务：进页时 Tab、
+    /// 书架、cookie 补刷会同时触发，合并后只打一份 `shelf/sync`。换过会话
+    /// （登录/续期/退出）则另起一条，避免等一个旧 cookie 的失败结果。
+    private func sharedRefreshTask() -> Task<Void, Never> {
+        let generation = sessionSnapshot().generation
+        refreshLock.lock()
+        if let existing = inFlightRefresh, existing.generation == generation {
+            let task = existing.task
+            refreshLock.unlock()
+            return task
+        }
+        refreshTaskSeed += 1
+        let token = refreshTaskSeed
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.performShelfRefresh()
+            self.finishRefresh(token: token)
+        }
+        inFlightRefresh = (generation: generation, token: token, task: task)
+        refreshLock.unlock()
+        return task
+    }
+
+    private func finishRefresh(token: Int) {
+        refreshLock.lock()
+        if inFlightRefresh?.token == token {
+            inFlightRefresh = nil
+        }
+        refreshLock.unlock()
+    }
+
+    private func performShelfRefresh() async {
         if !isLoggedIn {
             setEntryRecoveryState(.recovering)
         }
         DispatchQueue.main.async { self.isLoading = true }
+        // 书架还是空的时候优先抢首屏：只拉第一页把书铺出来，剩余分页等
+        // 书架已经可见后再补。已有书单的主动刷新照旧拉全量，且只在完整
+        // 列表返回后整体替换，不能用逐页 partial 截断已有书单。
+        let needsFastFirstPage = await MainActor.run { self.books.isEmpty }
+        var accepted = false
+        var loadedCount = 0
         do {
             let (usedCookie, list) = try await withSessionRecovery(reportTransientErrors: false) { attemptCookie in
-                let shelf = try await WereadService.shared.shelf(cookie: attemptCookie)
+                let shelf = try await WereadService.shared.shelf(
+                    cookie: attemptCookie,
+                    maxPages: needsFastFirstPage ? 1 : 4
+                )
                 return (attemptCookie, shelf)
             }
-            acceptShelfLoad(list, usedCookie: usedCookie)
+            loadedCount = list.count
+            accepted = acceptShelfLoad(list, usedCookie: usedCookie)
         } catch WereadError.notLoggedIn {
             DispatchQueue.main.async {
                 self.isLoggedIn = false
@@ -720,6 +770,15 @@ final class WereadStore: ObservableObject {
             DispatchQueue.main.async { self.errorMessage = nil }
         }
         DispatchQueue.main.async { self.isLoading = false }
+        if accepted, needsFastFirstPage, loadedCount > 0 {
+            // 首屏只抢了第一页，书架已经显示；稍后补一次全量分页。
+            // 空书架不补：否则会每 400ms 重复拉一次第一页。
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                guard let self, !self.defaults.bool(forKey: self.userLoggedOutKey) else { return }
+                await self.refreshShelf()
+            }
+        }
         // 原生阅读器只要数字 bookId，不再为了 reader hash 在后台跑隐藏网页。
         // 线上书架的补全/链接抄取保留为「重新同步线上书架」的手动操作，
         // 避免每次刷新书架都建一个 WebView 把 6s 拖慢。
@@ -729,14 +788,15 @@ final class WereadStore: ObservableObject {
     /// 又改回已登录，也不能覆盖新会话的书单。必须核对回包实际使用的 cookie
     /// 仍是当前会话：续期/候选恢复会正常换 cookie，而用户重新登录后旧回包
     /// 使用的 cookie 已不同，直接丢弃。
-    private func acceptShelfLoad(_ list: [WereadBook], usedCookie: String) {
+    @discardableResult
+    private func acceptShelfLoad(_ list: [WereadBook], usedCookie: String) -> Bool {
         sessionLock.lock()
         let accepted =
             !defaults.bool(forKey: userLoggedOutKey)
             && currentCookie == usedCookie
             && Self.looksLoggedIn(currentCookie)
         sessionLock.unlock()
-        guard accepted else { return }
+        guard accepted else { return false }
         DispatchQueue.main.async {
             self.sessionLock.lock()
             let stillCurrent =
@@ -750,6 +810,7 @@ final class WereadStore: ObservableObject {
             self.errorMessage = nil
             self.entryRecoveryState = .restored
         }
+        return true
     }
 
     /// 进入微读页时自动恢复登录态。未登录时先探活；30 秒冷却防止在 tab
