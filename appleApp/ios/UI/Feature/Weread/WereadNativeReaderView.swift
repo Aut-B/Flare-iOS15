@@ -2227,6 +2227,20 @@ struct WereadNativeReaderView: View {
         do {
             let raw = try await store.content(bookId: target.book.id, chapterUid: chapter.uid)
             guard token == loadToken else { return }
+            // 接口回了非空响应，但剥掉样式/标签后没有可读正文（txt 书只回
+            // `<style>`/空壳时会这样）。不能让 WebView 显示一片白页：
+            // 疑似 PDF 仍走官方页；普通书给明确提示，用户可重试/切网页版。
+            guard WereadReaderHTML.hasVisibleContent(raw) else {
+                if shouldFallbackToOfficialPage(for: WereadError.empty) {
+                    enterOfficialReaderPage(bookId: target.book.id)
+                    return
+                }
+                loading = false
+                errorMessage =
+                    "本章没有可显示的正文（接口只返回了样式或空内容）。" +
+                    "请重试，或点「用网页版打开」查看官方页面"
+                return
+            }
             let wrapped = WereadReaderHTML.wrap(raw)
             rememberInCache(chapter.uid, wrapped)
             html = wrapped
@@ -2320,7 +2334,9 @@ struct WereadNativeReaderView: View {
         guard cache[chapter.uid] == nil else { return }
         let bookId = target.book.id
         Task {
-            guard let raw = try? await store.content(bookId: bookId, chapterUid: chapter.uid) else {
+            guard let raw = try? await store.content(bookId: bookId, chapterUid: chapter.uid),
+                  WereadReaderHTML.hasVisibleContent(raw)
+            else {
                 return
             }
             let wrapped = WereadReaderHTML.wrap(raw)
@@ -4512,13 +4528,14 @@ enum WereadReaderHTML {
     /// 纯文本章节（老 txt 书）里没有任何标签，整章会变成**一个文本节点**：
     /// 长按要么选不动、要么一拖就整章全选。这里按行包成 `<p>`，
     /// 划线 / 想法才能按段落工作。
+    ///
+    /// 讲稿类书会把排版 HTML（`<h2>` / `<p>` 等）随 txt 正文一起返回。
+    /// 这些必须按 HTML 渲染，不能再转义 —— 否则用户看到的就是满屏标签和
+    /// CSS 源码。
     private static func normalize(_ body: String) -> String {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return body }
-        let lower = trimmed.lowercased()
-        if lower.contains("<p") || lower.contains("<div") || lower.contains("<br")
-            || lower.contains("<h1") || lower.contains("<h2") || lower.contains("<h3")
-        {
+        if containsHTMLMarkup(trimmed) {
             return trimmed
         }
         let paragraphs = trimmed
@@ -4527,6 +4544,85 @@ enum WereadReaderHTML {
             .filter { !$0.isEmpty }
             .map { "<p>\(escape($0))</p>" }
         return paragraphs.isEmpty ? trimmed : paragraphs.joined()
+    }
+
+    /// 这些标签说明正文本身已是 HTML，直接交给 WebView 排版。
+    private static let htmlMarkers: [String] = [
+        "<p", "<div", "<br", "<h1", "<h2", "<h3", "<h4", "<h5", "<h6",
+        "<section", "<article", "<blockquote", "<ul", "<ol", "<li",
+        "<table", "<tr", "<td", "<th", "<figure", "<figcaption", "<img",
+        "<pre", "<hr", "<span", "<a ", "<em", "<strong", "<b>", "<i>",
+    ]
+
+    private static func containsHTMLMarkup(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return htmlMarkers.contains { lower.contains($0) }
+    }
+
+    /// 判断一章内容是否有可显示的文字或媒体。
+    ///
+    /// 服务端已把 txt 路径的 `<style>` 剥掉；但「非空但视觉上全空」
+    /// （只剩样式/注释/空标签）仍可能发生。这里作为最后一道兜底，
+    /// 让界面显示明确提示，而不是停在空白页。
+    static func hasVisibleContent(_ body: String) -> Bool {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        // 章节元数据 JSON 被当正文时，剥完标签仍会剩下 bookId / chapterUid
+        // 之类的键，会被误判成「有可见内容」。先按 JSON 对象排掉。
+        if isChapterMetadataJSON(trimmed) { return false }
+
+        let lower = trimmed.lowercased()
+        if lower.contains("<img") || lower.contains("<svg")
+            || lower.contains("<video") || lower.contains("<audio")
+            || lower.contains("<canvas")
+        {
+            return true
+        }
+        var text = body
+        text = text.replacingOccurrences(
+            of: "(?is)<script\\b[^>]*>.*?</script>",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: "(?is)<style\\b[^>]*>.*?</style>",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: "(?is)<head\\b[^>]*>.*?</head>",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: "(?s)<!--.*?-->",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: "(?s)<[^>]*>",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(of: "&nbsp;", with: " ", options: .caseInsensitive)
+        text = text.replacingOccurrences(of: "&#160;", with: " ", options: .caseInsensitive)
+        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 服务端有时把章节元数据 JSON 当正文返回。它不是正文，即使剥完标签
+    /// 还剩可打印字符也不能渲染。
+    private static func isChapterMetadataJSON(_ text: String) -> Bool {
+        guard text.hasPrefix("{"),
+              let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return false
+        }
+        let keys: Set<String> = [
+            "bookId", "chapterUid", "chapterName", "bookName",
+            "title", "errCode", "errMsg",
+        ]
+        return json.keys.contains { keys.contains($0) }
     }
 
     private static func escape(_ text: String) -> String {
