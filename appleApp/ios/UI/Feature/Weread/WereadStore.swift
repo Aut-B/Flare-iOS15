@@ -1223,18 +1223,72 @@ final class WereadStore: ObservableObject {
                 percent: percent
             )
         }
-        let cookie = cookie
-        guard !cookie.isEmpty else {
+        let snapshot = sessionSnapshot()
+        guard !snapshot.cookie.isEmpty else {
             return .failed("未登录")
         }
-        return await WereadService.shared.reportProgress(
+
+        func send(_ cookie: String, refreshSession: Bool) async -> WereadReadReportOutcome {
+            await WereadService.shared.reportProgress(
+                bookId: bookId,
+                chapterUid: chapterUid,
+                chapterOffset: offset,
+                chapterIndex: chapterIndex,
+                rt: rt,
+                cookie: cookie,
+                refreshSession: refreshSession
+            )
+        }
+
+        let outcome = await send(snapshot.cookie, refreshSession: false)
+        guard rt > 0, !snapshot.userLoggedOut, outcome.isSessionRejection else { return outcome }
+
+        // 时长上报的 -2012 只说明本章信标/会话过期，不能据此清登录态。
+        // 丢掉旧 psvts，再走统一 renewal（并发请求会合并），会话层面只重发一次。
+        WereadService.screenDiag("read 上报会话被拒，丢弃本章信标并尝试续期")
+        WereadService.shared.invalidateReadReportSession(
             bookId: bookId,
-            chapterUid: chapterUid,
-            chapterOffset: offset,
-            chapterIndex: chapterIndex,
-            rt: rt,
-            cookie: cookie
+            chapterUid: chapterUid
         )
+
+        let beforeRenewal = sessionSnapshot()
+        guard !beforeRenewal.userLoggedOut,
+              Self.looksLoggedIn(beforeRenewal.cookie)
+        else {
+            return outcome
+        }
+        if beforeRenewal.cookie != snapshot.cookie {
+            return await send(beforeRenewal.cookie, refreshSession: true)
+        }
+
+        let renewal = await WereadService.shared.renew(cookie: snapshot.cookie)
+        switch renewal {
+        case .renewed(let newCookie) where newCookie != snapshot.cookie:
+            let committed = commitRenewedCookie(
+                newCookie,
+                source: snapshot.cookie,
+                generation: snapshot.generation
+            )
+            let next = sessionSnapshot()
+            guard !next.userLoggedOut, Self.looksLoggedIn(next.cookie),
+                  committed || next.cookie != snapshot.cookie
+            else {
+                return outcome
+            }
+            WereadService.screenDiag("read 上报续期得到新会话，用新 cookie 重发一次")
+            return await send(next.cookie, refreshSession: true)
+        case .unchanged:
+            let next = sessionSnapshot()
+            guard !next.userLoggedOut, Self.looksLoggedIn(next.cookie) else {
+                return outcome
+            }
+            WereadService.screenDiag("read 上报续期成功但 cookie 未变，刷新信标后重发一次")
+            return await send(next.cookie, refreshSession: true)
+        case .rejected, .transient, .renewed:
+            // 续期失败不清本地 cookie：阅读时长可以下轮再报，登录态不能被拖下水。
+            WereadService.screenDiag("read 上报续期未成功，保留登录态与待报时长")
+            return outcome
+        }
     }
 
     private func progressKey(_ bookId: String) -> String {

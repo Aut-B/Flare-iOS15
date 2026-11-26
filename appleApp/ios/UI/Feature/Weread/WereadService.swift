@@ -60,6 +60,15 @@ nonisolated enum WereadReadReportOutcome: Sendable, Equatable {
     case failed(String)
 }
 
+extension WereadReadReportOutcome {
+    /// `-2010/-2012` 是会话过期，不是时长/参数本身被业务拒绝；
+    /// 只有这一类才允许 Store 续期后重发一次。
+    var isSessionRejection: Bool {
+        guard case .rejected(let reason) = self else { return false }
+        return reason.contains("errCode=-2010") || reason.contains("errCode=-2012")
+    }
+}
+
 /// 微信读书 Web 接口封装。
 ///
 /// 全部走 `weread.qq.com` 的网页接口，登录态就是浏览器那套 cookie
@@ -234,12 +243,20 @@ final class WereadService: @unchecked Sendable {
     ///
     /// **失败一律返回 nil，不抛错**：拿不到信标不该阻断阅读，调用方会退回
     /// Step 1 的老行为（写死 ps/pc、不加 sc）继续试。
-    func readerSession(bookId: String, chapterUid: Int, cookie: String) async -> WereadReaderSession? {
+    func readerSession(
+        bookId: String,
+        chapterUid: Int,
+        cookie: String,
+        forceRefresh: Bool = false
+    ) async -> WereadReaderSession? {
         let cacheKey = "\(bookId)#\(chapterUid)"
-        if let cached = cachedSession(for: cacheKey) { return cached }
+        if !forceRefresh, let cached = cachedSession(for: cacheKey) { return cached }
 
         guard let url = readerURL(bookId: bookId, chapterUid: chapterUid) else { return nil }
         var request = URLRequest(url: url)
+        if forceRefresh {
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+        }
         request.setValue(cookie, forHTTPHeaderField: "Cookie")
         request.setValue(Self.readerUserAgent, forHTTPHeaderField: "User-Agent")
         request.setValue(
@@ -310,6 +327,19 @@ final class WereadService: @unchecked Sendable {
         sessionLock.lock()
         defer { sessionLock.unlock() }
         sessionCache["\(bookId)#\(chapterUid)"] = nil
+    }
+
+    /// 上报会话被服务端判过期后，把本章所有信标缓存一起丢掉。
+    /// 只续 cookie 而继续带旧 `psvts` 会再次吃 `-2012`；重试必须抓一份新页面。
+    func invalidateReadReportSession(bookId: String, chapterUid: Int) {
+        let key = "\(bookId)#\(chapterUid)"
+        invalidateSession(bookId: bookId, chapterUid: chapterUid)
+        readReportSessionLock.lock()
+        readReportSessions[key] = nil
+        readReportSessionLock.unlock()
+        readSessionAttemptLock.lock()
+        readSessionAttempts[key] = nil
+        readSessionAttemptLock.unlock()
     }
 
     // MARK: - 会话续期
@@ -836,17 +866,33 @@ final class WereadService: @unchecked Sendable {
         // 返回的是章节元数据 JSON。这两种都不是正文，以前那句
         // `!part0.isEmpty` 会把它们当成有效分片送进 decrypt，
         // 解出空串/垃圾后抛 empty —— 用户看到的就是白屏。
+        var txtWasEmpty = false
         switch try shardFormat(part0, part1, part3) {
         case .txt:
-            return try await textChapter(bookId: bookId, chapterUid: uid, cookie: cookie, beacon: beacon)
+            do {
+                return try await textChapter(bookId: bookId, chapterUid: uid, cookie: cookie, beacon: beacon)
+            } catch WereadError.empty {
+                // txt 书的 `t_*` 有时整章回空（讲稿/转换书更常见）。以前这里
+                // 直接抛 empty，界面就是纯白页；现在回退到 epub 分片再拼一次。
+                txtWasEmpty = true
+                log.notice("weread diag: txt shards empty, falling back to epub shards")
+            }
         case .epub:
             break
         }
 
         let style = WereadCrypto.decrypt(part2)
         var html = WereadCrypto.decrypt(part0 + part1 + part3)
-        guard !html.isEmpty else { throw WereadError.empty }
         html = clean(html)
+        // 不能因为 `e_0` 长得像元数据 JSON 就提前抛空：有些书的 epub
+        // 分片确实是加密正文，必须先解密再判断。反过来，解密结果若是
+        // 元数据 JSON 被 base64 解出的可打印乱码，也不能当正文返回。
+        guard isUsableChapterHTML(html) else {
+            if txtWasEmpty {
+                log.notice("weread diag: txt shards empty and epub fallback has no readable body")
+            }
+            throw WereadError.empty
+        }
         if !style.isEmpty {
             html = "<style>\(style)</style>\(html)"
         }
@@ -873,27 +919,147 @@ final class WereadService: @unchecked Sendable {
         }
         let head = part0.trimmingCharacters(in: .whitespacesAndNewlines)
         guard head.hasPrefix("{") else { return .epub }
-        // TXT 书：`e_*` 回的是含 bookId 的章节元数据。
-        if head.contains("\"bookId\"") {
+        // `{` 开头也可能是正文里的 CSS 规则块（讲稿类 txt 书会把
+        // `margin:3em; h2{...}` 这样的样式代码一起返回）。先按 HTML/CSS
+        // 特征排掉，别把它当 TXT 章节元数据送进纯文本渲染。
+        if looksLikeHTMLOrCSS(head) {
+            return .epub
+        }
+        // TXT 书：`e_*` 回的是含 bookId 的章节元数据。必须是可解析的
+        // JSON 对象且 bookId 在顶层，正文里恰好出现 `"bookId"` 不算。
+        guard let data = head.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            // 以 `{` 开头但不是 JSON：更像 CSS/正文，不要误判成 TXT。
+            return .epub
+        }
+        if json["bookId"] != nil {
             return .txt
         }
         // 其余 JSON 一律是错误响应（`{}`、errCode 等）。
-        if let data = head.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let code = intValue(json["errCode"]), code == -2010 || code == -2012 {
-                throw WereadError.notLoggedIn
-            }
-            if let message = json["errMsg"] as? String, !message.isEmpty {
-                throw WereadError.server(message)
-            }
-            if !json.isEmpty {
-                throw WereadError.server("正文接口返回了 JSON，不是章节内容")
-            }
-            // `{}`：签名/会话/参数不对。参考实现里最常见的原因是
-            // `ps`/`pc` 不是本次阅读器会话的 psvts / _e(ct)，以及缺 `sc=1`。
-            throw WereadError.empty
+        if let code = intValue(json["errCode"]), code == -2010 || code == -2012 {
+            throw WereadError.notLoggedIn
         }
+        if let message = json["errMsg"] as? String, !message.isEmpty {
+            throw WereadError.server(message)
+        }
+        if !json.isEmpty {
+            throw WereadError.server("正文接口返回了 JSON，不是章节内容")
+        }
+        // `{}`：签名/会话/参数不对。参考实现里最常见的原因是
+        // `ps`/`pc` 不是本次阅读器会话的 psvts / _e(ct)，以及缺 `sc=1`。
         throw WereadError.empty
+    }
+
+    /// `e_*` 分片里混进 HTML/CSS 时不能按 TXT 章节元数据处理。
+    ///
+    /// 讲稿类 txt 书会带出 `<style>` / `margin:` / `h2{...}` 这类样式代码；
+    /// 旧逻辑只认「以 `{` 开头且含 bookId」，一旦正文里带出 bookId 字样就
+    /// 整章走纯文本渲染，用户看到满屏 CSS。
+    private func looksLikeHTMLOrCSS(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let markers = [
+            "<style", "<html", "<body", "<head", "<div", "<p>", "<p ",
+            "<h1", "<h2", "<h3", "<h4", "<h5", "<h6",
+            "page-break", "margin:", "padding:", "@media", "@page",
+            "font-size:", "font-family:", "line-height:",
+        ]
+        if markers.contains(where: { lower.contains($0) }) {
+            return true
+        }
+        // 裸露的 CSS 规则块：`{ color: red; }`，没有 HTML 标签时才算。
+        let rule = "(?is)(^|[;{])\\s*[a-z-]+\\s*:\\s*[^;{}]{1,80};"
+        return !lower.contains("<") && text.range(of: rule, options: .regularExpression) != nil
+    }
+
+    /// 解密出来的内容能不能当正文渲染。
+    ///
+    /// TXT 书的章节元数据 JSON 被误送进解密时，base64 会忽略非法字符，
+    /// 解出一段可打印乱码。这里要求结果里有媒体标签或可读文字，并且
+    /// UTF-8 替换符/控制字符比例足够低，避免把乱码当正文显示。
+    private func isUsableChapterHTML(_ html: String) -> Bool {
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        // 整段就是 JSON：元数据/错误响应，不是章节正文。
+        if trimmed.hasPrefix("{") || trimmed.hasPrefix("["),
+           let data = trimmed.data(using: .utf8),
+           (try? JSONSerialization.jsonObject(with: data)) != nil
+        {
+            return false
+        }
+
+        let lower = trimmed.lowercased()
+        if ["<img", "<svg", "<video", "<audio", "<canvas", "<table"]
+            .contains(where: { lower.contains($0) })
+        {
+            return true
+        }
+
+        var text = trimmed
+        text = text.replacingOccurrences(
+            of: "(?is)<script\\b[^>]*>.*?</script>",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: "(?is)<style\\b[^>]*>.*?</style>",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: "(?is)<head\\b[^>]*>.*?</head>",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: "(?s)<!--.*?-->",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: "(?s)<[^>]*>",
+            with: " ",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(of: "&nbsp;", with: " ", options: .caseInsensitive)
+        text = text.replacingOccurrences(of: "&#160;", with: " ", options: .caseInsensitive)
+        let visible = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !visible.isEmpty else { return false }
+
+        var bad = 0
+        var total = 0
+        var hasCJK = false
+        var hasLatinWord = false
+        var latinRun = 0
+        for scalar in visible.unicodeScalars {
+            total += 1
+            if scalar.value == 0xFFFD {
+                bad += 1
+            } else if CharacterSet.controlCharacters.contains(scalar),
+                      scalar.value != 0x0A,
+                      scalar.value != 0x0D,
+                      scalar.value != 0x09
+            {
+                bad += 1
+            }
+            let value = scalar.value
+            if (0x3400...0x4DBF).contains(value)
+                || (0x4E00...0x9FFF).contains(value)
+                || (0x3040...0x30FF).contains(value)
+                || (0xAC00...0xD7AF).contains(value)
+            {
+                hasCJK = true
+            }
+            if (65...90).contains(value) || (97...122).contains(value) {
+                latinRun += 1
+                if latinRun >= 3 { hasLatinWord = true }
+            } else {
+                latinRun = 0
+            }
+        }
+        guard total > 0, Double(bad) / Double(total) < 0.08 else { return false }
+        // 只有数字/符号的乱码不算正文。
+        return hasCJK || hasLatinWord
     }
 
     /// 老 txt 书走 `t_0` / `t_1`。
@@ -907,8 +1073,83 @@ final class WereadService: @unchecked Sendable {
         async let txt1: String? = try? fragment("/web/book/chapter/t_1", bookId: bookId, chapterUid: chapterUid, st: 1, cookie: cookie, beacon: beacon)
         let (rawText0, rawText1) = await (txt0, txt1)
         let text = WereadCrypto.decrypt((rawText0 ?? "") + (rawText1 ?? ""))
-        guard !text.isEmpty else { throw WereadError.empty }
-        return clean(text)
+        let cleaned = cleanTextChapter(text)
+        // 和 epub 路径同一套校验：t_* 若解出元数据 JSON/乱码，也按空处理，
+        // 让外层回退到 epub 分片，而不是把乱码当正文显示。
+        guard isUsableChapterHTML(cleaned) else { throw WereadError.empty }
+        return cleaned
+    }
+
+    /// TXT 书的 `t_*` 有时把 `<style>` / CSS 规则一起塞进正文。
+    ///
+    /// 这些内容如果当纯文本渲染，用户就会看到满屏 `margin:3em; h2{...}`。
+    /// 只清 txt 路径；epub 的样式是正文必需，不能动。
+    private func cleanTextChapter(_ text: String) -> String {
+        var result = text
+        result = result.replacingOccurrences(
+            of: "(?is)<script\\b[^>]*>.*?</script>",
+            with: "",
+            options: .regularExpression
+        )
+        result = result.replacingOccurrences(
+            of: "(?is)<style\\b[^>]*>.*?</style>",
+            with: "",
+            options: .regularExpression
+        )
+        // `<head>` 里除了样式通常只有 meta/title，整段丢掉更干净。
+        result = result.replacingOccurrences(
+            of: "(?is)<head\\b[^>]*>.*?</head>",
+            with: "",
+            options: .regularExpression
+        )
+        result = result.replacingOccurrences(
+            of: "(?s)<!--.*?-->",
+            with: "",
+            options: .regularExpression
+        )
+        result = stripLeadingCSS(result)
+        result = clean(result)
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 去掉正文开头裸露的 CSS 规则块（没有 `<style>` 包裹的情况）。
+    ///
+    /// 只剥开头连续的样式行，遇到第一行正常正文就停，避免误伤正文里
+    /// 本来就有的代码/花括号。
+    private func stripLeadingCSS(_ text: String) -> String {
+        let lines = text.components(separatedBy: .newlines)
+        var index = 0
+        var inBlock = false
+        while index < lines.count {
+            let line = lines[index].trimmingCharacters(in: .whitespaces)
+            if line.isEmpty {
+                index += 1
+                continue
+            }
+            if inBlock {
+                if line.contains("}") { inBlock = false }
+                index += 1
+                continue
+            }
+            guard looksLikeCSSLine(line) else { break }
+            if line.contains("{"), !line.contains("}") { inBlock = true }
+            index += 1
+        }
+        guard index > 0 else { return text }
+        return lines[index...].joined(separator: "\n")
+    }
+
+    private func looksLikeCSSLine(_ line: String) -> Bool {
+        if line.contains("<") { return false }
+        if line.hasSuffix("}") { return true }
+        if line.contains("{") { return true }
+        // `margin: 3em;` / `font-size: 18px`
+        if line.contains(":"),
+           line.hasSuffix(";") || line.hasSuffix(",") || line.contains("; ")
+        {
+            return true
+        }
+        return false
     }
 
     // MARK: - 翻译（实验）
@@ -1277,7 +1518,8 @@ final class WereadService: @unchecked Sendable {
         chapterOffset: Int,
         chapterIndex: Int,
         rt: Int = 0,
-        cookie: String
+        cookie: String,
+        refreshSession: Bool = false
     ) async -> WereadReadReportOutcome {
         let seconds = min(max(rt, 0), 60)
         guard seconds > 0 else {
@@ -1312,7 +1554,8 @@ final class WereadService: @unchecked Sendable {
             chapterIndex: chapterIndex,
             rt: seconds,
             token: token,
-            cookie: cookie
+            cookie: cookie,
+            refreshSession: refreshSession
         )
         // 官方在 -806 时先刷新 getConfig 再重试一次。
         if case .rejected(let reason) = outcome, reason.contains("-806") {
@@ -1332,7 +1575,10 @@ final class WereadService: @unchecked Sendable {
                 chapterIndex: chapterIndex,
                 rt: seconds,
                 token: fresh,
-                cookie: cookie
+                cookie: cookie,
+                // -806 只换 token；复用本次已抓到的会话信标，避免节流把
+                // 刚拿到的 ps/pc 丢掉后又退回占位值。
+                refreshSession: false
             )
         }
         return outcome
@@ -1375,12 +1621,14 @@ final class WereadService: @unchecked Sendable {
         chapterIndex: Int,
         rt: Int,
         token: String,
-        cookie: String
+        cookie: String,
+        refreshSession: Bool
     ) async -> WereadReadReportOutcome {
         let sessionEntry = await readSessionForReport(
             bookId: bookId,
             chapterUid: chapterUid,
-            cookie: cookie
+            cookie: cookie,
+            refreshSession: refreshSession
         )
         let now = Date().timeIntervalSince1970
         let ts = Int(now * 1000)
@@ -1562,18 +1810,20 @@ final class WereadService: @unchecked Sendable {
     private func readSessionForReport(
         bookId: String,
         chapterUid: Int,
-        cookie: String
+        cookie: String,
+        refreshSession: Bool = false
     ) async -> (session: WereadReaderSession, stamp: Date)? {
         let key = "\(bookId)#\(chapterUid)"
-        if let cached = cachedReadReportSession(for: key) { return cached }
-        if let cached = cachedSession(for: key) {
+        if !refreshSession, let cached = cachedReadReportSession(for: key) { return cached }
+        if !refreshSession, let cached = cachedSession(for: key) {
             return (cached, storeReadReportSession(cached, for: key))
         }
         guard beginReadSessionAttempt(for: key) else { return nil }
         guard let fetched = await readerSession(
             bookId: bookId,
             chapterUid: chapterUid,
-            cookie: cookie
+            cookie: cookie,
+            forceRefresh: refreshSession
         ) else {
             return nil
         }
@@ -2600,8 +2850,8 @@ final class WereadService: @unchecked Sendable {
 
     /// 只读已缓存的官方格式信息。
     ///
-    /// 界面首开时先用它判断要不要等 `/web/book/info`：普通电子书没有
-    /// 切换入口，不该为一个可选功能多阻塞一次网络往返。
+    /// 界面首开时先用它判断要不要等 `/web/book/info`：已确认 EPUB 的书
+    /// 直接跳过，未确认格式的书才阻塞补一次详情。
     func bookFormatIfCached(bookId: String) -> WereadBookFormatInfo? {
         guard !bookId.isEmpty else { return nil }
         return cachedBookFormat(for: bookId)
@@ -2609,8 +2859,10 @@ final class WereadService: @unchecked Sendable {
 
     /// 从书架缓存或 `/web/book/info` 取官方格式信息。
     ///
-    /// 书架有 `otherType` 时直接命中缓存；没有时补一次详情请求。拿不到
-    /// 就返回 nil，界面按原有 PDF 标记兜底，绝不本地猜测可转换。
+    /// 书架已能确认当前格式时直接命中缓存；判不出时才补一次详情请求。
+    /// 拿不到就返回 nil，界面按原有 PDF 标记兜底，绝不本地猜测可转换。
+    /// 调用方必须传入已恢复的会话 cookie：空 cookie 会直接返回 nil，
+    /// 首开时要用 `WereadStore.recoverSessionOnEntry` 等恢复完成再调。
     func bookFormat(bookId: String, cookie: String) async -> WereadBookFormatInfo? {
         guard !bookId.isEmpty else { return nil }
         if let cached = cachedBookFormat(for: bookId) { return cached }
@@ -2987,20 +3239,12 @@ final class WereadService: @unchecked Sendable {
 
     private func rememberBookFormat(bookId: String, item: [String: Any]) {
         if let info = bookFormatInfo(from: item) {
-            // 书架条目可能被裁剪过，没有 `otherType` 不代表详情接口也没有。
+            // 书架能确认当前格式就入缓存，不要求 `otherType`：普通 EPUB 通常
+            // 只有 `format=epub`，以前只在 `canSwitch` 时写入，导致每本书
+            // 首开都多打一次 `/web/book/info`。
             // 已有官方详情缓存时不再用书架数据覆盖，尤其是用户刚切换过
             // 格式、书架数据仍是旧格式的时候。
-            pdfLock.lock()
-            let hasCached = bookFormatCache[bookId] != nil
-            if !hasCached {
-                if info.current == .pdf {
-                    pdfBookIDs.insert(bookId)
-                } else {
-                    pdfBookIDs.remove(bookId)
-                }
-            }
-            pdfLock.unlock()
-            if info.canSwitch, !hasCached {
+            if cachedBookFormat(for: bookId) == nil {
                 storeBookFormat(info, for: bookId)
             }
             return

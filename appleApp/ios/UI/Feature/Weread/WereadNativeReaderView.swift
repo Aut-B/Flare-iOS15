@@ -577,6 +577,7 @@ struct WereadNativeReaderView: View {
             html: html,
             baseURL: URL(string: "https://weread.qq.com/"),
             cookie: store.cookie,
+            isDark: colorScheme == .dark,
             fontSize: fontSize,
             translationVisible: translationVisible,
             highlights: currentHighlights,
@@ -1688,26 +1689,60 @@ struct WereadNativeReaderView: View {
         }
     }
 
-    /// 普通电子书首开不等格式详情，后台补一次；拿到双格式信息后才
-    /// 显示 EPUB → PDF 入口。
+    /// 切到官方网页阅读页，并清掉原生章节状态。
+    ///
+    /// PDF 没有文本层，原生的目录/正文接口只会回空。格式未确认、
+    /// 或正文接口已经回空的书都走这里，绝不停在白屏。
     @MainActor
-    private func refreshFormatInfo(bookId: String) async {
-        let fetched = await WereadService.shared.bookFormat(
-            bookId: bookId,
-            cookie: store.cookie
+    private func enterOfficialReaderPage(bookId: String) {
+        loadToken += 1
+        notesToken += 1
+        chapters = []
+        html = ""
+        cache = [:]
+        cacheOrder = []
+        highlights = [:]
+        serverNotes = [:]
+        serverNotesLoaded = false
+        ownReviews = []
+        ownReviewsLoaded = false
+        isPDF = true
+        loading = false
+        errorMessage = nil
+        webURLOverride = WereadService.shared.readerURLString(bookId: bookId)
+        showWeb = true
+        WereadService.screenDiag(
+            "进官方阅读页 book=\(bookId) 格式=\(formatInfo?.current.rawValue ?? "nil")"
         )
-        guard let fetched, formatInfo == nil else { return }
-        formatInfo = fetched
-        // 书架没标记、但详情确认是 PDF 的书：后台拿到结果后转 PDF 画布，
-        // 不能让正文接口返回空 HTML 后停在白屏。
-        if fetched.current == .pdf, !isPDF {
-            loadToken += 1
-            notesToken += 1
-            loading = false
-            errorMessage = nil
-            isPDF = true
-            showWeb = true
+    }
+
+    /// 首开时先等会话恢复完成，再判格式。
+    ///
+    /// 刚进页 cookie 可能还没从系统仓库恢复完；`recoverSessionOnEntry`
+    /// 发现另一个探活任务在跑时会立即返回，所以这里跟着恢复状态再等
+    /// 一小会儿（最多 3 秒），恢复完成前不拿旧 cookie 白判。
+    @MainActor
+    private func prepareSessionForFormat() async {
+        await store.recoverSessionOnEntry()
+        var waited = 0
+        while store.entryRecoveryState == .recovering,
+              waited < 30
+        {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            waited += 1
         }
+    }
+
+    /// 空正文兜底判据：本书没有被确认是 EPUB，且接口回的是「没内容」。
+    /// PDF 没有文本层，章节接口只会回空；这类书必须切官方阅读页。
+    private func shouldFallbackToOfficialPage(for error: Error) -> Bool {
+        guard formatInfo?.current != .epub else { return false }
+        guard let wereadError = error as? WereadError,
+              case .empty = wereadError
+        else {
+            return false
+        }
+        return true
     }
 
     @MainActor
@@ -1718,40 +1753,28 @@ struct WereadNativeReaderView: View {
         if !force, !chapters.isEmpty { return }
         let service = WereadService.shared
         let bookId = target.book.id
-        // 只有已标记为 PDF 的书才在首开阻塞等 `/web/book/info`。普通
-        // 电子书的首开不能被一个可选入口拖慢一次网络往返。
+        // 先等首开会话恢复，再判格式：空 cookie 的请求只会把新 PDF
+        // 当成普通电子书，取不到文本层后白屏。
+        await prepareSessionForFormat()
         let pdfMarker = service.isPDFBook(id: bookId)
         var format = service.bookFormatIfCached(bookId: bookId)
-        if pdfMarker || format?.current == .pdf {
+        if format == nil || format?.current == .pdf || pdfMarker {
+            // 未确定格式的书首开也阻塞等一次 `/web/book/info`：书架条目
+            // 可能被裁剪掉 `format`/`otherType`，真实格式只有详情接口知道。
+            // 已确认 EPUB 的书直接走缓存，不会多一次往返。
             format = await service.bookFormat(
                 bookId: bookId,
                 cookie: store.cookie
             ) ?? format
-        } else if format == nil {
-            Task { await refreshFormatInfo(bookId: bookId) }
         }
         formatInfo = format
         let isPDFNow =
             format?.current == .pdf
             || (format?.current != .epub && pdfMarker)
         if isPDFNow {
-            loadToken += 1
-            notesToken += 1
-            chapters = []
-            html = ""
-            cache = [:]
-            cacheOrder = []
-            highlights = [:]
-            serverNotes = [:]
-            serverNotesLoaded = false
-            ownReviews = []
-            ownReviewsLoaded = false
-            isPDF = true
-            loading = false
-            errorMessage = nil
             // PDF 直接用微读官方阅读页打开：那个页面原生支持高亮 / 写想法 /
-            // 服务端笔记（用户真机已确认能正常读）。不再显示中间提示页拦一道。
-            showWeb = true
+            // 服务端笔记（用户真机已确认能正常读）。
+            enterOfficialReaderPage(bookId: bookId)
             return
         }
         isPDF = false
@@ -1782,6 +1805,12 @@ struct WereadNativeReaderView: View {
             // 但**必须把 loading 关掉**，否则界面永远停在「正在打开…」，
             // 既没有正文也没有错误提示 —— 也就是纯白屏。
             guard !list.isEmpty else {
+                // 目录为空且格式未确认 EPUB：大概率是没标出来的 PDF。
+                // 直接进官方阅读页，别停在「取不到正文」的错误页。
+                if formatInfo?.current != .epub {
+                    enterOfficialReaderPage(bookId: bookId)
+                    return
+                }
                 loading = false
                 errorMessage = WereadError.empty.localizedDescription
                 return
@@ -1834,6 +1863,11 @@ struct WereadNativeReaderView: View {
             await loadChapter(at: start, token: token)
         } catch {
             guard token == loadToken else { return }
+            // 目录接口回空且格式未确认 EPUB：按疑似 PDF 切官方页兜底。
+            if shouldFallbackToOfficialPage(for: error) {
+                enterOfficialReaderPage(bookId: bookId)
+                return
+            }
             loading = false
             errorMessage = error.localizedDescription
         }
@@ -2194,7 +2228,21 @@ struct WereadNativeReaderView: View {
         do {
             let raw = try await store.content(bookId: target.book.id, chapterUid: chapter.uid)
             guard token == loadToken else { return }
-            let wrapped = WereadReaderHTML.wrap(raw)
+            // 接口回了非空响应，但剥掉样式/标签后没有可读正文（txt 书只回
+            // `<style>`/空壳时会这样）。不能让 WebView 显示一片白页：
+            // 疑似 PDF 仍走官方页；普通书给明确提示，用户可重试/切网页版。
+            guard WereadReaderHTML.hasVisibleContent(raw) else {
+                if shouldFallbackToOfficialPage(for: WereadError.empty) {
+                    enterOfficialReaderPage(bookId: target.book.id)
+                    return
+                }
+                loading = false
+                errorMessage =
+                    "本章没有可显示的正文（接口只返回了样式或空内容）。" +
+                    "请重试，或点「用网页版打开」查看官方页面"
+                return
+            }
+            let wrapped = WereadReaderHTML.wrap(raw, dark: colorScheme == .dark)
             rememberInCache(chapter.uid, wrapped)
             html = wrapped
             // 不再「赋完 html 就算加载完」：那时候 WebView 还没排版，
@@ -2208,6 +2256,12 @@ struct WereadNativeReaderView: View {
             prefetch(after: position)
         } catch {
             guard token == loadToken else { return }
+            // 空正文且格式未确认 EPUB：疑似 PDF（无文本层），切官方阅读页，
+            // 不要停在白屏或「取不到正文」。
+            if shouldFallbackToOfficialPage(for: error) {
+                enterOfficialReaderPage(bookId: target.book.id)
+                return
+            }
             loading = false
             errorMessage = error.localizedDescription
         }
@@ -2280,11 +2334,14 @@ struct WereadNativeReaderView: View {
         let chapter = chapters[next]
         guard cache[chapter.uid] == nil else { return }
         let bookId = target.book.id
+        let dark = colorScheme == .dark
         Task {
-            guard let raw = try? await store.content(bookId: bookId, chapterUid: chapter.uid) else {
+            guard let raw = try? await store.content(bookId: bookId, chapterUid: chapter.uid),
+                  WereadReaderHTML.hasVisibleContent(raw)
+            else {
                 return
             }
-            let wrapped = WereadReaderHTML.wrap(raw)
+            let wrapped = WereadReaderHTML.wrap(raw, dark: dark)
             await MainActor.run {
                 if self.cache[chapter.uid] == nil {
                     // 预取也走 LRU：否则预取会把缓存撑到无上限，
@@ -3062,6 +3119,8 @@ private struct WereadChapterWebView: UIViewRepresentable {
     let html: String
     let baseURL: URL?
     let cookie: String
+    /// 当前系统外观。显式传给页面切 CSS 主题，不依赖 WKWebView 的 prefers-color-scheme。
+    let isDark: Bool
     /// 正文字号（px）。只改页面 CSS 变量，不缩放 WKWebView。
     let fontSize: CGFloat
     /// 官方译文默认隐藏，打开时只切 CSS class；译文文本始终留在 DOM 里。
@@ -3103,9 +3162,9 @@ private struct WereadChapterWebView: UIViewRepresentable {
         configuration.userContentController.add(context.coordinator, name: "weread")
 
         let webView = WereadChapterWKWebView(frame: .zero, configuration: configuration)
-        webView.isOpaque = false
-        webView.backgroundColor = .clear
-        webView.scrollView.backgroundColor = .clear
+        webView.isOpaque = true
+        webView.backgroundColor = .systemBackground
+        webView.scrollView.backgroundColor = .systemBackground
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         // 字号放大后正文只纵向重排，禁止任何横向弹性滚动。
         webView.scrollView.alwaysBounceHorizontal = false
@@ -3117,12 +3176,17 @@ private struct WereadChapterWebView: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         context.coordinator.parent = self
+        let style: UIUserInterfaceStyle = isDark ? .dark : .light
+        if webView.overrideUserInterfaceStyle != style {
+            webView.overrideUserInterfaceStyle = style
+        }
         context.coordinator.load(html, in: webView, baseURL: baseURL, cookie: cookie)
         context.coordinator.apply(highlights, in: webView)
         context.coordinator.applyNoteReply(noteReply, in: webView)
         context.coordinator.requestScroll(scrollRequest, in: webView)
         context.coordinator.applyFontSize(fontSize, in: webView)
         context.coordinator.applyTranslation(translationVisible, in: webView)
+        context.coordinator.applyTheme(isDark, in: webView)
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
@@ -3140,6 +3204,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
         private var lastNoteReplyID: Int?
         private var lastFontSize: CGFloat?
         private var lastTranslationVisible: Bool?
+        private var lastDark: Bool?
         private var loaded = false
         /// 页面还没 ready 时收到的滚动请求，等 `markReady` 再补执行。
         private var pendingScroll: WereadScrollTarget?
@@ -3156,6 +3221,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
             lastHighlights = ""
             lastFontSize = nil
             lastTranslationVisible = nil
+            lastDark = nil
             loaded = false
             pendingScroll = nil
             scrollRetries = 0
@@ -3347,6 +3413,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 // 否则会把刚恢复的滚动状态冲成章首。
                 applyFontSize(parent.fontSize, in: webView, silent: true)
                 applyTranslation(parent.translationVisible, in: webView)
+                applyTheme(parent.isDark, in: webView)
                 // 排版完成后再补执行挂起的续读滚动。
                 if let pending = pendingScroll {
                     scrollRetries = 0
@@ -3407,6 +3474,24 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 DispatchQueue.main.async {
                     self.parent.onTranslationCount(count)
                 }
+            }
+        }
+
+        /// 只切 html 上的主题 class；背景、文字和划线底色都由页面 CSS 变量决定。
+        func applyTheme(_ dark: Bool, in webView: WKWebView) {
+            guard loaded else { return }
+            guard lastDark != dark else { return }
+            lastDark = dark
+            let value = dark ? "true" : "false"
+            webView.evaluateJavaScript(
+                "document.documentElement.classList.toggle('wr-dark', \(value));"
+            ) { _, error in
+                guard let error = error else { return }
+                // 页面切换或脚本尚未就绪时，下次更新再试。
+                self.lastDark = nil
+                Self.log.error(
+                    "weread apply theme failed: \(String(describing: error), privacy: .public)"
+                )
             }
         }
 
@@ -3575,19 +3660,30 @@ private enum WereadCookieParser {
 // MARK: - 章节 HTML
 
 enum WereadReaderHTML {
-    static func wrap(_ body: String) -> String {
+    static func wrap(_ body: String, dark: Bool) -> String {
         let normalized = normalize(body)
+        let themeClass = dark ? "wr-dark" : "wr-light"
         return """
         <!doctype html>
-        <html>
+        <html class="\(themeClass)">
         <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
         <style>
         :root {
-            color-scheme: light dark;
+            color-scheme: light;
+            /* 固定的前景/背景色对，由 Swift 按当前 colorScheme 切 wr-dark class。 */
+            --wr-bg: #ffffff;
+            --wr-fg: #1c1c1e;
+            --wr-hl-bg: #ffe58a;
             /* 正文字号只改这个变量，由浏览器重排；不缩放整页。 */
             --wr-font-size: \(Int(WereadFontSize.initial))px;
+        }
+        html.wr-dark {
+            color-scheme: dark;
+            --wr-bg: #000000;
+            --wr-fg: #e5e5e7;
+            --wr-hl-bg: #6b5a00;
         }
         html {
             font-size: var(--wr-font-size);
@@ -3598,8 +3694,8 @@ enum WereadReaderHTML {
             margin: 0;
             /* 左右留白尽量小，把屏宽让给正文；底部留出翻页栏的空间。 */
             padding: 8px 8px 48px;
-            background: transparent;
-            color: #1c1c1e;
+            background: var(--wr-bg);
+            color: var(--wr-fg);
             box-sizing: border-box;
             font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
             line-height: 1.85;
@@ -3674,7 +3770,7 @@ enum WereadReaderHTML {
         p { margin: 0 0 1em; }
         h1, h2, h3, h4 { line-height: 1.4; margin: 1.2em 0 0.6em; }
         mark.wr-hl {
-            background: #ffe58a;
+            background: var(--wr-hl-bg);
             color: inherit;
             border-radius: 2px;
             padding: 0 1px;
@@ -3701,10 +3797,6 @@ enum WereadReaderHTML {
             background: transparent;
         }
         #wr-tools button:active { background: rgba(255, 255, 255, 0.16); }
-        @media (prefers-color-scheme: dark) {
-            html, body { color: #e5e5e7; }
-            mark.wr-hl { background: #6b5a00; }
-        }
         </style>
         </head>
         <body>
@@ -4473,13 +4565,14 @@ enum WereadReaderHTML {
     /// 纯文本章节（老 txt 书）里没有任何标签，整章会变成**一个文本节点**：
     /// 长按要么选不动、要么一拖就整章全选。这里按行包成 `<p>`，
     /// 划线 / 想法才能按段落工作。
+    ///
+    /// 讲稿类书会把排版 HTML（`<h2>` / `<p>` 等）随 txt 正文一起返回。
+    /// 这些必须按 HTML 渲染，不能再转义 —— 否则用户看到的就是满屏标签和
+    /// CSS 源码。
     private static func normalize(_ body: String) -> String {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return body }
-        let lower = trimmed.lowercased()
-        if lower.contains("<p") || lower.contains("<div") || lower.contains("<br")
-            || lower.contains("<h1") || lower.contains("<h2") || lower.contains("<h3")
-        {
+        if containsHTMLMarkup(trimmed) {
             return trimmed
         }
         let paragraphs = trimmed
@@ -4488,6 +4581,85 @@ enum WereadReaderHTML {
             .filter { !$0.isEmpty }
             .map { "<p>\(escape($0))</p>" }
         return paragraphs.isEmpty ? trimmed : paragraphs.joined()
+    }
+
+    /// 这些标签说明正文本身已是 HTML，直接交给 WebView 排版。
+    private static let htmlMarkers: [String] = [
+        "<p", "<div", "<br", "<h1", "<h2", "<h3", "<h4", "<h5", "<h6",
+        "<section", "<article", "<blockquote", "<ul", "<ol", "<li",
+        "<table", "<tr", "<td", "<th", "<figure", "<figcaption", "<img",
+        "<pre", "<hr", "<span", "<a ", "<em", "<strong", "<b>", "<i>",
+    ]
+
+    private static func containsHTMLMarkup(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return htmlMarkers.contains { lower.contains($0) }
+    }
+
+    /// 判断一章内容是否有可显示的文字或媒体。
+    ///
+    /// 服务端已把 txt 路径的 `<style>` 剥掉；但「非空但视觉上全空」
+    /// （只剩样式/注释/空标签）仍可能发生。这里作为最后一道兜底，
+    /// 让界面显示明确提示，而不是停在空白页。
+    static func hasVisibleContent(_ body: String) -> Bool {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        // 章节元数据 JSON 被当正文时，剥完标签仍会剩下 bookId / chapterUid
+        // 之类的键，会被误判成「有可见内容」。先按 JSON 对象排掉。
+        if isChapterMetadataJSON(trimmed) { return false }
+
+        let lower = trimmed.lowercased()
+        if lower.contains("<img") || lower.contains("<svg")
+            || lower.contains("<video") || lower.contains("<audio")
+            || lower.contains("<canvas")
+        {
+            return true
+        }
+        var text = body
+        text = text.replacingOccurrences(
+            of: "(?is)<script\\b[^>]*>.*?</script>",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: "(?is)<style\\b[^>]*>.*?</style>",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: "(?is)<head\\b[^>]*>.*?</head>",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: "(?s)<!--.*?-->",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: "(?s)<[^>]*>",
+            with: "",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(of: "&nbsp;", with: " ", options: .caseInsensitive)
+        text = text.replacingOccurrences(of: "&#160;", with: " ", options: .caseInsensitive)
+        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 服务端有时把章节元数据 JSON 当正文返回。它不是正文，即使剥完标签
+    /// 还剩可打印字符也不能渲染。
+    private static func isChapterMetadataJSON(_ text: String) -> Bool {
+        guard text.hasPrefix("{"),
+              let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return false
+        }
+        let keys: Set<String> = [
+            "bookId", "chapterUid", "chapterName", "bookName",
+            "title", "errCode", "errMsg",
+        ]
+        return json.keys.contains { keys.contains($0) }
     }
 
     private static func escape(_ text: String) -> String {
