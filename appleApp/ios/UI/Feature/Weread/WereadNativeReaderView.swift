@@ -37,6 +37,7 @@ struct WereadNativeReaderView: View {
     @ObservedObject private var store = WereadStore.shared
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var chapters: [WereadChapter] = []
     @State private var index = 0
@@ -356,6 +357,7 @@ struct WereadNativeReaderView: View {
             if !isPDF, !chapters.isEmpty {
                 pageTurnButton(
                     title: "上",
+                    systemImage: "chevron.up",
                     accessibilityLabel: "上一章",
                     enabled: index > 0 && !loading
                 ) {
@@ -369,6 +371,7 @@ struct WereadNativeReaderView: View {
             if !isPDF, !chapters.isEmpty {
                 pageTurnButton(
                     title: "下",
+                    systemImage: "chevron.down",
                     accessibilityLabel: "下一章",
                     enabled: index < chapters.count - 1 && !loading
                 ) {
@@ -665,30 +668,55 @@ struct WereadNativeReaderView: View {
         .background(.ultraThinMaterial)
     }
 
-    /// 左下 / 右下的单字翻章按钮：实底圆钮，48pt 触控区。
-    /// 不用半透明方块、材质或模糊；沉浸全屏时也保留。
+    /// 左下 / 右下的单字翻章按钮：48pt 触控区，44pt 可见圆钮。
+    /// 纸色实底 + 墨色字，方向箭头只做轻提示；不用材质、模糊或重阴影。
     private func pageTurnButton(
         title: String,
+        systemImage: String,
         accessibilityLabel: String,
         enabled: Bool,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            Text(title)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(enabled ? Color.primary : Color.secondary)
-                .frame(width: 48, height: 48)
-                .background(Circle().fill(Color(uiColor: .systemGray5)))
-                .overlay(
-                    Circle().strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
-                )
-                .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
-                .contentShape(Circle())
+            VStack(spacing: -1) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(pageTurnInk.opacity(0.62))
+                Text(title)
+                    .font(.system(size: 16, weight: .medium, design: .serif))
+                    .foregroundStyle(pageTurnInk)
+            }
+            .frame(width: 48, height: 48)
+            .background(
+                Circle()
+                    .fill(pageTurnSurface)
+                    .frame(width: 44, height: 44)
+            )
+            .overlay(
+                Circle()
+                    .strokeBorder(pageTurnInk.opacity(0.16), lineWidth: 0.75)
+                    .frame(width: 44, height: 44)
+            )
+            .shadow(color: .black.opacity(0.06), radius: 2, y: 1)
+            .contentShape(Circle())
         }
         .buttonStyle(PageTurnButtonStyle())
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.4)
         .accessibilityLabel(accessibilityLabel)
+    }
+
+    /// 翻章按钮的纸色与墨色。比纯系统灰更柔和，深色模式也不发白。
+    private var pageTurnInk: Color {
+        colorScheme == .dark
+            ? Color(red: 0.88, green: 0.85, blue: 0.78)
+            : Color(red: 0.30, green: 0.27, blue: 0.22)
+    }
+
+    private var pageTurnSurface: Color {
+        colorScheme == .dark
+            ? Color(red: 0.16, green: 0.15, blue: 0.13)
+            : Color(red: 0.96, green: 0.95, blue: 0.92)
     }
 
     /// 顶部字号按钮。放在顶栏而不是正文底部，避免和左/右下翻章按钮、
@@ -2094,13 +2122,12 @@ struct WereadNativeReaderView: View {
     }
 }
 
-/// 翻章按钮的按压反馈：轻微缩小，明确告诉用户这次点击被接住了。
+/// 翻章按钮的按压反馈：即时轻微缩小，不做动画。
 private struct PageTurnButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
             .opacity(configuration.isPressed ? 0.85 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
