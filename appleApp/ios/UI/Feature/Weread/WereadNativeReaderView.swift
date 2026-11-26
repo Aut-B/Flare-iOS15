@@ -45,6 +45,9 @@ struct WereadNativeReaderView: View {
     @State private var errorMessage: String?
     /// PDF 不能走原生 chapter 分片；置 true 后只显示跳转网页版的提示页。
     @State private var isPDF = false
+    /// PDF 画布缩放倍数。只对官方网页阅读器的 canvas 整页做 GPU 缩放，
+    /// 文字书仍走 `fontSize` 重排。纯内存状态，不写 UserDefaults。
+    @State private var pdfZoomScale: CGFloat = 1
     /// 沉浸阅读：点正文空白处切换，隐藏上下栏。
     @State private var immersive = false
     /// 正文字号。切章时视图本身不重建，所以会保持；不写 UserDefaults。
@@ -395,7 +398,19 @@ struct WereadNativeReaderView: View {
                 .task { await loadOwnReviews() }
         }
         .fullScreenCover(isPresented: $showWeb) {
-            WereadReaderView(target: webReaderTarget)
+            if isPDF {
+                // PDF 正文是官方网页阅读器画的 canvas，没有文本层；改字号只会
+                // 让网页重排。这里给整页套一个可缩放画布，双指/按钮都是
+                // GPU transform，不注入 CSS、不重绘文本。
+                WereadPDFCanvasReader(
+                    zoomScale: $pdfZoomScale,
+                    onClose: { showWeb = false }
+                ) {
+                    WereadReaderView(target: webReaderTarget)
+                }
+            } else {
+                WereadReaderView(target: webReaderTarget)
+            }
         }
         .onDisappear {
             stopReadingTimer()
@@ -423,6 +438,7 @@ struct WereadNativeReaderView: View {
                 persistLocalProgress()
                 Task { await saveProgress() }
             } else {
+                pdfZoomScale = 1
                 startReadingTimer()
             }
         }
@@ -3706,5 +3722,386 @@ enum WereadReaderHTML {
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
+    }
+}
+
+// MARK: - PDF 画布缩放
+
+/// PDF 画布缩放的上下限与步长。
+private enum WereadPDFZoomLimits {
+    static let minScale: CGFloat = 1
+    static let maxScale: CGFloat = 3
+    static let step: CGFloat = 0.25
+}
+
+/// PDF 全屏阅读器 + 未缩放的关闭/缩放控件。
+///
+/// 只给 PDF 用。EPUB 文字书继续走 `WereadNativeReaderView.reader` 里的
+/// `fontSize` 重排，不经过这里。
+private struct WereadPDFCanvasReader<Content: View>: View {
+    @Binding var zoomScale: CGFloat
+    let onClose: () -> Void
+    private let content: Content
+
+    init(
+        zoomScale: Binding<CGFloat>,
+        onClose: @escaping () -> Void,
+        @ViewBuilder content: () -> Content
+    ) {
+        self._zoomScale = zoomScale
+        self.onClose = onClose
+        self.content = content()
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            WereadPDFCanvasHost(zoomScale: $zoomScale) { content }
+                .ignoresSafeArea()
+
+            // 外层关闭按钮不跟着画布缩放，放大后也一定能退出。位置和样式
+            // 对齐内层网页阅读器自带的关闭按钮：那个按钮在手动宿主的
+            // UIHostingController 里拿不到全屏 cover 的 dismiss，会点不动，
+            // 这里用同位置的按钮接住它。
+            VStack {
+                HStack {
+                    Spacer()
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 32, height: 32)
+                            .background(Color.black.opacity(0.32))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("关闭 PDF")
+                }
+                Spacer()
+            }
+            .padding(.trailing, 10)
+            .padding(.top, 6)
+
+            zoomControls
+                .padding(.trailing, 14)
+                .padding(.bottom, 16)
+        }
+        .background(Color(.systemBackground))
+        .statusBar(hidden: true)
+    }
+
+    private var zoomControls: some View {
+        HStack(spacing: 0) {
+            zoomButton(
+                "−",
+                label: "缩小 PDF 页面",
+                enabled: zoomScale > WereadPDFZoomLimits.minScale + 0.01
+            ) {
+                zoomScale = max(
+                    WereadPDFZoomLimits.minScale,
+                    zoomScale - WereadPDFZoomLimits.step
+                )
+            }
+
+            Button {
+                zoomScale = WereadPDFZoomLimits.minScale
+            } label: {
+                Text("\(Int((zoomScale * 100).rounded()))%")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 52, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("恢复 PDF 原始大小")
+            .accessibilityValue("\(Int((zoomScale * 100).rounded()))%")
+
+            zoomButton(
+                "+",
+                label: "放大 PDF 页面",
+                enabled: zoomScale < WereadPDFZoomLimits.maxScale - 0.01
+            ) {
+                zoomScale = min(
+                    WereadPDFZoomLimits.maxScale,
+                    zoomScale + WereadPDFZoomLimits.step
+                )
+            }
+        }
+        .background(Color(uiColor: .systemGray5))
+        .clipShape(Capsule())
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
+    }
+
+    private func zoomButton(
+        _ title: String,
+        label: String,
+        enabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(enabled ? Color.primary : Color.secondary)
+                .frame(width: 40, height: 36)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
+        .accessibilityLabel(label)
+    }
+}
+
+/// 把整个网页阅读器放进 `UIScrollView` 做 zoom。
+///
+/// 这里缩放的是承载 WKWebView 的 hosting view，canvas 和页面一起做
+/// GPU transform；没有改字号、没有改 DOM，所以不会重排。1x 时单指滚动
+/// 仍交给网页；放大后单指仍滚网页，双指拖动平移画布查看边缘。
+private struct WereadPDFCanvasHost<Content: View>: UIViewControllerRepresentable {
+    @Binding var zoomScale: CGFloat
+    private let content: Content
+
+    init(zoomScale: Binding<CGFloat>, @ViewBuilder content: () -> Content) {
+        self._zoomScale = zoomScale
+        self.content = content()
+    }
+
+    func makeUIViewController(
+        context: Context
+    ) -> WereadPDFCanvasController<Content> {
+        let controller = WereadPDFCanvasController(content: content)
+        bindZoomHandler(on: controller)
+        return controller
+    }
+
+    func updateUIViewController(
+        _ controller: WereadPDFCanvasController<Content>,
+        context: Context
+    ) {
+        // 不替换 `hosting.rootView`：内容就是网页阅读器本身，重建会把
+        // WKWebView 和正在读的页面一起重置。
+        bindZoomHandler(on: controller)
+        controller.applyZoom(zoomScale)
+    }
+
+    /// 手势缩放结束后把倍数回写给 SwiftUI 的百分比控件。
+    private func bindZoomHandler(
+        on controller: WereadPDFCanvasController<Content>
+    ) {
+        let binding = $zoomScale
+        controller.onZoomChanged = { scale in
+            guard abs(binding.wrappedValue - scale) > 0.001 else { return }
+            binding.wrappedValue = scale
+        }
+    }
+}
+
+private final class WereadPDFCanvasController<Content: View>: UIViewController, UIScrollViewDelegate {
+    private let hosting: UIHostingController<Content>
+    private let scrollView = UIScrollView()
+    private weak var nestedScrollView: UIScrollView?
+    private var lastLayoutSize: CGSize = .zero
+    private var requestedScale: CGFloat = WereadPDFZoomLimits.minScale
+    private var userZooming = false
+    var onZoomChanged: ((CGFloat) -> Void)?
+
+    init(content: Content) {
+        hosting = UIHostingController(rootView: content)
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .systemBackground
+
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.delegate = self
+        scrollView.minimumZoomScale = WereadPDFZoomLimits.minScale
+        scrollView.maximumZoomScale = WereadPDFZoomLimits.maxScale
+        scrollView.zoomScale = WereadPDFZoomLimits.minScale
+        scrollView.bouncesZoom = false
+        scrollView.bounces = false
+        scrollView.contentInsetAdjustmentBehavior = .never
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.showsHorizontalScrollIndicator = false
+        // 外层画布只吃双指拖动：1x 时单指留给网页滚动，放大后单指仍滚网页，
+        // 双指负责在放大后的整页里平移。
+        scrollView.panGestureRecognizer.minimumNumberOfTouches = 2
+        scrollView.panGestureRecognizer.maximumNumberOfTouches = 2
+        scrollView.delaysContentTouches = false
+        scrollView.canCancelContentTouches = true
+        view.addSubview(scrollView)
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+
+        addChild(hosting)
+        hosting.view.backgroundColor = .clear
+        hosting.view.translatesAutoresizingMaskIntoConstraints = true
+        scrollView.addSubview(hosting.view)
+        hosting.didMove(toParent: self)
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let size = scrollView.bounds.size
+        guard size.width > 0, size.height > 0 else { return }
+        if size != lastLayoutSize {
+            lastLayoutSize = size
+            resizeCanvas(to: size)
+        }
+        configureNestedScrollViewIfNeeded()
+        updateInteractionMode()
+        if !userZooming, abs(scrollView.zoomScale - requestedScale) > 0.01 {
+            applyZoom(requestedScale)
+        }
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        configureNestedScrollViewIfNeeded()
+        // 网页阅读器的 WKWebView 可能晚一拍才挂进 hosting view；
+        // 等首屏稳定后再找一次，确保关掉网页自带的 pinch。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.configureNestedScrollViewIfNeeded()
+        }
+    }
+
+    func applyZoom(_ scale: CGFloat) {
+        let clamped = min(
+            max(scale, WereadPDFZoomLimits.minScale),
+            WereadPDFZoomLimits.maxScale
+        )
+        requestedScale = clamped
+        // 用户双指缩放期间不要被 SwiftUI 的刷新回写打断。
+        guard !userZooming else { return }
+        guard scrollView.bounds.width > 0, scrollView.bounds.height > 0 else {
+            return
+        }
+        guard abs(clamped - scrollView.zoomScale) > 0.01 else {
+            updateInteractionMode()
+            return
+        }
+        if clamped <= WereadPDFZoomLimits.minScale + 0.001 {
+            scrollView.setZoomScale(WereadPDFZoomLimits.minScale, animated: false)
+            scrollView.setContentOffset(.zero, animated: false)
+        } else {
+            let current = max(scrollView.zoomScale, WereadPDFZoomLimits.minScale)
+            let center = CGPoint(
+                x: (scrollView.contentOffset.x + scrollView.bounds.width / 2) / current,
+                y: (scrollView.contentOffset.y + scrollView.bounds.height / 2) / current
+            )
+            let width = max(scrollView.bounds.width / clamped, 1)
+            let height = max(scrollView.bounds.height / clamped, 1)
+            let rect = CGRect(
+                x: center.x - width / 2,
+                y: center.y - height / 2,
+                width: width,
+                height: height
+            )
+            scrollView.zoom(to: rect, animated: false)
+        }
+        updateInteractionMode()
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+        hosting.view
+    }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        let insetX = max(
+            (scrollView.bounds.width - scrollView.contentSize.width) / 2,
+            0
+        )
+        let insetY = max(
+            (scrollView.bounds.height - scrollView.contentSize.height) / 2,
+            0
+        )
+        scrollView.contentInset = UIEdgeInsets(
+            top: insetY,
+            left: insetX,
+            bottom: insetY,
+            right: insetX
+        )
+        updateInteractionMode()
+    }
+
+    func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+        userZooming = true
+    }
+
+    func scrollViewDidEndZooming(
+        _ scrollView: UIScrollView,
+        with view: UIView?,
+        atScale scale: CGFloat
+    ) {
+        userZooming = false
+        requestedScale = min(
+            max(scale, WereadPDFZoomLimits.minScale),
+            WereadPDFZoomLimits.maxScale
+        )
+        updateInteractionMode()
+        // 只在手势结束时回写一次，缩放过程中不逐帧刷新 SwiftUI。
+        onZoomChanged?(requestedScale)
+    }
+
+    private func configureNestedScrollViewIfNeeded() {
+        if let nestedScrollView {
+            nestedScrollView.pinchGestureRecognizer?.isEnabled = false
+            return
+        }
+        guard let nested = Self.findWebScrollView(in: hosting.view) else { return }
+        nestedScrollView = nested
+        // 外层统一接管双指缩放，关掉网页自带的 pinch，避免两套 zoom 打架。
+        nested.pinchGestureRecognizer?.isEnabled = false
+        updateInteractionMode()
+    }
+
+    /// 尺寸变化（旋转 / 分屏）时重设画布大小。
+    ///
+    /// 放大状态下 hosting.view 带 zoom transform，不能直接改 frame；
+    /// 先回到 1x 再量尺寸，最后恢复原来的倍数。
+    private func resizeCanvas(to size: CGSize) {
+        let scale = scrollView.zoomScale
+        let zoomed = scale > WereadPDFZoomLimits.minScale + 0.001
+        if zoomed {
+            scrollView.setZoomScale(WereadPDFZoomLimits.minScale, animated: false)
+        }
+        hosting.view.frame = CGRect(origin: .zero, size: size)
+        scrollView.contentSize = size
+        if zoomed {
+            let restored = min(scale, WereadPDFZoomLimits.maxScale)
+            scrollView.setZoomScale(restored, animated: false)
+            requestedScale = restored
+        } else {
+            scrollView.contentOffset = .zero
+            requestedScale = WereadPDFZoomLimits.minScale
+        }
+    }
+
+    private func updateInteractionMode() {
+        // 外层画布始终只认双指，避免抢走网页的单指滚动。
+        scrollView.panGestureRecognizer.minimumNumberOfTouches = 2
+        scrollView.panGestureRecognizer.maximumNumberOfTouches = 2
+        // 网页滚动始终只认单指；双指全部让给外层的缩放 / 平移。
+        nestedScrollView?.panGestureRecognizer.minimumNumberOfTouches = 1
+        nestedScrollView?.panGestureRecognizer.maximumNumberOfTouches = 1
+    }
+
+    private static func findWebScrollView(in view: UIView) -> UIScrollView? {
+        if let web = view as? WKWebView { return web.scrollView }
+        for sub in view.subviews {
+            if let found = findWebScrollView(in: sub) {
+                return found
+            }
+        }
+        return nil
     }
 }
