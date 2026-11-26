@@ -3058,7 +3058,7 @@ final class WereadService: @unchecked Sendable {
         // `format` 缺失时的 PDF 兜底。
         let declaredKind = formatKind(format: info["format"], type: info["type"])
         var current = declaredKind
-        if hasOtherType, showOther, let otherKind {
+        if hasOtherType, showOther, otherKind != .unknown {
             current = otherKind
         }
 
