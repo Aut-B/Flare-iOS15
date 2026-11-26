@@ -4731,6 +4731,13 @@ private final class WereadPDFCanvasController<Content: View>: UIViewController, 
         fatalError("init(coder:) has not been implemented")
     }
 
+    // 显式空 deinit：Swift 6.3.3/Xcode 26.6 优化器（EarlyPerfInliner）
+    // 在编译本类「编译器合成 deinit」时稳定 SIGSEGV（build132/135 两次
+    // ARCHIVE FAILED，堆栈 EarlyPerfInliner → SILPerformanceInlinerPass）。
+    // 本类没有额外清理逻辑，显式声明等价于合成版本，但让优化器不再走
+    // 合成 deinit 的那条内联路径，规避编译器自身 bug。
+    deinit {}
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
