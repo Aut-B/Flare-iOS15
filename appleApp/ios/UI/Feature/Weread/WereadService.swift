@@ -2600,8 +2600,8 @@ final class WereadService: @unchecked Sendable {
 
     /// 只读已缓存的官方格式信息。
     ///
-    /// 界面首开时先用它判断要不要等 `/web/book/info`：普通电子书没有
-    /// 切换入口，不该为一个可选功能多阻塞一次网络往返。
+    /// 界面首开时先用它判断要不要等 `/web/book/info`：已确认 EPUB 的书
+    /// 直接跳过，未确认格式的书才阻塞补一次详情。
     func bookFormatIfCached(bookId: String) -> WereadBookFormatInfo? {
         guard !bookId.isEmpty else { return nil }
         return cachedBookFormat(for: bookId)
@@ -2609,8 +2609,10 @@ final class WereadService: @unchecked Sendable {
 
     /// 从书架缓存或 `/web/book/info` 取官方格式信息。
     ///
-    /// 书架有 `otherType` 时直接命中缓存；没有时补一次详情请求。拿不到
-    /// 就返回 nil，界面按原有 PDF 标记兜底，绝不本地猜测可转换。
+    /// 书架已能确认当前格式时直接命中缓存；判不出时才补一次详情请求。
+    /// 拿不到就返回 nil，界面按原有 PDF 标记兜底，绝不本地猜测可转换。
+    /// 调用方必须传入已恢复的会话 cookie：空 cookie 会直接返回 nil，
+    /// 首开时要用 `WereadStore.recoverSessionOnEntry` 等恢复完成再调。
     func bookFormat(bookId: String, cookie: String) async -> WereadBookFormatInfo? {
         guard !bookId.isEmpty else { return nil }
         if let cached = cachedBookFormat(for: bookId) { return cached }
@@ -2987,20 +2989,12 @@ final class WereadService: @unchecked Sendable {
 
     private func rememberBookFormat(bookId: String, item: [String: Any]) {
         if let info = bookFormatInfo(from: item) {
-            // 书架条目可能被裁剪过，没有 `otherType` 不代表详情接口也没有。
+            // 书架能确认当前格式就入缓存，不要求 `otherType`：普通 EPUB 通常
+            // 只有 `format=epub`，以前只在 `canSwitch` 时写入，导致每本书
+            // 首开都多打一次 `/web/book/info`。
             // 已有官方详情缓存时不再用书架数据覆盖，尤其是用户刚切换过
             // 格式、书架数据仍是旧格式的时候。
-            pdfLock.lock()
-            let hasCached = bookFormatCache[bookId] != nil
-            if !hasCached {
-                if info.current == .pdf {
-                    pdfBookIDs.insert(bookId)
-                } else {
-                    pdfBookIDs.remove(bookId)
-                }
-            }
-            pdfLock.unlock()
-            if info.canSwitch, !hasCached {
+            if cachedBookFormat(for: bookId) == nil {
                 storeBookFormat(info, for: bookId)
             }
             return

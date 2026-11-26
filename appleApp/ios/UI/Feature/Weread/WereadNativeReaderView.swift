@@ -1688,26 +1688,60 @@ struct WereadNativeReaderView: View {
         }
     }
 
-    /// 普通电子书首开不等格式详情，后台补一次；拿到双格式信息后才
-    /// 显示 EPUB → PDF 入口。
+    /// 切到官方网页阅读页，并清掉原生章节状态。
+    ///
+    /// PDF 没有文本层，原生的目录/正文接口只会回空。格式未确认、
+    /// 或正文接口已经回空的书都走这里，绝不停在白屏。
     @MainActor
-    private func refreshFormatInfo(bookId: String) async {
-        let fetched = await WereadService.shared.bookFormat(
-            bookId: bookId,
-            cookie: store.cookie
+    private func enterOfficialReaderPage(bookId: String) {
+        loadToken += 1
+        notesToken += 1
+        chapters = []
+        html = ""
+        cache = [:]
+        cacheOrder = []
+        highlights = [:]
+        serverNotes = [:]
+        serverNotesLoaded = false
+        ownReviews = []
+        ownReviewsLoaded = false
+        isPDF = true
+        loading = false
+        errorMessage = nil
+        webURLOverride = WereadService.shared.readerURLString(bookId: bookId)
+        showWeb = true
+        WereadService.screenDiag(
+            "进官方阅读页 book=\(bookId) 格式=\(formatInfo?.current.rawValue ?? "nil")"
         )
-        guard let fetched, formatInfo == nil else { return }
-        formatInfo = fetched
-        // 书架没标记、但详情确认是 PDF 的书：后台拿到结果后转 PDF 画布，
-        // 不能让正文接口返回空 HTML 后停在白屏。
-        if fetched.current == .pdf, !isPDF {
-            loadToken += 1
-            notesToken += 1
-            loading = false
-            errorMessage = nil
-            isPDF = true
-            showWeb = true
+    }
+
+    /// 首开时先等会话恢复完成，再判格式。
+    ///
+    /// 刚进页 cookie 可能还没从系统仓库恢复完；`recoverSessionOnEntry`
+    /// 发现另一个探活任务在跑时会立即返回，所以这里跟着恢复状态再等
+    /// 一小会儿（最多 3 秒），恢复完成前不拿旧 cookie 白判。
+    @MainActor
+    private func prepareSessionForFormat() async {
+        await store.recoverSessionOnEntry()
+        var waited = 0
+        while store.entryRecoveryState == .recovering,
+              waited < 30
+        {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            waited += 1
         }
+    }
+
+    /// 空正文兜底判据：本书没有被确认是 EPUB，且接口回的是「没内容」。
+    /// PDF 没有文本层，章节接口只会回空；这类书必须切官方阅读页。
+    private func shouldFallbackToOfficialPage(for error: Error) -> Bool {
+        guard formatInfo?.current != .epub else { return false }
+        guard let wereadError = error as? WereadError,
+              case .empty = wereadError
+        else {
+            return false
+        }
+        return true
     }
 
     @MainActor
@@ -1718,40 +1752,28 @@ struct WereadNativeReaderView: View {
         if !force, !chapters.isEmpty { return }
         let service = WereadService.shared
         let bookId = target.book.id
-        // 只有已标记为 PDF 的书才在首开阻塞等 `/web/book/info`。普通
-        // 电子书的首开不能被一个可选入口拖慢一次网络往返。
+        // 先等首开会话恢复，再判格式：空 cookie 的请求只会把新 PDF
+        // 当成普通电子书，取不到文本层后白屏。
+        await prepareSessionForFormat()
         let pdfMarker = service.isPDFBook(id: bookId)
         var format = service.bookFormatIfCached(bookId: bookId)
-        if pdfMarker || format?.current == .pdf {
+        if format == nil || format?.current == .pdf || pdfMarker {
+            // 未确定格式的书首开也阻塞等一次 `/web/book/info`：书架条目
+            // 可能被裁剪掉 `format`/`otherType`，真实格式只有详情接口知道。
+            // 已确认 EPUB 的书直接走缓存，不会多一次往返。
             format = await service.bookFormat(
                 bookId: bookId,
                 cookie: store.cookie
             ) ?? format
-        } else if format == nil {
-            Task { await refreshFormatInfo(bookId: bookId) }
         }
         formatInfo = format
         let isPDFNow =
             format?.current == .pdf
             || (format?.current != .epub && pdfMarker)
         if isPDFNow {
-            loadToken += 1
-            notesToken += 1
-            chapters = []
-            html = ""
-            cache = [:]
-            cacheOrder = []
-            highlights = [:]
-            serverNotes = [:]
-            serverNotesLoaded = false
-            ownReviews = []
-            ownReviewsLoaded = false
-            isPDF = true
-            loading = false
-            errorMessage = nil
             // PDF 直接用微读官方阅读页打开：那个页面原生支持高亮 / 写想法 /
-            // 服务端笔记（用户真机已确认能正常读）。不再显示中间提示页拦一道。
-            showWeb = true
+            // 服务端笔记（用户真机已确认能正常读）。
+            enterOfficialReaderPage(bookId: bookId)
             return
         }
         isPDF = false
@@ -1782,6 +1804,12 @@ struct WereadNativeReaderView: View {
             // 但**必须把 loading 关掉**，否则界面永远停在「正在打开…」，
             // 既没有正文也没有错误提示 —— 也就是纯白屏。
             guard !list.isEmpty else {
+                // 目录为空且格式未确认 EPUB：大概率是没标出来的 PDF。
+                // 直接进官方阅读页，别停在「取不到正文」的错误页。
+                if formatInfo?.current != .epub {
+                    enterOfficialReaderPage(bookId: bookId)
+                    return
+                }
                 loading = false
                 errorMessage = WereadError.empty.localizedDescription
                 return
@@ -1834,6 +1862,11 @@ struct WereadNativeReaderView: View {
             await loadChapter(at: start, token: token)
         } catch {
             guard token == loadToken else { return }
+            // 目录接口回空且格式未确认 EPUB：按疑似 PDF 切官方页兜底。
+            if shouldFallbackToOfficialPage(for: error) {
+                enterOfficialReaderPage(bookId: bookId)
+                return
+            }
             loading = false
             errorMessage = error.localizedDescription
         }
@@ -2208,6 +2241,12 @@ struct WereadNativeReaderView: View {
             prefetch(after: position)
         } catch {
             guard token == loadToken else { return }
+            // 空正文且格式未确认 EPUB：疑似 PDF（无文本层），切官方阅读页，
+            // 不要停在白屏或「取不到正文」。
+            if shouldFallbackToOfficialPage(for: error) {
+                enterOfficialReaderPage(bookId: target.book.id)
+                return
+            }
             loading = false
             errorMessage = error.localizedDescription
         }
