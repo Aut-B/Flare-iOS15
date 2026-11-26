@@ -2211,6 +2211,118 @@ private struct WereadNoteReply: Equatable {
 
 // MARK: - 章节 WebView
 
+/// 章节正文用的 WKWebView。
+///
+/// 长按选中文字时，UIKit 会额外弹一个系统编辑菜单（iOS 15 是
+/// `UIMenuController`，iOS 16+ 是 `UIEditMenuInteraction`）。它在独立的
+/// 系统窗口里，层级高于整个 WKWebView，网页里的 `z-index` 再大也压不住，
+/// 正好盖住网页自己的「划线 / 想法」工具条，导致按钮看得见却点不到。
+///
+/// 这里只在「正文有选区且 `#wr-tools` 已显示、焦点不在输入框」时暂时收起
+/// 系统编辑菜单；其余状态仍交给系统，保留正文的拷贝 / 查询等能力，也不影响
+/// 写想法浮层里的 SwiftUI `TextEditor`。
+private final class WereadChapterWKWebView: WKWebView {
+    /// 网页工具条是否已显示（由 JS 上报）。
+    private var selectionToolsVisible = false
+    /// 工具条仍在使用的正文选区（点工具条时选区可能临时收成光标）。
+    private var bodyHasSelection = false
+
+    override init(frame: CGRect, configuration: WKWebViewConfiguration) {
+        super.init(frame: frame, configuration: configuration)
+        observeEditMenu()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        observeEditMenu()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    /// JS 上报工具条显示状态和正文选区状态。
+    func updateSelectionTools(visible: Bool, hasSelection: Bool) {
+        selectionToolsVisible = visible
+        bodyHasSelection = hasSelection
+        hideSystemEditMenuIfNeeded()
+    }
+
+    private func observeEditMenu() {
+        let center = NotificationCenter.default
+        center.addObserver(
+            self,
+            selector: #selector(handleEditMenuWillShow(_:)),
+            name: UIMenuController.willShowMenuNotification,
+            object: nil
+        )
+        center.addObserver(
+            self,
+            selector: #selector(handleEditMenuDidShow(_:)),
+            name: UIMenuController.didShowMenuNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleEditMenuWillShow(_ notification: Notification) {
+        hideSystemEditMenuIfNeeded()
+    }
+
+    @objc private func handleEditMenuDidShow(_ notification: Notification) {
+        hideSystemEditMenuIfNeeded()
+    }
+
+    /// 系统发完通知后还会再摆一次菜单：先同步收，再补一轮异步。
+    private func hideSystemEditMenuIfNeeded() {
+        guard shouldSuppressSystemEditMenu else { return }
+        UIMenuController.shared.setMenuVisible(false, animated: false)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.shouldSuppressSystemEditMenu else { return }
+            UIMenuController.shared.setMenuVisible(false, animated: false)
+        }
+    }
+
+    /// 只有「正文选区 + 工具条可见 + 当前焦点不在输入框」才拦截系统菜单。
+    private var shouldSuppressSystemEditMenu: Bool {
+        guard selectionToolsVisible, bodyHasSelection, window != nil else { return false }
+        guard let responder = currentFirstResponder() else { return false }
+        // 写想法浮层里的 SwiftUI TextEditor 或网页输入框拿焦点时放行。
+        if responder is UITextView || responder is UITextField { return false }
+        guard let view = responder as? UIView else { return false }
+        return view === self || view.isDescendant(of: self)
+    }
+
+    private func currentFirstResponder() -> UIResponder? {
+        guard let window = window else { return nil }
+        return Self.firstResponder(in: window)
+    }
+
+    private static func firstResponder(in view: UIView) -> UIResponder? {
+        if view.isFirstResponder { return view }
+        for subview in view.subviews {
+            if let responder = firstResponder(in: subview) { return responder }
+        }
+        return nil
+    }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if shouldSuppressSystemEditMenu { return false }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    /// iOS 16+ 的标准编辑菜单走 UIMenuBuilder，不走 canPerformAction；
+    /// 只在拦截状态下临时移除，工具条收起后仍保留系统菜单。
+    override func buildMenu(with builder: UIMenuBuilder) {
+        super.buildMenu(with: builder)
+        guard shouldSuppressSystemEditMenu else { return }
+        if #available(iOS 16.0, *) {
+            if builder.menu(for: .standardEdit) != nil {
+                builder.remove(menu: .standardEdit)
+            }
+        }
+    }
+}
+
 private struct WereadChapterWebView: UIViewRepresentable {
     let html: String
     let baseURL: URL?
@@ -2251,7 +2363,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
         configuration.preferences.isTextInteractionEnabled = true
         configuration.userContentController.add(context.coordinator, name: "weread")
 
-        let webView = WKWebView(frame: .zero, configuration: configuration)
+        let webView = WereadChapterWKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
@@ -2564,6 +2676,13 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 DispatchQueue.main.async {
                     self.parent.onNoteRequest(text)
                 }
+            case "selectionTools":
+                // 只同步工具条状态，由 WebView 自己决定是否收起系统菜单；
+                // 工具条隐藏或选区清空后必须放行系统菜单。
+                let visible = (body["visible"] as? Bool) ?? false
+                let hasSelection = (body["hasSelection"] as? Bool) ?? visible
+                (message.webView as? WereadChapterWKWebView)?
+                    .updateSelectionTools(visible: visible, hasSelection: hasSelection)
             case "scroll":
                 let value = (body["value"] as? NSNumber)?.doubleValue ?? 0
                 let offset = (body["offset"] as? NSNumber)?.intValue ?? 0
@@ -2823,6 +2942,19 @@ enum WereadReaderHTML {
         (function () {
             var tools = document.getElementById('wr-tools');
             var savedRange = null;
+            var lastSelectionMenuPost = 0;
+            var toolsShown = false;
+            // 只上报两种状态：工具条显示/隐藏，以及工具条是否还持有正文选区。
+            // Swift 只在「两者都为真且焦点不在输入框」时收起系统编辑菜单。
+            function reportTools(visible, hasSelection) {
+                try {
+                    window.webkit.messageHandlers.weread.postMessage({
+                        type: 'selectionTools',
+                        visible: !!visible,
+                        hasSelection: !!hasSelection
+                    });
+                } catch (e) {}
+            }
 
             // epub/azw3 的章内链接是 `part0012.html#chapter_3` 这种相对地址。
             // 页面是 loadHTMLString 生成的，基址是站点根，直接放行会请求
@@ -3085,6 +3217,10 @@ enum WereadReaderHTML {
 
             function hideTools() {
                 tools.style.display = 'none';
+                if (toolsShown) {
+                    toolsShown = false;
+                    reportTools(false, false);
+                }
             }
 
             function selectedText() {
@@ -3113,7 +3249,13 @@ enum WereadReaderHTML {
                     if (!current) {
                         // 点工具条时系统会先收起选区，但 click 可能晚一拍才到；
                         // 只要 savedRange 还在就保留工具条，避免第一下点击落空。
-                        if (!savedRange) { hideTools(); }
+                        if (!savedRange) {
+                            // 选区和暂存 Range 都清空：工具条收起，停止拦截系统菜单。
+                            hideTools();
+                        } else if (toolsShown) {
+                            // 工具条仍持有暂存 Range，选区按未清空处理。
+                            reportTools(true, true);
+                        }
                         return;
                     }
                     var rect = current.range.getBoundingClientRect();
@@ -3127,7 +3269,16 @@ enum WereadReaderHTML {
                     tools.style.top = top + 'px';
                     tools.style.left = left + 'px';
                     tools.style.display = 'flex';
+                    toolsShown = true;
                     savedRange = current.range.cloneRange();
+                    // 工具条已经显示。iOS 15 的编辑菜单偶尔由 WKContentView
+                    // 直接询问，canPerformAction 兜不住；通知 Swift 再收一次，
+                    // 避免菜单压住按钮。节流，拖选择手柄时不刷消息。
+                    var now = Date.now();
+                    if (now - lastSelectionMenuPost > 250) {
+                        lastSelectionMenuPost = now;
+                        reportTools(true, true);
+                    }
                 }, 120);
             });
 
@@ -3212,6 +3363,10 @@ enum WereadReaderHTML {
                 var text = String(range.toString() || '').trim();
                 if (!text) return;
                 pendingNoteRange = range;
+                // 想法浮层马上覆盖阅读页：收起工具条并停止拦截系统菜单，
+                // 让 TextEditor 的拷贝/粘贴菜单保持可用。
+                savedRange = null;
+                hideTools();
                 window.webkit.messageHandlers.weread.postMessage({
                     type: 'noteRequest',
                     text: text
