@@ -60,10 +60,18 @@ struct WereadNativeReaderView: View {
     /// 以前 cache 只增不减，读一本几百章的书会把整本 HTML 都攒在内存里，
     /// iPhone 6s 只有 2GB，翻到后面容易被系统杀掉。
     @State private var cacheOrder: [Int] = []
+    /// 本次会话里新增/兼容展示的划线只留内存，不再写 UserDefaults。
     @State private var highlights: [Int: [WereadHighlight]] = [:]
-    /// 服务端同步的划线/想法，按 chapterUid 分组。和本地划线分开存，
-    /// 避免用户新增一条本地划线时把服务端笔记一并写回 UserDefaults。
+    /// 服务端同步的划线/想法，按 chapterUid 分组。和内存划线分开存，
+    /// 合并时以云端为准，不再把服务端笔记写回本机。
     @State private var serverNotes: [Int: [WereadBookmark]] = [:]
+    /// 云端划线是否至少成功拉取过一次（空数组也算）。旧本机数据迁移前
+    /// 必须先拿到这份索引，否则无法判断哪些内容云端已有，容易重复上传。
+    @State private var serverNotesLoaded = false
+    /// 旧 UserDefaults 划线只在每本书首次打开时尝试迁移一次。
+    @State private var legacyMigrationStarted = false
+    /// 新增划线/想法上传失败时的明确提示，不能把会话内可见当成已同步。
+    @State private var highlightSyncMessage: String?
     @State private var notesToken = 0
     @State private var notesLoading = false
     @State private var notesError: String?
@@ -161,7 +169,7 @@ struct WereadNativeReaderView: View {
             let key = normalizedText(bookmark.markText)
             if let position = indexByText[key] {
                 let item = merged[position]
-                // 服务端有想法时以服务端为准：本机 UserDefaults 里的旧想法
+                // 服务端有想法时以服务端为准：旧本机镜像只用于兼容迁移，
                 // 不能盖过云端内容，也不能反过来冒充成已同步笔记。
                 if !bookmark.note.isEmpty {
                     merged[position] = WereadHighlight(
@@ -513,6 +521,17 @@ struct WereadNativeReaderView: View {
         } message: {
             Text(formatMessage ?? "")
         }
+        .alert(
+            "划线未同步",
+            isPresented: Binding(
+                get: { highlightSyncMessage != nil },
+                set: { if !$0 { highlightSyncMessage = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(highlightSyncMessage ?? "")
+        }
     }
 
     /// PDF 直接给官方 `/web/reader/<hash>`，不再先落到网页书架自动点书。
@@ -570,23 +589,28 @@ struct WereadNativeReaderView: View {
                     list.append(item)
                 }
                 highlights[chapter.uid] = list
-                WereadHighlightStore.save(list, bookId: target.book.id, chapterUid: chapter.uid)
 
-                // 本地已经落盘，再尽力同步到微读服务端；失败只记诊断，不回滚本地。
+                // 新划线/想法只进内存并上传云端，不再写本机 UserDefaults。
+                // 未登录或上传失败时只在本次会话可见，必须明确提示，不能
+                // 把「看得见」当成「已同步」。
                 let bookId = target.book.id
                 let cookie = store.cookie
                 let chapterUid = chapter.uid
                 let chapterIdx = chapter.index
                 guard !cookie.isEmpty else {
                     let line =
-                        "本地笔记已保存但未登录，未上传 book=\(bookId) " +
+                        "划线仅保留在会话内，未登录未上传 book=\(bookId) " +
                         "chapter=\(chapterUid)"
                     WereadService.screenDiag(line)
                     FlareDiagnostics.shared.record(.weread, "ERR", line)
+                    highlightSyncMessage =
+                        "未登录微信读书，刚做的划线/想法只保留在本次阅读里，" +
+                        "不会写入本机；登录后请重新划线。"
                     return
                 }
-                Task {
-                    await WereadService.shared.uploadHighlight(
+                let token = loadToken
+                Task { @MainActor in
+                    let ok = await WereadService.shared.uploadHighlight(
                         bookId: bookId,
                         chapterUid: chapterUid,
                         chapterIdx: chapterIdx,
@@ -595,6 +619,15 @@ struct WereadNativeReaderView: View {
                         note: item.note,
                         cookie: cookie
                     )
+                    guard ok else {
+                        highlightSyncMessage =
+                            "划线/想法没有同步到微信读书云端。笔记只存云端，" +
+                            "重启后不会保留这条；请检查登录或网络后重新划线。"
+                        return
+                    }
+                    // 上传成功后重新拉云端索引，让笔记面板立刻以服务端为准。
+                    guard token == loadToken else { return }
+                    await refreshNotes()
                 }
             },
             onScroll: { value, offset in
@@ -1268,7 +1301,8 @@ struct WereadNativeReaderView: View {
         let text = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let request = noteRequest else { return }
         guard let entry = request.entry else {
-            // JS 选文新建：保持原来的回传链路，本地落盘和上传仍由 onHighlight 完成。
+            // JS 选文新建：保持原来的回传链路，只进内存并上传云端，
+            // 由 onHighlight 完成，不再写本机。
             noteReplyToken += 1
             noteReply = WereadNoteReply(id: noteReplyToken, text: text)
             noteRequest = nil
@@ -1543,12 +1577,13 @@ struct WereadNativeReaderView: View {
         }
     }
 
-    /// 只清理本机已有的旧划线镜像，不新增任何笔记落盘。
-    /// 删除想法时只清 note，删除整条时把本地镜像一起移除。
+    /// 只清理内存里的划线镜像，不写本机。
+    /// 删除想法时只清 note，删除整条时把内存镜像一起移除；真正的删除
+    /// 结果以随后 `refreshNotes()` 拉到的云端数据为准。
     private func clearLocalMirror(of note: WereadCloudNote, removeHighlight: Bool) {
         let chapterUid = note.chapterUid
         guard chapterUid > 0 else { return }
-        var list = highlights[chapterUid] ?? WereadHighlightStore.load(
+        var list = highlights[chapterUid] ?? WereadLegacyHighlightStore.load(
             bookId: target.book.id,
             chapterUid: chapterUid
         )
@@ -1578,11 +1613,6 @@ struct WereadNativeReaderView: View {
             guard changed else { return }
         }
         highlights[chapterUid] = list
-        if list.isEmpty {
-            WereadHighlightStore.remove(bookId: target.book.id, chapterUid: chapterUid)
-        } else {
-            WereadHighlightStore.save(list, bookId: target.book.id, chapterUid: chapterUid)
-        }
     }
 
     // MARK: - 加载
@@ -1713,6 +1743,7 @@ struct WereadNativeReaderView: View {
             cacheOrder = []
             highlights = [:]
             serverNotes = [:]
+            serverNotesLoaded = false
             ownReviews = []
             ownReviewsLoaded = false
             isPDF = true
@@ -1731,6 +1762,7 @@ struct WereadNativeReaderView: View {
         let bookmarkToken = notesToken
         if force {
             serverNotes = [:]
+            serverNotesLoaded = false
             ownReviews = []
             ownReviewsLoaded = false
         }
@@ -1755,6 +1787,8 @@ struct WereadNativeReaderView: View {
                 return
             }
             chapters = list
+            // 旧本机划线迁移不挡正文：等云端索引可用后再在后台补一次。
+            Task { await migrateLegacyHighlightsIfNeeded() }
 
             var start = 0
             // 续读位置：章由 chapterUid 定位，章内位置优先用字符偏移。
@@ -1816,8 +1850,11 @@ struct WereadNativeReaderView: View {
             let list = try await store.bookmarks(for: bookId)
             guard token == notesToken else { return }
             serverNotes = Dictionary(grouping: list) { $0.chapterUid }
+            serverNotesLoaded = true
             notesError = nil
             notesLoading = false
+            // 云端索引到手后再迁移旧本机数据，避免把云端已有的笔记重复上传。
+            await migrateLegacyHighlightsIfNeeded()
         } catch {
             guard token == notesToken else { return }
             notesLoading = false
@@ -1833,6 +1870,152 @@ struct WereadNativeReaderView: View {
         notesError = nil
         await loadBookmarks(bookId: target.book.id, token: token)
         await loadOwnReviews()
+    }
+
+    /// 旧版本把划线和想法写在 UserDefaults。6S 存储硬约束下不再新增落盘，
+    /// 但也不能静默丢弃：每本书首次打开时读一次旧 key，逐条对照云端补传；
+    /// 只有整章都确认在云端（或上传成功）后才删除该章旧 key。缺 range、
+    /// 未登录、网络或想法索引失败时原样保留，下次打开继续尝试。
+    @MainActor
+    private func migrateLegacyHighlightsIfNeeded() async {
+        guard !legacyMigrationStarted else { return }
+        guard !chapters.isEmpty, serverNotesLoaded else { return }
+        let bookId = target.book.id
+        guard !bookId.isEmpty else { return }
+
+        let cookie = store.cookie
+        guard !cookie.isEmpty else {
+            let line = "旧划线迁移跳过 book=\(bookId) 未登录，旧数据保留"
+            WereadService.screenDiag(line)
+            FlareDiagnostics.shared.record(.weread, "WARN", line)
+            return
+        }
+        legacyMigrationStarted = true
+
+        var pending: [(chapter: WereadChapter, highlights: [WereadHighlight])] = []
+        // 按目录逐章查旧 key，不再整份 `dictionaryRepresentation()` 拷贝；
+        // 6S 上章节多时也更省内存。
+        for chapter in chapters {
+            let legacy = WereadLegacyHighlightStore.load(
+                bookId: bookId,
+                chapterUid: chapter.uid
+            )
+            guard !legacy.isEmpty else { continue }
+            pending.append((chapter, legacy))
+        }
+        guard !pending.isEmpty else { return }
+
+        // 想法只在能确认云端索引时迁移；否则可能把已有想法重复上传。
+        let needsReviewIndex = pending.contains { entry in
+            entry.highlights.contains { item in
+                !normalizedText(item.note).isEmpty
+                    && !legacyItemIsInServerNotes(item, chapterUid: entry.chapter.uid)
+            }
+        }
+        var reviews: [WereadOwnReview]? = nil
+        if needsReviewIndex {
+            reviews = await WereadService.shared.ownReviews(
+                bookId: bookId,
+                cookie: cookie
+            )
+        }
+
+        var uploaded = 0
+        var kept = 0
+        for entry in pending {
+            var allSynced = true
+            for item in entry.highlights {
+                if legacyItemIsInServerNotes(item, chapterUid: entry.chapter.uid) {
+                    continue
+                }
+                if !normalizedText(item.note).isEmpty {
+                    guard let reviews else {
+                        // 想法索引没拿到，无法判断云端是否已有，保留旧 key。
+                        allSynced = false
+                        kept += 1
+                        continue
+                    }
+                    if legacyItemIsInReviews(
+                        item,
+                        chapterUid: entry.chapter.uid,
+                        reviews: reviews
+                    ) {
+                        continue
+                    }
+                }
+                let ok = await WereadService.shared.uploadHighlight(
+                    bookId: bookId,
+                    chapterUid: entry.chapter.uid,
+                    chapterIdx: entry.chapter.index,
+                    range: item.range ?? "",
+                    markText: item.text,
+                    note: item.note,
+                    cookie: cookie
+                )
+                if ok {
+                    uploaded += 1
+                } else {
+                    allSynced = false
+                    kept += 1
+                }
+            }
+            if allSynced {
+                WereadLegacyHighlightStore.remove(
+                    bookId: bookId,
+                    chapterUid: entry.chapter.uid
+                )
+            }
+        }
+
+        let line =
+            "旧划线迁移 book=\(bookId) chapters=\(pending.count) " +
+            "uploaded=\(uploaded) 保留=\(kept)"
+        WereadService.screenDiag(line)
+        FlareDiagnostics.shared.record(.weread, kept == 0 ? "RES" : "WARN", line)
+        if uploaded > 0 {
+            await refreshNotes()
+        }
+    }
+
+    /// 旧镜像条目是否已经能从云端划线索引里对上。
+    private func legacyItemIsInServerNotes(
+        _ item: WereadHighlight,
+        chapterUid: Int
+    ) -> Bool {
+        let text = normalizedText(item.text)
+        let note = normalizedText(item.note)
+        let range = (item.range ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty || !note.isEmpty else { return false }
+        return (serverNotes[chapterUid] ?? []).contains { bookmark in
+            let sameRange = !range.isEmpty && bookmark.range == range
+            let sameText = !text.isEmpty && normalizedText(bookmark.markText) == text
+            guard sameRange || sameText else { return false }
+            guard !note.isEmpty else { return true }
+            let cloudNote = normalizedText(bookmark.note)
+            return !cloudNote.isEmpty && (cloudNote == note || cloudNote.contains(note))
+        }
+    }
+
+    /// 旧镜像里的想法是否已经在云端「我的想法」索引里。
+    ///
+    /// 同一位置只要云端已有想法就算迁移过：本机镜像可能是上传时的旧稿，
+    /// 用户后来在官方端改过，这时应保留云端版本，不能拿旧稿再传一条。
+    private func legacyItemIsInReviews(
+        _ item: WereadHighlight,
+        chapterUid: Int,
+        reviews: [WereadOwnReview]
+    ) -> Bool {
+        let text = normalizedText(item.text)
+        let note = normalizedText(item.note)
+        let range = (item.range ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !note.isEmpty else { return true }
+        return reviews.contains { review in
+            guard review.chapterUid == chapterUid else { return false }
+            let sameRange = !range.isEmpty && review.range == range
+            let sameText = !text.isEmpty && normalizedText(review.abstract) == text
+            let sameContent = normalizedText(review.content) == note
+            return sameRange || sameText || sameContent
+        }
     }
 
     @MainActor
@@ -1989,7 +2172,9 @@ struct WereadNativeReaderView: View {
 
         let chapter = chapters[position]
         if highlights[chapter.uid] == nil {
-            highlights[chapter.uid] = WereadHighlightStore.load(
+            // 旧本机镜像只读兼容：能迁移的会在 `migrateLegacyHighlightsIfNeeded`
+            // 上传云端后删掉旧 key，这里不再新增任何落盘。
+            highlights[chapter.uid] = WereadLegacyHighlightStore.load(
                 bookId: target.book.id,
                 chapterUid: chapter.uid
             )
@@ -2646,7 +2831,7 @@ struct WereadHighlight: Codable, Hashable, Identifiable {
     let note: String
     /// 章内文本偏移 `start-end`，用于回传服务端划线 / 想法。
     /// 官方按自己的渲染对象算 offset，这里用 DOM 文本长度近似，位置可能有偏差，
-    /// 需真机校准。旧版本 UserDefaults 里没有这个字段，Optional 解码会得到 nil。
+    /// 需真机校准。旧版本本机镜像里没有这个字段，Optional 解码会得到 nil。
     let range: String?
 
     init(id: String, text: String, note: String, range: String? = nil) {
@@ -2685,9 +2870,14 @@ private struct WereadCloudNote: Identifiable, Hashable {
     let reviewId: String?
 }
 
-enum WereadHighlightStore {
+/// 旧版本把划线和想法写在 `UserDefaults`。6S 存储硬约束下不再新增落盘：
+/// 这里只保留「读一次旧数据 + 迁移成功后删除旧 key」的能力，**不再提供写回**。
+/// 迁移失败的旧数据原样留在本机，下次打开这本书继续尝试，不静默丢弃。
+enum WereadLegacyHighlightStore {
+    private static let prefix = "weread.highlights."
+
     private static func key(bookId: String, chapterUid: Int) -> String {
-        "weread.highlights.\(bookId).\(chapterUid)"
+        "\(prefix)\(bookId).\(chapterUid)"
     }
 
     static func load(bookId: String, chapterUid: Int) -> [WereadHighlight] {
@@ -2700,12 +2890,7 @@ enum WereadHighlightStore {
         return list
     }
 
-    static func save(_ list: [WereadHighlight], bookId: String, chapterUid: Int) {
-        guard let data = try? JSONEncoder().encode(list) else { return }
-        UserDefaults.standard.set(data, forKey: key(bookId: bookId, chapterUid: chapterUid))
-    }
-
-    /// 只用于删除云端内容后清理本机旧镜像，不参与新增笔记。
+    /// 迁移确认云端已有后清理旧 key。这是本类型唯一的写操作，且只删不写笔记。
     static func remove(bookId: String, chapterUid: Int) {
         UserDefaults.standard.removeObject(forKey: key(bookId: bookId, chapterUid: chapterUid))
     }

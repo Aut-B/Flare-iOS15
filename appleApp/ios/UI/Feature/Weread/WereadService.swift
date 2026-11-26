@@ -2099,7 +2099,8 @@ final class WereadService: @unchecked Sendable {
     /// `s`；不要照正文接口自行补签名。
     ///
     /// 成功时 `data.bookmarkId` 必须是非空数组。失败只记诊断并返回 false，
-    /// 不抛错 —— 本地笔记已经保存，上传失败不能让用户丢笔记。
+    /// 不抛错；笔记只存云端，调用方必须把 false 当成「未同步」提示用户，
+    /// 不能拿内存里的临时显示冒充保存成功。
     func addBookmark(
         bookId: String,
         chapterUid: Int,
@@ -2446,8 +2447,9 @@ final class WereadService: @unchecked Sendable {
 
     /// 把一条本地划线 / 想法同步到微读服务端。
     ///
-    /// 调用方已经完成本地保存，这里只做尽力上传：没有 range、没登录、
-    /// 取不到版本号或接口失败都只记诊断，绝不回滚本地笔记。
+    /// 笔记只存云端，这里返回 true 才算真的保存。没有 range、没登录、
+    /// 取不到版本号或接口失败都只记诊断并返回 false，由调用方明确提示；
+    /// 不再有任何本机 UserDefaults 落盘或回滚。
     ///
     /// 划线（note 为空）只建 bookmark；写想法只建 review。网页写想法时
     /// 不会再调 `addBookmark`，服务端用 review 自带的 range 显示高亮；
