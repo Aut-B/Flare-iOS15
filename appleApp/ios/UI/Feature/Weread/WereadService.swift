@@ -693,7 +693,8 @@ final class WereadService: @unchecked Sendable {
                 index: intValue(item["chapterIdx"]) ?? 0,
                 title: item["title"] as? String ?? "",
                 level: intValue(item["level"]) ?? 1,
-                wordCount: intValue(item["wordCount"]) ?? 0
+                wordCount: intValue(item["wordCount"]) ?? 0,
+                translateVersion: intValue(item["translateVersion"]) ?? 0
             )
         }
     }
@@ -905,6 +906,229 @@ final class WereadService: @unchecked Sendable {
         let text = WereadCrypto.decrypt((rawText0 ?? "") + (rawText1 ?? ""))
         guard !text.isEmpty else { throw WereadError.empty }
         return clean(text)
+    }
+
+    // MARK: - 翻译（实验）
+
+    /// 切换微读官方翻译开关。译文由章节正文随 `.wr-translation` 节点返回，
+    /// 这里只改服务端状态，不保存任何译文。
+    ///
+    /// 接口不是公开 API，字段语义只能真机确认。这里按最保守的规则判定：
+    /// 只有显式成功字段才返回 `.accepted`，2xx 空回包返回 `.uncertain`。
+    func setTranslation(
+        bookId: String,
+        enabled: Bool,
+        cookie: String
+    ) async throws -> WereadTranslationAck {
+        var request = URLRequest(url: URL(string: "\(base)/web/reader/toggleTranslate")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "bookId": bookId,
+            "enabled": enabled,
+        ])
+
+        let (data, status) = try await sendWithStatus(request, redactBody: true)
+        let action = enabled ? "开启" : "关闭"
+        if data.isEmpty {
+            return .uncertain("官方返回 HTTP \(status)，空回包，未确认是否\(action)")
+        }
+        let raw = try parseObject(data)
+        let json = translationPayload(raw)
+        try checkError(raw)
+        try checkError(json)
+        return translationAck(json, status: status, action: action)
+    }
+
+    /// 触发一次官方译文生成/轮询。`uid` 传当前 `chapterUid`。
+    ///
+    /// 官方 `read[]` 的初始版本是 `chapter.translateVersion || 0`：未翻译
+    /// 章节必须传 0，不能拿 1 冒充「已持有译文」，否则服务端会误判不需要
+    /// 生成。之后只把回包（顶层或 `curStatus`）里的新版本沿用到下一轮。
+    ///
+    /// 完成信号按官方轮询语义读 `curStatus`：当前 `uid` 的
+    /// `translateVersion` 大于 `chapterVersion` 即视为译文已生成；
+    /// `stopPoll` 只表示停止轮询，不保证有译文。字段语义尚未真机证实，
+    /// 失败只按回包如实上报，不做本地机翻兜底。
+    func requestTranslation(
+        bookId: String,
+        uid: Int,
+        chapterVersion: Int,
+        translateVersion: Int,
+        cookie: String
+    ) async throws -> WereadTranslationTrigger {
+        var request = URLRequest(url: URL(string: "\(base)/web/book/enRead")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "bookId": bookId,
+            "reference": [
+                "uid": uid,
+                "texts": [String](),
+            ],
+            "read": [
+                [
+                    "uid": uid,
+                    "translateVersion": translateVersion,
+                ],
+            ],
+        ])
+
+        let (data, _) = try await sendWithStatus(request, redactBody: true)
+        if data.isEmpty {
+            return WereadTranslationTrigger(
+                state: .pending,
+                translateVersion: nil,
+                tip: nil
+            )
+        }
+        let raw = try parseObject(data)
+        let json = translationPayload(raw)
+        try checkError(raw)
+        try checkError(json)
+        let stop = boolValue(json["stopPoll"]) ?? false
+        let statusVersion = curStatusVersion(json, uid: uid)
+        let topVersion = intValue(json["translateVersion"]) ?? intValue(json["version"])
+        let latestVersion = [statusVersion, topVersion].compactMap { $0 }.max()
+        let state: WereadTranslationTrigger.State
+        if let statusVersion, statusVersion > chapterVersion {
+            state = .completed
+        } else if stop {
+            state = .stop
+        } else {
+            state = .pending
+        }
+        return WereadTranslationTrigger(
+            state: state,
+            translateVersion: latestVersion,
+            tip: translationTip(json)
+        )
+    }
+
+    /// 官方 `curStatus` 的元素带 `uid` / `translateVersion`；回包可能是数组，
+    /// 也可能是以 uid 为键的字典。只取当前章节的版本号，别的章节忽略。
+    private func curStatusVersion(_ json: [String: Any], uid: Int) -> Int? {
+        guard let raw = json["curStatus"] ?? json["curstatus"] else { return nil }
+        if let list = raw as? [[String: Any]] {
+            for item in list where intValue(item["uid"]) == uid {
+                if let version = translationVersion(in: item) { return version }
+            }
+            return nil
+        }
+        if let map = raw as? [String: Any] {
+            if let item = map[String(uid)] as? [String: Any],
+               let version = translationVersion(in: item)
+            {
+                return version
+            }
+            for value in map.values {
+                guard let item = value as? [String: Any],
+                      intValue(item["uid"]) == uid,
+                      let version = translationVersion(in: item)
+                else { continue }
+                return version
+            }
+        }
+        return nil
+    }
+
+    private func translationVersion(in item: [String: Any]) -> Int? {
+        intValue(item["translateVersion"])
+            ?? intValue(item["translateversion"])
+            ?? intValue(item["version"])
+    }
+
+    /// 会员摘要只用于失败时补充说明。Flare 不用它拦截翻译，
+    /// 也不据此判断一本书有没有译文；取不到就返回 nil。
+    func memberCardStatus(cookie: String) async -> Bool? {
+        var request = URLRequest(
+            url: URL(string: "\(base)/web/pay/memberCardSummary?pf=ios")!
+        )
+        request.httpMethod = "GET"
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        do {
+            let (data, _) = try await sendWithStatus(request, redactBody: true)
+            let raw = try parseObject(data)
+            let json = translationPayload(raw)
+            try checkError(raw)
+            try checkError(json)
+            if let value =
+                boolValue(json["isPaying"])
+                ?? boolValue(json["isMember"])
+                ?? boolValue(json["member"])
+                ?? boolValue(json["isVip"])
+                ?? boolValue(json["vip"])
+            {
+                return value
+            }
+            if let status = intValue(json["memberStatus"]) {
+                return status == 1
+            }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    /// 把 2xx 回包翻译成「确认 / 未确认 / 拒绝」，不把空回包当成功。
+    private func translationAck(
+        _ json: [String: Any],
+        status: Int,
+        action: String
+    ) -> WereadTranslationAck {
+        if intValue(json["succ"]) == 0 || boolValue(json["success"]) == false {
+            return .rejected(translationTip(json) ?? "官方拒绝\(action)翻译")
+        }
+        if intValue(json["succ"]) == 1 || boolValue(json["success"]) == true {
+            return .accepted
+        }
+        let keys = json.keys.sorted().prefix(6).joined(separator: ",")
+        let fields = keys.isEmpty ? "空回包" : keys
+        return .uncertain(
+            "官方返回 HTTP \(status)，但没有明确确认\(action)（字段：\(fields)）"
+        )
+    }
+
+    /// 官方回包有时把业务字段放顶层，有时包一层 `data`。
+    /// 两层合并、`data` 优先：顶层 `succ` 不会因为 `data` 非空而漏判，
+    /// `data` 为空对象时也仍按顶层读，避免把空壳当结果。
+    private func translationPayload(_ raw: [String: Any]) -> [String: Any] {
+        guard let data = raw["data"] as? [String: Any], !data.isEmpty else {
+            return raw
+        }
+        var merged = raw
+        merged.removeValue(forKey: "data")
+        for (key, value) in data {
+            merged[key] = value
+        }
+        return merged
+    }
+
+    /// 官方提示可能在不同字段/数组里，取第一个能读的文本。
+    private func translationTip(_ json: [String: Any]) -> String? {
+        if let tips = json["tips"] {
+            if let text = tips as? String, !text.isEmpty { return text }
+            if let list = tips as? [String] {
+                let text = list.filter { !$0.isEmpty }.joined(separator: " ")
+                if !text.isEmpty { return text }
+            }
+            if let list = tips as? [[String: Any]] {
+                let text = list.compactMap {
+                    ($0["content"] as? String)
+                        ?? ($0["text"] as? String)
+                        ?? ($0["tips"] as? String)
+                }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+                if !text.isEmpty { return text }
+            }
+        }
+        for key in ["errMsg", "errmsg", "message", "msg"] {
+            if let text = json[key] as? String, !text.isEmpty { return text }
+        }
+        return nil
     }
 
     // MARK: - 进度
@@ -2500,15 +2724,22 @@ final class WereadService: @unchecked Sendable {
         try await sendWithStatus(request).0
     }
 
-    private func sendWithStatus(_ request: URLRequest) async throws -> (Data, Int) {
+    /// `redactBody` 用于翻译相关接口：回包可能有译文片段，
+    /// 屏幕诊断只记状态码/字节数，不把响应体开头截进日志。
+    private func sendWithStatus(
+        _ request: URLRequest,
+        redactBody: Bool = false
+    ) async throws -> (Data, Int) {
         let (data, response) = try await session.data(for: request)
         let path = request.url?.path ?? ""
         var status = -1
         if let http = response as? HTTPURLResponse { status = http.statusCode }
         // 所有微读请求都记录到屏幕诊断（章节目录、正文分片、阅读器页面），
         // 只截前 180 字节、不含 cookie，避免泄露登录态。
-        let head = String(decoding: data.prefix(180), as: UTF8.self)
-            .replacingOccurrences(of: "\n", with: " ")
+        let head = redactBody
+            ? "<响应体可能含译文，已省略>"
+            : String(decoding: data.prefix(180), as: UTF8.self)
+                .replacingOccurrences(of: "\n", with: " ")
         Self.screenDiag("\(path) → \(status) · \(data.count)B · \(head)")
         FlareDiagnostics.shared.record(
             .weread,

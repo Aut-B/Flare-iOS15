@@ -122,6 +122,16 @@ struct WereadNativeReaderView: View {
     /// 回传给 JS 的想法内容；`text == nil` 表示取消。
     @State private var noteReply: WereadNoteReply?
     @State private var noteReplyToken = 0
+    /// 官方翻译实验。译文只活在 WebView 的章节 DOM 里；
+    /// 这里只保留开关、显隐、节点数和轮询状态，不保存任何译文文本。
+    @State private var translationOn = false
+    @State private var translationVisible = false
+    @State private var translationBusy = false
+    @State private var translationStatus: String?
+    @State private var translationMessage: String?
+    /// 当前章节 `.wr-translation` 节点数；-1 表示还没收到本次页面回报。
+    @State private var translationNodeCount = -1
+    @State private var translationTask: Task<Void, Never>?
     @FocusState private var noteDraftFocused: Bool
 
     /// 正文缓存最多留几章。一章 HTML 通常几十到几百 KB，留 3 章既能覆盖
@@ -386,6 +396,22 @@ struct WereadNativeReaderView: View {
                 noteEditor(request)
             }
         }
+        .overlay(alignment: .top) {
+            if translationBusy {
+                HStack(spacing: 6) {
+                    ProgressView()
+                    Text(translationStatus ?? "正在请求官方翻译…")
+                        .font(.caption2)
+                        .lineLimit(2)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(.secondarySystemBackground))
+                .clipShape(Capsule())
+                .padding(.top, 8)
+                .allowsHitTesting(false)
+            }
+        }
         .statusBar(hidden: true)
         .task { await load() }
         .sheet(isPresented: $showChapters) {
@@ -416,6 +442,7 @@ struct WereadNativeReaderView: View {
             }
         }
         .onDisappear {
+            translationTask?.cancel()
             stopReadingTimer()
             // 先同步落本机再上报：上报要等网络，进程可能先被挂起/回收，
             // 不能把「退出前的最后一段位置」押在异步任务一定跑完上。
@@ -444,6 +471,17 @@ struct WereadNativeReaderView: View {
                 pdfZoomScale = 1
                 startReadingTimer()
             }
+        }
+        .alert(
+            "翻译（实验）",
+            isPresented: Binding(
+                get: { translationMessage != nil },
+                set: { if !$0 { translationMessage = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(translationMessage ?? "")
         }
     }
 
@@ -482,6 +520,7 @@ struct WereadNativeReaderView: View {
             baseURL: URL(string: "https://weread.qq.com/"),
             cookie: store.cookie,
             fontSize: fontSize,
+            translationVisible: translationVisible,
             highlights: currentHighlights,
             onHighlight: { item in
                 guard let chapter = current else { return }
@@ -583,6 +622,11 @@ struct WereadNativeReaderView: View {
                 // 只认当前这一次加载的渲染完成：翻章时旧页面的 ready
                 // 不应该把新章节的 loading 提前关掉。
                 if token == self.loadToken { loading = false }
+            },
+            onTranslationCount: { count in
+                // 旧页面迟到的节点数不能覆盖新章节的统计。
+                guard token == self.loadToken else { return }
+                translationNodeCount = count
             }
         )
     }
@@ -653,6 +697,36 @@ struct WereadNativeReaderView: View {
                         showNotes = true
                     } label: {
                         Label("笔记（\(cloudNoteEntries.count)）", systemImage: "text.quote")
+                    }
+                    Divider()
+                    Button {
+                        startTranslation()
+                    } label: {
+                        Label(
+                            translationOn ? "翻译已开启" : "开启自动翻译（实验）",
+                            systemImage: "character.bubble"
+                        )
+                    }
+                    .disabled(translationOn || translationBusy)
+                    Button {
+                        showTranslation()
+                    } label: {
+                        Label("显示译文", systemImage: "text.bubble")
+                    }
+                    .disabled(!translationOn || translationVisible || translationBusy)
+                    Button {
+                        translationVisible = false
+                    } label: {
+                        Label("只看原文", systemImage: "text.alignleft")
+                    }
+                    .disabled(!translationVisible)
+                    if translationOn {
+                        Button(role: .destructive) {
+                            startCancellingTranslation()
+                        } label: {
+                            Label("取消翻译", systemImage: "xmark.circle")
+                        }
+                        .disabled(translationBusy)
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -1741,6 +1815,8 @@ struct WereadNativeReaderView: View {
         // 先清掉上一章正文：否则请求期间标题已经换成新章，正文还是旧章，
         // 看起来像「点进去内容不对」。
         html = ""
+        // 新章还没回报译文节点数，菜单不能拿上一章的数字当真。
+        translationNodeCount = -1
 
         let chapter = chapters[position]
         if highlights[chapter.uid] == nil {
@@ -1749,7 +1825,7 @@ struct WereadNativeReaderView: View {
                 chapterUid: chapter.uid
             )
         }
-        if let cached = cache[chapter.uid] {
+        if !translationOn, let cached = cache[chapter.uid] {
             html = cached
             await waitForRender(token: token)
             restoreScrollIfNeeded(token: token)
@@ -1788,6 +1864,9 @@ struct WereadNativeReaderView: View {
     /// `cacheOrder` 队尾是最近用过的；超过 `cacheCapacity` 就从队头丢。
     /// 只丢正文，不碰 `highlights`（划线是用户数据，不是缓存）。
     private func rememberInCache(_ uid: Int, _ html: String) {
+        // 双语译文会让一章 HTML 接近翻倍；翻译开启期间一律不进缓存，
+        // 避免 6S 的内存被「原文 + 译文 + 预取」顶满。
+        guard !translationOn else { return }
         cache[uid] = html
         cacheOrder.removeAll { $0 == uid }
         cacheOrder.append(uid)
@@ -1841,6 +1920,7 @@ struct WereadNativeReaderView: View {
 
     /// 预取下一章：翻章时不用再等网络。失败就算了，不影响当前章。
     private func prefetch(after position: Int) {
+        guard !translationOn else { return }
         let next = position + 1
         guard chapters.indices.contains(next) else { return }
         let chapter = chapters[next]
@@ -1859,6 +1939,264 @@ struct WereadNativeReaderView: View {
                 }
             }
         }
+    }
+
+    // MARK: - 翻译（实验）
+
+    /// 译文由官方随章节正文返回，Swift 侧只切 CSS 显隐并统计节点数。
+    /// 没有本地机翻、没有译文落盘/日志正文，也没有新增缓存。
+    @MainActor
+    private func startTranslation() {
+        translationTask?.cancel()
+        translationTask = Task { await enableTranslation() }
+    }
+
+    @MainActor
+    private func startCancellingTranslation() {
+        translationTask?.cancel()
+        translationTask = Task { await cancelTranslation() }
+    }
+
+    @MainActor
+    private func enableTranslation() async {
+        guard !translationBusy else { return }
+        translationBusy = true
+        defer { translationBusy = false }
+        translationMessage = nil
+        translationStatus = "正在开启官方翻译…"
+        translationNodeCount = -1
+
+        let cookie = store.cookie
+        guard !cookie.isEmpty else {
+            translationStatus = nil
+            translationMessage = "未登录微信读书，请先在微读页重新扫码登录。"
+            return
+        }
+
+        var warning: String?
+        do {
+            let ack = try await WereadService.shared.setTranslation(
+                bookId: target.book.id,
+                enabled: true,
+                cookie: cookie
+            )
+            switch ack {
+            case .accepted:
+                break
+            case .uncertain(let message):
+                warning = message
+            case .rejected(let message):
+                translationStatus = nil
+                translationMessage = message
+                return
+            }
+        } catch is CancellationError {
+            translationStatus = nil
+            return
+        } catch {
+            guard !Task.isCancelled else {
+                translationStatus = nil
+                return
+            }
+            translationStatus = nil
+            translationMessage = "开启翻译失败：\(error.localizedDescription)"
+            return
+        }
+
+        // 官方开关已经发出去。先按「可能产生双倍正文」处理：
+        // 清缓存，翻译期间不写缓存、不预取。
+        translationOn = true
+        translationVisible = false
+        cache = [:]
+        cacheOrder = []
+
+        guard let chapter = current else {
+            translationStatus = nil
+            translationMessage = warning ?? "当前章节还没就绪，已开启翻译；翻到正文后再试。"
+            return
+        }
+
+        var tip: String?
+        var pollNote: String?
+        // 未翻译章节的官方原版本是 0；发送版本也从章节真实版本开始，
+        // 之后只跟回包/curStatus 的新版本递增，绝不用 1 冒充已持有译文。
+        let chapterVersion = chapter.translateVersion
+        var version = chapterVersion
+        var completed = false
+        // 官方每 2 秒轮询一次；给生成留 90 秒，超时后仍然重载数节点，
+        // 节点为 0 就如实报失败，不把「轮询次数用完」当成完成。
+        let deadline = Date().addingTimeInterval(90)
+        do {
+            var attempt = 0
+            while Date() < deadline {
+                try Task.checkCancellation()
+                attempt += 1
+                translationStatus = "官方正在生成译文（第 \(attempt) 次）…"
+                let trigger = try await WereadService.shared.requestTranslation(
+                    bookId: target.book.id,
+                    uid: chapter.uid,
+                    chapterVersion: chapterVersion,
+                    translateVersion: version,
+                    cookie: cookie
+                )
+                tip = trigger.tip ?? tip
+                if let next = trigger.translateVersion, next > version {
+                    version = next
+                }
+                if trigger.state == .completed {
+                    completed = true
+                    break
+                }
+                if trigger.state == .stop {
+                    pollNote = "官方已停止轮询，但回包未确认译文已生成。"
+                    break
+                }
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            if !completed, Date() >= deadline {
+                pollNote = "官方译文生成超过 90 秒仍未完成（轮询超时）。"
+            }
+        } catch is CancellationError {
+            translationStatus = nil
+            return
+        } catch {
+            guard !Task.isCancelled else {
+                translationStatus = nil
+                return
+            }
+            pollNote = "触发译文生成失败：\(error.localizedDescription)"
+        }
+        guard !Task.isCancelled else {
+            translationStatus = nil
+            return
+        }
+
+        translationStatus = "正在读取官方译文…"
+        let count = await reloadForTranslation()
+        guard !Task.isCancelled else {
+            translationStatus = nil
+            return
+        }
+        var lines: [String] = []
+        if let warning { lines.append(warning) }
+        if let pollNote { lines.append(pollNote) }
+        if let tip, !tip.isEmpty { lines.append("官方提示：\(tip)") }
+        if count > 0 {
+            translationVisible = true
+            translationStatus = nil
+            return
+        }
+
+        // 节点数为 0 就是失败：不把「请求已发出」冒充成「已取到译文」。
+        translationStatus = "正在核对失败原因…"
+        if let member = await WereadService.shared.memberCardStatus(cookie: cookie) {
+            lines.append(
+                member
+                    ? "会员摘要显示有会员记录，但本书/本章仍未返回译文。"
+                    : "会员摘要未显示会员记录；本功能不据此拦截，仅作提示。"
+            )
+        }
+        lines.append(
+            "官方未返回译文（本章 .wr-translation 节点为 0）。"
+                + "可能原因：本书/本章不支持翻译、账号没有对应权益，或请求被风控。"
+                + "未使用本地机翻替代。"
+        )
+        translationMessage = lines.joined(separator: "\n")
+        translationStatus = nil
+    }
+
+    @MainActor
+    private func cancelTranslation() async {
+        translationVisible = false
+        translationBusy = true
+        translationStatus = "正在关闭官方翻译…"
+        translationMessage = nil
+        defer { translationBusy = false }
+
+        let cookie = store.cookie
+        guard !cookie.isEmpty else {
+            translationStatus = nil
+            translationMessage = "未登录微信读书，无法确认关闭官方翻译；本页译文已隐藏。"
+            return
+        }
+
+        do {
+            let ack = try await WereadService.shared.setTranslation(
+                bookId: target.book.id,
+                enabled: false,
+                cookie: cookie
+            )
+            switch ack {
+            case .accepted:
+                // 只有官方明确接受才恢复缓存/预取，并重载回不带译文的正文。
+                translationOn = false
+                translationStatus = "正在恢复原文…"
+                let count = await reloadForTranslation()
+                guard !Task.isCancelled else {
+                    translationStatus = nil
+                    return
+                }
+                translationNodeCount = count
+            case .uncertain(let message):
+                translationMessage = message
+                    + "\n译文已隐藏，翻译期间仍不缓存章节；可再试一次或到网页版关闭。"
+            case .rejected(let message):
+                translationMessage = message
+                    + "\n译文已隐藏，但官方可能仍在开启翻译。"
+            }
+        } catch is CancellationError {
+            translationStatus = nil
+            return
+        } catch {
+            guard !Task.isCancelled else {
+                translationStatus = nil
+                return
+            }
+            translationMessage = "关闭翻译失败：\(error.localizedDescription)"
+                + "\n译文已隐藏，但官方可能仍在开启翻译。"
+        }
+        translationStatus = nil
+    }
+
+    @MainActor
+    private func showTranslation() {
+        guard translationNodeCount > 0 else {
+            translationMessage = translationNodeCount < 0
+                ? "还没收到本页译文状态，请稍后再试。"
+                : "当前章节没有官方译文节点。请先开启自动翻译，或换一本支持翻译的外语书。"
+            return
+        }
+        translationVisible = true
+    }
+
+    /// 重载当前章并等 WebView 回报译文节点数。翻译期间
+    /// `rememberInCache` 会拒绝写入，双倍 HTML 不会留在内存缓存里。
+    @MainActor
+    private func reloadForTranslation() async -> Int {
+        guard let chapter = current else { return 0 }
+        let offset = scrollOffset
+        let fraction = scrollFraction
+        // 重载同一章也会走 loadChapter 的 stopReadingTimer/清 anchor；
+        // 先把这段前台时长并进 pending，避免白丢最多 30 秒。
+        _ = peekReadingSeconds()
+        cache[chapter.uid] = nil
+        cacheOrder.removeAll { $0 == chapter.uid }
+        translationNodeCount = -1
+        restoreOffset = offset
+        restoreFraction = fraction
+        loadToken += 1
+        await loadChapter(at: index, token: loadToken)
+        return await waitForTranslationCount()
+    }
+
+    @MainActor
+    private func waitForTranslationCount() async -> Int {
+        for _ in 0..<50 {
+            if Task.isCancelled { break }
+            if translationNodeCount >= 0 { return translationNodeCount }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return max(translationNodeCount, 0)
     }
 
     /// 把从锚点到现在的秒数记进 `pendingReadingSeconds`，但不扣减。
@@ -2372,6 +2710,8 @@ private struct WereadChapterWebView: UIViewRepresentable {
     let cookie: String
     /// 正文字号（px）。只改页面 CSS 变量，不缩放 WKWebView。
     let fontSize: CGFloat
+    /// 官方译文默认隐藏，打开时只切 CSS class；译文文本始终留在 DOM 里。
+    let translationVisible: Bool
     let highlights: [WereadHighlight]
     let onHighlight: (WereadHighlight) -> Void
     let onScroll: (Double, Int) -> Void
@@ -2391,6 +2731,8 @@ private struct WereadChapterWebView: UIViewRepresentable {
     /// 滚动请求已经处理（无论成功失败都要回调，否则会一直重试）。
     let onScrollApplied: () -> Void
     let onReady: () -> Void
+    /// 本次页面 `.wr-translation` 节点数；0 表示官方没给译文。
+    let onTranslationCount: (Int) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -2426,6 +2768,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
         context.coordinator.applyNoteReply(noteReply, in: webView)
         context.coordinator.requestScroll(scrollRequest, in: webView)
         context.coordinator.applyFontSize(fontSize, in: webView)
+        context.coordinator.applyTranslation(translationVisible, in: webView)
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
@@ -2442,6 +2785,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
         private var lastHighlights = ""
         private var lastNoteReplyID: Int?
         private var lastFontSize: CGFloat?
+        private var lastTranslationVisible: Bool?
         private var loaded = false
         /// 页面还没 ready 时收到的滚动请求，等 `markReady` 再补执行。
         private var pendingScroll: WereadScrollTarget?
@@ -2457,6 +2801,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
             lastHTML = html
             lastHighlights = ""
             lastFontSize = nil
+            lastTranslationVisible = nil
             loaded = false
             pendingScroll = nil
             scrollRetries = 0
@@ -2647,6 +2992,7 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 // 这时续读位置还没恢复，用 silent 只排版，不锚定也不上报，
                 // 否则会把刚恢复的滚动状态冲成章首。
                 applyFontSize(parent.fontSize, in: webView, silent: true)
+                applyTranslation(parent.translationVisible, in: webView)
                 // 排版完成后再补执行挂起的续读滚动。
                 if let pending = pendingScroll {
                     scrollRetries = 0
@@ -2683,6 +3029,30 @@ private struct WereadChapterWebView: UIViewRepresentable {
                 Self.log.error(
                     "weread apply font size failed: \(String(describing: error), privacy: .public)"
                 )
+            }
+        }
+
+        /// 只切页面的译文显隐 class，并回报节点数；不把译文文本带回 Swift。
+        func applyTranslation(_ visible: Bool, in webView: WKWebView) {
+            guard loaded else { return }
+            guard lastTranslationVisible != visible else { return }
+            lastTranslationVisible = visible
+            let value = visible ? "true" : "false"
+            webView.evaluateJavaScript(
+                "window.__wrSetTranslation(\(value));"
+            ) { result, error in
+                if let error = error {
+                    // 脚本没装好时下次更新还能重试，不能把失败值记成已应用。
+                    self.lastTranslationVisible = nil
+                    Self.log.error(
+                        "weread apply translation failed: \(String(describing: error), privacy: .public)"
+                    )
+                    return
+                }
+                let count = (result as? NSNumber)?.intValue ?? 0
+                DispatchQueue.main.async {
+                    self.parent.onTranslationCount(count)
+                }
             }
         }
 
@@ -2919,6 +3289,14 @@ enum WereadReaderHTML {
             overflow-x: hidden;
             overflow-wrap: break-word;
             word-break: break-word;
+        }
+        /* 官方译文随章节正文返回，节点带 class="wr-translation"。
+           默认隐藏；只有翻译开关打开时才用 CSS 显示，不复制、不落本地。 */
+        #wr-content .wr-translation {
+            display: none !important;
+        }
+        html.wr-translation-on #wr-content .wr-translation {
+            display: block !important;
         }
         #wr-content pre, #wr-content code {
             max-width: 100% !important;
@@ -3715,6 +4093,20 @@ enum WereadReaderHTML {
             ['touchend', 'scrollend', 'pagehide'].forEach(function (name) {
                 window.addEventListener(name, function () { reportScroll(true); }, { passive: true });
             });
+
+            // —— 官方译文显隐 ——
+            // 译文节点由微读正文接口随章节返回（class="wr-translation"）。
+            // 这里只切 CSS class，不抽取、不复制文本；返回节点数给 Swift
+            // 用来判断「官方到底有没有给译文」，0 不能冒充成功。
+            window.__wrSetTranslation = function (visible) {
+                var root = document.documentElement;
+                if (visible) {
+                    root.classList.add('wr-translation-on');
+                } else {
+                    root.classList.remove('wr-translation-on');
+                }
+                return document.querySelectorAll('#wr-content .wr-translation').length;
+            };
 
             window.webkit.messageHandlers.weread.postMessage({ type: 'ready' });
         })();
