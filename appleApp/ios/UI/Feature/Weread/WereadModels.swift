@@ -109,3 +109,66 @@ struct WereadTranslationTrigger: Equatable {
     let translateVersion: Int?
     let tip: String?
 }
+
+/// 微读网页书架里的实际阅读格式。
+///
+/// PDF 书在网页阅读器里由 canvas 绘制，正文没有文本层；只有服务端为同一本
+/// 书提供 `otherType` 双格式时，官方才允许在 PDF 和电子书之间切换。这里
+/// 不推断、不本地转换，只记录接口给出的格式。
+enum WereadBookFormatKind: String, Equatable {
+    case pdf
+    case epub
+    case unknown
+
+    /// 官方 `/web/trans/pdfepub` 的 `transFormat` 取值。
+    var transFormat: String? {
+        switch self {
+        case .pdf, .epub:
+            return rawValue
+        case .unknown:
+            return nil
+        }
+    }
+
+    var opposite: WereadBookFormatKind {
+        switch self {
+        case .pdf:
+            return .epub
+        case .epub:
+            return .pdf
+        case .unknown:
+            return .unknown
+        }
+    }
+}
+
+/// 一本书的官方格式信息。
+///
+/// 判定对齐网页 `actualTreatBookFormatAs`：有 `otherType` 且
+/// `otherType[0].showType` 为真时，当前格式取 `otherType[0].type`；
+/// 否则取 `format`，`type == 11` 兜底为 PDF。
+struct WereadBookFormatInfo: Equatable {
+    let current: WereadBookFormatKind
+    let alternate: WereadBookFormatKind?
+    let hasOtherType: Bool
+
+    var canSwitch: Bool {
+        guard hasOtherType, let alternate else { return false }
+        return current != .unknown && alternate != .unknown && alternate != current
+    }
+
+    /// 切换成功后更新当前格式；反向入口就是原来的格式。
+    func switching(to target: WereadBookFormatKind) -> WereadBookFormatInfo {
+        WereadBookFormatInfo(
+            current: target,
+            alternate: current,
+            hasOtherType: hasOtherType
+        )
+    }
+}
+
+/// `/web/trans/pdfepub` 返回的目标章节与章内偏移。
+struct WereadFormatSwitchResult: Equatable {
+    let chapterUid: Int
+    let chapterOffset: Int
+}

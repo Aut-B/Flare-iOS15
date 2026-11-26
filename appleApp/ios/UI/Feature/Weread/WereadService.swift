@@ -83,6 +83,9 @@ final class WereadService: @unchecked Sendable {
     /// PDF 要在读正文前分流到网页版，不能等 chapter 接口返回空 HTML 再补救。
     private let pdfLock = NSLock()
     private var pdfBookIDs = Set<String>()
+    /// 官方格式信息。`otherType` / `showType` 决定当前到底是 PDF 还是
+    /// 电子书，不能只看 `type == 11`，否则双格式书会被误判。
+    private var bookFormatCache: [String: WereadBookFormatInfo] = [:]
     /// 新增划线必填 `bookVersion`，按书缓存，避免每划一次都多拉一次详情。
     /// 取不到时不缓存，下次划线会重试。
     private let bookVersionLock = NSLock()
@@ -2539,17 +2542,44 @@ final class WereadService: @unchecked Sendable {
     /// `_e()` 就是 `WereadCrypto.calcHash`，和正文接口的 `b`/`c` 同一个函数，
     /// 第三方实现（KOReader 插件、weread-exporter）都按这个公式直接拼，
     /// 不需要去网页书架抄 DOM。以前「自己拼一定 404」的结论是错的。
-    func readerURL(bookId: String, chapterUid: Int? = nil) -> URL? {
+    func readerURL(
+        bookId: String,
+        chapterUid: Int? = nil,
+        jumpType: String? = nil,
+        offset: Int? = nil
+    ) -> URL? {
         guard !bookId.isEmpty else { return nil }
         var path = "/web/reader/" + WereadCrypto.calcHash(bookId)
-        if let chapterUid {
+        // 对齐官方 `readerURL`：`chapterUid` 为 0 时不拼章节段，但仍会
+        // 带上 `jumpType` / `offset`。切换接口回包允许 `chapterUid == 0`，
+        // 这时交给阅读器按默认位置打开，不能在本机改写语义。
+        if let chapterUid, chapterUid > 0 {
             path += "k" + WereadCrypto.calcHash(String(chapterUid))
         }
-        return URL(string: base + path)
+        var components = URLComponents(string: base + path)
+        var query: [URLQueryItem] = []
+        if let jumpType, !jumpType.isEmpty {
+            query.append(URLQueryItem(name: "jumpType", value: jumpType))
+        }
+        if let offset {
+            query.append(URLQueryItem(name: "offset", value: String(offset)))
+        }
+        components?.queryItems = query.isEmpty ? nil : query
+        return components?.url
     }
 
-    func readerURLString(bookId: String, chapterUid: Int? = nil) -> String? {
-        readerURL(bookId: bookId, chapterUid: chapterUid)?.absoluteString
+    func readerURLString(
+        bookId: String,
+        chapterUid: Int? = nil,
+        jumpType: String? = nil,
+        offset: Int? = nil
+    ) -> String? {
+        readerURL(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            jumpType: jumpType,
+            offset: offset
+        )?.absoluteString
     }
 
     /// 这本书是否已在书架数据里标记为 PDF。
@@ -2560,7 +2590,121 @@ final class WereadService: @unchecked Sendable {
         guard !id.isEmpty else { return false }
         pdfLock.lock()
         defer { pdfLock.unlock() }
+        if let format = bookFormatCache[id] {
+            return format.current == .pdf
+        }
         return pdfBookIDs.contains(id)
+    }
+
+    /// 只读已缓存的官方格式信息。
+    ///
+    /// 界面首开时先用它判断要不要等 `/web/book/info`：普通电子书没有
+    /// 切换入口，不该为一个可选功能多阻塞一次网络往返。
+    func bookFormatIfCached(bookId: String) -> WereadBookFormatInfo? {
+        guard !bookId.isEmpty else { return nil }
+        return cachedBookFormat(for: bookId)
+    }
+
+    /// 从书架缓存或 `/web/book/info` 取官方格式信息。
+    ///
+    /// 书架有 `otherType` 时直接命中缓存；没有时补一次详情请求。拿不到
+    /// 就返回 nil，界面按原有 PDF 标记兜底，绝不本地猜测可转换。
+    func bookFormat(bookId: String, cookie: String) async -> WereadBookFormatInfo? {
+        guard !bookId.isEmpty else { return nil }
+        if let cached = cachedBookFormat(for: bookId) { return cached }
+        guard !cookie.isEmpty else { return nil }
+
+        var components = URLComponents(string: "\(base)/web/book/info")
+        components?.queryItems = [URLQueryItem(name: "bookId", value: bookId)]
+        guard let url = components?.url else { return nil }
+
+        var request = URLRequest(url: url)
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        do {
+            let data = try await send(request)
+            let json = try parseObject(data)
+            try checkError(json)
+            let payload = json["data"] as? [String: Any] ?? json
+            guard let info = bookFormatInfo(from: payload) else { return nil }
+            storeBookFormat(info, for: bookId)
+            Self.screenDiag(
+                "book/info book=\(bookId) format=\(info.current.rawValue) " +
+                "other=\(info.hasOtherType)"
+            )
+            return info
+        } catch {
+            Self.screenDiag(
+                "book/info book=\(bookId) 取格式失败: \(error.localizedDescription)"
+            )
+            return nil
+        }
+    }
+
+    /// 官方动态格式切换：`POST /web/trans/pdfepub`。
+    ///
+    /// 只对服务端提供 `otherType` 的书有效；纯 PDF 没有这个入口。成功回包
+    /// 必须带目标 `chapterUid`，否则不能假装切换成功。
+    func switchBookFormat(
+        bookId: String,
+        to target: WereadBookFormatKind,
+        chapterUid: Int,
+        offset: Int,
+        cookie: String
+    ) async throws -> WereadFormatSwitchResult {
+        guard !bookId.isEmpty, !cookie.isEmpty,
+              let transFormat = target.transFormat
+        else {
+            throw WereadError.server("切换参数不完整")
+        }
+        var request = URLRequest(url: URL(string: "\(base)/web/trans/pdfepub")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        let payload: [String: Any] = [
+            "cbid": bookId,
+            "transFormat": transFormat,
+            "uid": chapterUid,
+            "offset": max(offset, 0),
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+        let data = try await send(request)
+        let json = try parseObject(data)
+        try checkError(json)
+        let container = json["data"] as? [String: Any] ?? json
+        try checkError(container)
+        let resultUid =
+            intValue(container["chapterUid"])
+            ?? intValue(container["chapter_uid"])
+            ?? intValue(json["chapterUid"])
+        guard let resultUid, resultUid >= 0 else {
+            throw WereadError.server("官方未返回目标章节，可能这本书没有可切换的电子书版")
+        }
+        let resultOffset =
+            intValue(container["chapterOffset"])
+            ?? intValue(container["chapter_offset"])
+            ?? intValue(container["offset"])
+            ?? intValue(json["chapterOffset"])
+            ?? 0
+
+        if let current = cachedBookFormat(for: bookId) {
+            storeBookFormat(current.switching(to: target), for: bookId)
+        } else {
+            let info = WereadBookFormatInfo(
+                current: target,
+                alternate: target.opposite,
+                hasOtherType: true
+            )
+            storeBookFormat(info, for: bookId)
+        }
+        Self.screenDiag(
+            "trans/pdfepub book=\(bookId) to=\(transFormat) " +
+            "chapter=\(resultUid) offset=\(resultOffset)"
+        )
+        return WereadFormatSwitchResult(
+            chapterUid: resultUid,
+            chapterOffset: max(resultOffset, 0)
+        )
     }
 
     /// 公众号（`MP_WXS_` 开头的 bookId）走另一个阅读器路径。
@@ -2840,10 +2984,107 @@ final class WereadService: @unchecked Sendable {
     }
 
     private func rememberBookFormat(bookId: String, item: [String: Any]) {
+        if let info = bookFormatInfo(from: item) {
+            // 书架条目可能被裁剪过，没有 `otherType` 不代表详情接口也没有。
+            // 已有官方详情缓存时不再用书架数据覆盖，尤其是用户刚切换过
+            // 格式、书架数据仍是旧格式的时候。
+            pdfLock.lock()
+            let hasCached = bookFormatCache[bookId] != nil
+            if !hasCached {
+                if info.current == .pdf {
+                    pdfBookIDs.insert(bookId)
+                } else {
+                    pdfBookIDs.remove(bookId)
+                }
+            }
+            pdfLock.unlock()
+            if info.canSwitch, !hasCached {
+                storeBookFormat(info, for: bookId)
+            }
+            return
+        }
         guard containsPDFMarker(item) else { return }
         pdfLock.lock()
-        pdfBookIDs.insert(bookId)
+        if bookFormatCache[bookId] == nil {
+            pdfBookIDs.insert(bookId)
+        }
         pdfLock.unlock()
+    }
+
+    private func cachedBookFormat(for bookId: String) -> WereadBookFormatInfo? {
+        pdfLock.lock()
+        defer { pdfLock.unlock() }
+        return bookFormatCache[bookId]
+    }
+
+    private func storeBookFormat(_ info: WereadBookFormatInfo, for bookId: String) {
+        pdfLock.lock()
+        bookFormatCache[bookId] = info
+        if info.current == .pdf {
+            pdfBookIDs.insert(bookId)
+        } else {
+            pdfBookIDs.remove(bookId)
+        }
+        pdfLock.unlock()
+    }
+
+    /// 从书架条目或 `/web/book/info` 的 `bookInfo` 解析官方格式。
+    ///
+    /// `otherType` 可能是数组，也见过单个对象的写法；`showType` 为真时
+    /// `otherType[0].type` 就是当前格式，否则它是可切换的另一格式。
+    private func bookFormatInfo(from item: [String: Any]) -> WereadBookFormatInfo? {
+        var info = item
+        for key in ["bookInfo", "bookinfo"] {
+            if let nested = item[key] as? [String: Any] {
+                info = nested
+                break
+            }
+        }
+
+        var otherTypes: [[String: Any]] = []
+        if let list = info["otherType"] as? [[String: Any]] {
+            otherTypes = list
+        } else if let single = info["otherType"] as? [String: Any] {
+            otherTypes = [single]
+        }
+        let first = otherTypes.first
+        let hasOtherType = !otherTypes.isEmpty
+        let otherKind = formatKind(format: first?["type"], type: nil)
+        let showOther = boolValue(first?["showType"]) ?? false
+        // 官方 `actualTreatBookFormatAs`：`showType` 为真时当前格式取
+        // `otherType[0].type`，否则取 `format`；`type == 11` 只作为
+        // `format` 缺失时的 PDF 兜底。
+        let declaredKind = formatKind(format: info["format"], type: info["type"])
+        var current = declaredKind
+        if hasOtherType, showOther, let otherKind {
+            current = otherKind
+        }
+
+        // 当前格式必须能从 `format` / `type` / `showType` 确认。只有
+        // `otherType` 而当前格式不明的书，不能据此猜测它是 PDF 或电子书。
+        guard current != .unknown else { return nil }
+        // 官方切换逻辑只发 `pdf` / `epub`，目标恒为当前格式的反面；
+        // 没有 `otherType` 的书服务端不提供在线切换入口。
+        let alternate: WereadBookFormatKind? = hasOtherType ? current.opposite : nil
+        return WereadBookFormatInfo(
+            current: current,
+            alternate: alternate,
+            hasOtherType: hasOtherType
+        )
+    }
+
+    private func formatKind(format: Any?, type: Any?) -> WereadBookFormatKind {
+        let rawFormat = stringValue(format).lowercased()
+        if rawFormat == "pdf" {
+            return .pdf
+        }
+        if rawFormat == "epub" {
+            return .epub
+        }
+        if intValue(type) == 11 {
+            return .pdf
+        }
+        return .unknown
     }
 
     /// 兼容书架偶尔把书信息包一层 `bookInfo` 的写法。

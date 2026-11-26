@@ -132,6 +132,13 @@ struct WereadNativeReaderView: View {
     /// 当前章节 `.wr-translation` 节点数；-1 表示还没收到本次页面回报。
     @State private var translationNodeCount = -1
     @State private var translationTask: Task<Void, Never>?
+    /// 官方动态格式信息与切换状态。只有服务端提供 `otherType` 的书才会
+    /// 出现入口；纯 PDF 不在本机造文本层。
+    @State private var formatInfo: WereadBookFormatInfo?
+    @State private var formatBusy = false
+    @State private var formatMessage: String?
+    /// 切换格式后官方要求跳转的阅读器地址（带 `jumpType=switchFormat`）。
+    @State private var webURLOverride: String?
     @FocusState private var noteDraftFocused: Bool
 
     /// 正文缓存最多留几章。一章 HTML 通常几十到几百 KB，留 3 章既能覆盖
@@ -397,10 +404,14 @@ struct WereadNativeReaderView: View {
             }
         }
         .overlay(alignment: .top) {
-            if translationBusy {
+            if translationBusy || formatBusy {
                 HStack(spacing: 6) {
                     ProgressView()
-                    Text(translationStatus ?? "正在请求官方翻译…")
+                    Text(
+                        formatBusy
+                            ? "正在切换官方格式…"
+                            : (translationStatus ?? "正在请求官方翻译…")
+                    )
                         .font(.caption2)
                         .lineLimit(2)
                 }
@@ -433,6 +444,13 @@ struct WereadNativeReaderView: View {
                 // GPU transform，不注入 CSS、不重绘文本。
                 WereadPDFCanvasReader(
                     zoomScale: $pdfZoomScale,
+                    canSwitchFormat: formatInfo?.canSwitch == true
+                        && formatInfo?.current == .pdf,
+                    formatBusy: formatBusy,
+                    formatMessage: $formatMessage,
+                    onSwitchFormat: {
+                        Task { await requestFormatSwitch(to: .epub) }
+                    },
                     onClose: { showWeb = false }
                 ) {
                     WereadReaderView(target: webReaderTarget)
@@ -483,11 +501,32 @@ struct WereadNativeReaderView: View {
         } message: {
             Text(translationMessage ?? "")
         }
+        .alert(
+            "切换格式",
+            isPresented: Binding(
+                // PDF 画布自己也会弹同一个 alert，避免两处同时呈现。
+                get: { formatMessage != nil && !isPDF },
+                set: { if !$0 { formatMessage = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(formatMessage ?? "")
+        }
     }
 
     /// PDF 直接给官方 `/web/reader/<hash>`，不再先落到网页书架自动点书。
     /// 非 PDF 保持原来的书架兜底，避免改掉已有的阅读器地址处理逻辑。
     private var webReaderTarget: WereadReaderTarget {
+        if let webURLOverride, !webURLOverride.isEmpty {
+            return WereadReaderTarget(
+                url: webURLOverride,
+                title: target.book.title,
+                bookId: target.book.id,
+                needsJump: false,
+                isPDF: isPDF
+            )
+        }
         if isPDF,
            let url = WereadService.shared.readerURLString(bookId: target.book.id)
         {
@@ -692,6 +731,17 @@ struct WereadNativeReaderView: View {
                         showWeb = true
                     } label: {
                         Label("网页版阅读器", systemImage: "safari")
+                    }
+                    if let info = formatInfo,
+                       info.canSwitch,
+                       info.current == .epub
+                    {
+                        Button {
+                            Task { await requestFormatSwitch(to: .pdf) }
+                        } label: {
+                            Label("切换为 PDF", systemImage: "doc.richtext")
+                        }
+                        .disabled(formatBusy)
                     }
                     Button {
                         showNotes = true
@@ -1537,11 +1587,124 @@ struct WereadNativeReaderView: View {
 
     // MARK: - 加载
 
+    /// 通过官方 `/web/trans/pdfepub` 在 PDF / 电子书之间切换。
+    ///
+    /// 入口只在 `formatInfo.canSwitch` 时出现；纯 PDF 没有 `otherType`，
+    /// 不显示按钮，也不在本机 OCR 或伪造文本层。PDF 转电子书可能还受
+    /// 会员/付费权益限制，失败时按官方错误如实提示。
     @MainActor
-    private func load(force: Bool = false) async {
+    private func requestFormatSwitch(to newFormat: WereadBookFormatKind) async {
+        guard let info = formatInfo else {
+            formatMessage = "还没拿到官方格式信息，暂时无法切换。请稍后重试。"
+            return
+        }
+        guard info.canSwitch, info.current != newFormat else {
+            formatMessage = "官方没有提供可切换的另一种格式。纯 PDF 无法在本机生成文本版。"
+            return
+        }
+        guard !formatBusy else { return }
+        formatBusy = true
+        formatMessage = nil
+        defer { formatBusy = false }
+
+        let bookId = target.book.id
+        var chapterUid = current?.uid ?? 0
+        var offset = max(scrollOffset, 0)
+        if !isPDF, offset <= 0, scrollFraction > 0.001, let chapter = current {
+            offset = Int(Double(max(chapter.wordCount, 1)) * scrollFraction)
+        }
+        // PDF 画布没有原生章节目录，切换位置以官方同步的阅读进度为准。
+        if isPDF || chapterUid <= 0 {
+            if let progress = await store.progress(for: bookId) {
+                chapterUid = progress.chapterUid
+                offset = progress.chapterOffset
+            }
+        }
+        // 官方只要求回包的 `chapterUid >= 0`，请求侧没有进度时也照样
+        // 发 `uid = 0`，由服务端决定切到哪一章；不要在本机提前判死。
+
+        do {
+            let service = WereadService.shared
+            let result = try await service.switchBookFormat(
+                bookId: bookId,
+                to: newFormat,
+                chapterUid: chapterUid,
+                offset: offset,
+                cookie: store.cookie
+            )
+            formatInfo = info.switching(to: newFormat)
+            if newFormat == .pdf {
+                webURLOverride = service.readerURLString(
+                    bookId: bookId,
+                    chapterUid: result.chapterUid,
+                    jumpType: "switchFormat",
+                    offset: result.chapterOffset
+                )
+                pdfZoomScale = 1
+                isPDF = true
+                showWeb = true
+            } else {
+                webURLOverride = nil
+                showWeb = false
+                isPDF = false
+                pdfZoomScale = 1
+                await load(force: true, restore: result)
+            }
+        } catch {
+            formatMessage =
+                "切换失败：\(error.localizedDescription)\n" +
+                "只有官方已提供另一种格式且有阅读权益的书才能切换；" +
+                "纯 PDF 不会在本机生成文本层。"
+        }
+    }
+
+    /// 普通电子书首开不等格式详情，后台补一次；拿到双格式信息后才
+    /// 显示 EPUB → PDF 入口。
+    @MainActor
+    private func refreshFormatInfo(bookId: String) async {
+        let fetched = await WereadService.shared.bookFormat(
+            bookId: bookId,
+            cookie: store.cookie
+        )
+        guard let fetched, formatInfo == nil else { return }
+        formatInfo = fetched
+        // 书架没标记、但详情确认是 PDF 的书：后台拿到结果后转 PDF 画布，
+        // 不能让正文接口返回空 HTML 后停在白屏。
+        if fetched.current == .pdf, !isPDF {
+            loadToken += 1
+            notesToken += 1
+            loading = false
+            errorMessage = nil
+            isPDF = true
+            showWeb = true
+        }
+    }
+
+    @MainActor
+    private func load(
+        force: Bool = false,
+        restore: WereadFormatSwitchResult? = nil
+    ) async {
         if !force, !chapters.isEmpty { return }
         let service = WereadService.shared
-        if service.isPDFBook(id: target.book.id) {
+        let bookId = target.book.id
+        // 只有已标记为 PDF 的书才在首开阻塞等 `/web/book/info`。普通
+        // 电子书的首开不能被一个可选入口拖慢一次网络往返。
+        let pdfMarker = service.isPDFBook(id: bookId)
+        var format = service.bookFormatIfCached(bookId: bookId)
+        if pdfMarker || format?.current == .pdf {
+            format = await service.bookFormat(
+                bookId: bookId,
+                cookie: store.cookie
+            ) ?? format
+        } else if format == nil {
+            Task { await refreshFormatInfo(bookId: bookId) }
+        }
+        formatInfo = format
+        let isPDFNow =
+            format?.current == .pdf
+            || (format?.current != .epub && pdfMarker)
+        if isPDFNow {
             loadToken += 1
             notesToken += 1
             chapters = []
@@ -1600,7 +1763,13 @@ struct WereadNativeReaderView: View {
             // 由 JS 按正文文本长度定位，比例只做兜底（见 restoreOffset）。
             var resumeOffset = 0
             var resumeFraction: Double = 0
-            if let progress = await progressTask {
+            let progress = await progressTask
+            if let restore, restore.chapterUid >= 0,
+               let position = list.firstIndex(where: { $0.uid == restore.chapterUid })
+            {
+                start = position
+                resumeOffset = restore.chapterOffset
+            } else if let progress {
                 let position = list.firstIndex { $0.uid == progress.chapterUid }
                 if let position {
                     start = position
@@ -4159,15 +4328,27 @@ private enum WereadPDFZoomLimits {
 /// `fontSize` 重排，不经过这里。
 private struct WereadPDFCanvasReader<Content: View>: View {
     @Binding var zoomScale: CGFloat
+    let canSwitchFormat: Bool
+    let formatBusy: Bool
+    @Binding var formatMessage: String?
+    let onSwitchFormat: () -> Void
     let onClose: () -> Void
     private let content: Content
 
     init(
         zoomScale: Binding<CGFloat>,
+        canSwitchFormat: Bool,
+        formatBusy: Bool,
+        formatMessage: Binding<String?>,
+        onSwitchFormat: @escaping () -> Void,
         onClose: @escaping () -> Void,
         @ViewBuilder content: () -> Content
     ) {
         self._zoomScale = zoomScale
+        self.canSwitchFormat = canSwitchFormat
+        self.formatBusy = formatBusy
+        self._formatMessage = formatMessage
+        self.onSwitchFormat = onSwitchFormat
         self.onClose = onClose
         self.content = content()
     }
@@ -4183,6 +4364,27 @@ private struct WereadPDFCanvasReader<Content: View>: View {
             // 这里用同位置的按钮接住它。
             VStack {
                 HStack {
+                    if canSwitchFormat {
+                        Button(action: onSwitchFormat) {
+                            HStack(spacing: 5) {
+                                if formatBusy {
+                                    ProgressView()
+                                        .tint(.white)
+                                        .scaleEffect(0.7)
+                                }
+                                Text(formatBusy ? "正在切换…" : "切换为电子书")
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .frame(height: 32)
+                            .background(Color.black.opacity(0.32))
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(formatBusy)
+                        .accessibilityLabel("切换为电子书")
+                    }
                     Spacer()
                     Button(action: onClose) {
                         Image(systemName: "xmark")
@@ -4206,6 +4408,17 @@ private struct WereadPDFCanvasReader<Content: View>: View {
         }
         .background(Color(.systemBackground))
         .statusBar(hidden: true)
+        .alert(
+            "切换格式",
+            isPresented: Binding(
+                get: { formatMessage != nil },
+                set: { if !$0 { formatMessage = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(formatMessage ?? "")
+        }
     }
 
     private var zoomControls: some View {
