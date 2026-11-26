@@ -60,6 +60,15 @@ nonisolated enum WereadReadReportOutcome: Sendable, Equatable {
     case failed(String)
 }
 
+extension WereadReadReportOutcome {
+    /// `-2010/-2012` 是会话过期，不是时长/参数本身被业务拒绝；
+    /// 只有这一类才允许 Store 续期后重发一次。
+    var isSessionRejection: Bool {
+        guard case .rejected(let reason) = self else { return false }
+        return reason.contains("errCode=-2010") || reason.contains("errCode=-2012")
+    }
+}
+
 /// 微信读书 Web 接口封装。
 ///
 /// 全部走 `weread.qq.com` 的网页接口，登录态就是浏览器那套 cookie
@@ -234,12 +243,20 @@ final class WereadService: @unchecked Sendable {
     ///
     /// **失败一律返回 nil，不抛错**：拿不到信标不该阻断阅读，调用方会退回
     /// Step 1 的老行为（写死 ps/pc、不加 sc）继续试。
-    func readerSession(bookId: String, chapterUid: Int, cookie: String) async -> WereadReaderSession? {
+    func readerSession(
+        bookId: String,
+        chapterUid: Int,
+        cookie: String,
+        forceRefresh: Bool = false
+    ) async -> WereadReaderSession? {
         let cacheKey = "\(bookId)#\(chapterUid)"
-        if let cached = cachedSession(for: cacheKey) { return cached }
+        if !forceRefresh, let cached = cachedSession(for: cacheKey) { return cached }
 
         guard let url = readerURL(bookId: bookId, chapterUid: chapterUid) else { return nil }
         var request = URLRequest(url: url)
+        if forceRefresh {
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+        }
         request.setValue(cookie, forHTTPHeaderField: "Cookie")
         request.setValue(Self.readerUserAgent, forHTTPHeaderField: "User-Agent")
         request.setValue(
@@ -310,6 +327,19 @@ final class WereadService: @unchecked Sendable {
         sessionLock.lock()
         defer { sessionLock.unlock() }
         sessionCache["\(bookId)#\(chapterUid)"] = nil
+    }
+
+    /// 上报会话被服务端判过期后，把本章所有信标缓存一起丢掉。
+    /// 只续 cookie 而继续带旧 `psvts` 会再次吃 `-2012`；重试必须抓一份新页面。
+    func invalidateReadReportSession(bookId: String, chapterUid: Int) {
+        let key = "\(bookId)#\(chapterUid)"
+        invalidateSession(bookId: bookId, chapterUid: chapterUid)
+        readReportSessionLock.lock()
+        readReportSessions[key] = nil
+        readReportSessionLock.unlock()
+        readSessionAttemptLock.lock()
+        readSessionAttempts[key] = nil
+        readSessionAttemptLock.unlock()
     }
 
     // MARK: - 会话续期
@@ -1488,7 +1518,8 @@ final class WereadService: @unchecked Sendable {
         chapterOffset: Int,
         chapterIndex: Int,
         rt: Int = 0,
-        cookie: String
+        cookie: String,
+        refreshSession: Bool = false
     ) async -> WereadReadReportOutcome {
         let seconds = min(max(rt, 0), 60)
         guard seconds > 0 else {
@@ -1523,7 +1554,8 @@ final class WereadService: @unchecked Sendable {
             chapterIndex: chapterIndex,
             rt: seconds,
             token: token,
-            cookie: cookie
+            cookie: cookie,
+            refreshSession: refreshSession
         )
         // 官方在 -806 时先刷新 getConfig 再重试一次。
         if case .rejected(let reason) = outcome, reason.contains("-806") {
@@ -1543,7 +1575,10 @@ final class WereadService: @unchecked Sendable {
                 chapterIndex: chapterIndex,
                 rt: seconds,
                 token: fresh,
-                cookie: cookie
+                cookie: cookie,
+                // -806 只换 token；复用本次已抓到的会话信标，避免节流把
+                // 刚拿到的 ps/pc 丢掉后又退回占位值。
+                refreshSession: false
             )
         }
         return outcome
@@ -1586,12 +1621,14 @@ final class WereadService: @unchecked Sendable {
         chapterIndex: Int,
         rt: Int,
         token: String,
-        cookie: String
+        cookie: String,
+        refreshSession: Bool
     ) async -> WereadReadReportOutcome {
         let sessionEntry = await readSessionForReport(
             bookId: bookId,
             chapterUid: chapterUid,
-            cookie: cookie
+            cookie: cookie,
+            refreshSession: refreshSession
         )
         let now = Date().timeIntervalSince1970
         let ts = Int(now * 1000)
@@ -1773,18 +1810,20 @@ final class WereadService: @unchecked Sendable {
     private func readSessionForReport(
         bookId: String,
         chapterUid: Int,
-        cookie: String
+        cookie: String,
+        refreshSession: Bool = false
     ) async -> (session: WereadReaderSession, stamp: Date)? {
         let key = "\(bookId)#\(chapterUid)"
-        if let cached = cachedReadReportSession(for: key) { return cached }
-        if let cached = cachedSession(for: key) {
+        if !refreshSession, let cached = cachedReadReportSession(for: key) { return cached }
+        if !refreshSession, let cached = cachedSession(for: key) {
             return (cached, storeReadReportSession(cached, for: key))
         }
         guard beginReadSessionAttempt(for: key) else { return nil }
         guard let fetched = await readerSession(
             bookId: bookId,
             chapterUid: chapterUid,
-            cookie: cookie
+            cookie: cookie,
+            forceRefresh: refreshSession
         ) else {
             return nil
         }
