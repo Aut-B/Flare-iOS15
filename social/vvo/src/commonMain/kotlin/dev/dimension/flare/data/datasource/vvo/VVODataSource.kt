@@ -95,6 +95,9 @@ internal fun UiTimelineV2.Post.Visibility.toVvoVisible(): String? =
         else -> error("Unsupported Weibo visibility: $this")
     }
 
+// Ktorfit 的 @Field 只跳过 null，不跳过空串；无附件时必须是 null，否则会真实发出 picId=。
+internal fun List<String>.toVvoPicId(): String? = takeIf { it.isNotEmpty() }?.joinToString(",")
+
 @OptIn(ExperimentalPagingApi::class)
 internal class VVODataSource(
     override val accountKey: MicroBlogKey,
@@ -476,7 +479,7 @@ internal class VVODataSource(
                     progress()
                 }
             }
-        val mediaId = mediaIds.joinToString(",")
+        val mediaId = mediaIds.toVvoPicId()
         val referenceStatus = data.referenceStatus
         val composeStatus = referenceStatus?.composeStatus
         // 微博很多失败是 HTTP 200 + `{"ok":0,"msg":"转发频繁/操作频繁/非法请求"}`。
