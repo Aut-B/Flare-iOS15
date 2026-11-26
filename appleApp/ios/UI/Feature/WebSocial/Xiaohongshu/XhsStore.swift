@@ -40,6 +40,9 @@ final class XhsStore: ObservableObject {
     private var emptyScrolls = 0
     /// 这一轮刷新里有没有拿到过数据（接口和 DOM 都算）。
     private var receivedAnything = false
+    /// 接口层已经生成的首页失败文案（例如 HTTP 461 的 `restrictionMessage`）。
+    /// 网页兜底也拿不到内容时优先显示它，别让通用文案把真实状态盖掉。
+    private var feedFailureMessage: String?
     /// 首页流的翻页游标（`cursor_score`）。有了它翻页就不用靠「滚网页碰运气」。
     private var cursorScore = ""
     /// 每次刷新 +1：晚到的旧请求不许再改列表。
@@ -347,6 +350,7 @@ final class XhsStore: ObservableObject {
             self.isLoadingMore = false
             self.loadMoreFailed = false
             self.errorMessage = nil
+            self.feedFailureMessage = nil
             self.hasMore = true
             self.receivedAnything = false
             // 本轮优先用签名页打接口：先把上一轮的抓取页拆掉，避免
@@ -374,7 +378,10 @@ final class XhsStore: ObservableObject {
             guard self.harvester == nil else { return }
             self.isLoading = false
             if self.notes.isEmpty {
-                self.errorMessage = self.failureMessage()
+                // 拿不到任何内容就别再声称「还有下一页」；文案优先用接口
+                // 已经给出的 461 / 风控原因，通用兜底文案只作为最后选择。
+                self.hasMore = false
+                self.errorMessage = self.feedFailureMessage ?? self.failureMessage()
             }
         }
 
@@ -397,7 +404,8 @@ final class XhsStore: ObservableObject {
             guard token == self.generation, self.isLoading else { return }
             self.isLoading = false
             if self.notes.isEmpty {
-                self.errorMessage = self.failureMessage()
+                self.hasMore = false
+                self.errorMessage = self.feedFailureMessage ?? self.failureMessage()
             }
         }
     }
@@ -470,6 +478,17 @@ final class XhsStore: ObservableObject {
                     // 页脚在「没有更多了」和「加载失败」之间来回跳。
                     return true
                 }
+                // 首屏「成功但 0 条」：build131 的 461 响应就是这个形状。
+                // 先记下真实原因交给网页兜底；兜底也空时原样显示，绝不把
+                // 它当成一次成功的空列表。
+                DispatchQueue.main.async {
+                    self.feedFailureMessage = XhsFeedState.message(
+                        for: .empty,
+                        restriction: self.feedFailureMessage,
+                        detail: nil,
+                        fallback: self.failureMessage()
+                    )
+                }
                 return false
             }
             if let next = page.next, !next.isEmpty { cursorScore = next }
@@ -492,6 +511,15 @@ final class XhsStore: ObservableObject {
                     }
                 }
                 return true
+            }
+            // 401 / 403 / 461 / 签名失败：`XhsService` 已经把能指导下一步的
+            // 文案生成好了。这里必须留住，否则刷新会转进网页兜底并把
+            // `errorMessage` 清空 —— build131 的「错误=无」就是这么来的。
+            let failure = (error as? XhsError)?.message ?? error.localizedDescription
+            DispatchQueue.main.async {
+                if reset, self.notes.isEmpty {
+                    self.feedFailureMessage = failure
+                }
             }
             return false
         }
@@ -581,12 +609,14 @@ final class XhsStore: ObservableObject {
                 errorMessage =
                     "小红书网页会话暂时没通过（登录态已保留）。点「重试」再来一次；持续失败再重新登录"
                 isLoading = false
+                if notes.isEmpty { hasMore = false }
                 return
             }
             if code == 461 {
                 if notes.isEmpty {
                     errorMessage =
                         "小红书首页流要求人机验证（code 461），客户端绕不过。去网页版完成验证后点「重试」；登录态已保留"
+                    hasMore = false
                 }
                 isLoading = false
                 isLoadingMore = false
@@ -596,6 +626,7 @@ final class XhsStore: ObservableObject {
                 if notes.isEmpty {
                     errorMessage =
                         "小红书拒绝了首页流请求（code -1），多半是风控。稍后点「重试」；持续失败就重新登录一次"
+                    hasMore = false
                 }
                 isLoading = false
                 isLoadingMore = false
@@ -605,10 +636,13 @@ final class XhsStore: ObservableObject {
             // DOM / `__INITIAL_STATE__` 兜底经常还有数据。有内容就别拿
             // 「请求失败 code -1」去盖住正常列表。
             if notes.isEmpty {
-                let detail = XhsJSON.string(json["msg"]) ?? ""
-                errorMessage = detail.isEmpty
-                    ? "小红书返回 code \(code)，稍后点「重试」"
-                    : "小红书返回 code \(code)：\(detail)"
+                errorMessage = XhsFeedState.message(
+                    for: .rejected(code: code),
+                    restriction: nil,
+                    detail: XhsJSON.string(json["msg"]),
+                    fallback: failureMessage()
+                )
+                hasMore = false
                 isLoading = false
             }
             return
@@ -621,7 +655,23 @@ final class XhsStore: ObservableObject {
             if let type = XhsJSON.string(item["model_type"]), type != "note" { continue }
             if let note = XhsJSON.note(item, defaultSource: "pc_feed") { batch.append(note) }
         }
-        guard !batch.isEmpty else { return }
+        guard !batch.isEmpty else {
+            // code 0 但 data 为空：build131 的 461 响应体就是这样。以前这里
+            // 直接 return，界面会一直停在「0 条 + hasMore=true」的假成功。
+            // 现在如实收尾；接口层已经拿到的 461 / 风控文案优先显示。
+            if notes.isEmpty {
+                errorMessage = XhsFeedState.message(
+                    for: .empty,
+                    restriction: feedFailureMessage,
+                    detail: nil,
+                    fallback: failureMessage()
+                )
+                hasMore = false
+                isLoading = false
+                isLoadingMore = false
+            }
+            return
+        }
         merge(batch)
     }
 
@@ -1222,6 +1272,11 @@ final class XhsStore: ObservableObject {
                     self.emptyScrolls = 0
                     self.loaded = true
                     self.errorMessage = nil
+                    self.feedFailureMessage = nil
+                    // 兜底可能在「先报错、后从 DOM 拿到内容」之后才成功；
+                    // 有内容就恢复翻页能力，别让前面那次失败把 hasMore
+                    // 永久关掉。
+                    if !self.notes.isEmpty { self.hasMore = true }
                     self.isLoading = false
                 }
             }

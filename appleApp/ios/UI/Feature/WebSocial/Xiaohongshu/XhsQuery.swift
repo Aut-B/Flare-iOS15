@@ -68,3 +68,49 @@ enum XhsQuery {
         return parts.joined(separator: "&")
     }
 }
+
+/// 首页流一页的判定。
+///
+/// build131 的 461 响应体是 `{"code":0,"success":true,"msg":"成功","data":{}}`：
+/// 只看业务 code 会把「服务端拒绝」误判成「这一页没有内容」，于是界面停在
+/// 0 条、`hasMore` 还留着 true，看起来像一次成功的空列表。这里只做纯判定，
+/// 不发请求、也不改任何请求参数，供 `XhsStore` 和纯逻辑测试共用。
+nonisolated enum XhsFeedState: Equatable {
+    /// 这一页拿到了笔记。
+    case content
+    /// 服务端返回成功，但一条都没有（461 的响应体也会长成这样）。
+    case empty
+    /// 服务端明确拒绝。
+    case rejected(code: Int)
+
+    /// 这一页之后还能不能继续翻页：只有真拿到内容才算「还有」。
+    static func hasMore(after state: XhsFeedState) -> Bool {
+        if case .content = state { return true }
+        return false
+    }
+
+    /// 首屏拿不到内容时给用户的文案。
+    ///
+    /// `restriction` 是接口层已经生成的 461 / 403 / 登录态不完整文案，必须
+    /// 原样保留，不能被网页兜底的通用文案盖掉；`fallback` 只在既没有拒绝
+    /// 原因、也不是「成功但空」时才用。
+    static func message(
+        for state: XhsFeedState,
+        restriction: String?,
+        detail: String?,
+        fallback: String
+    ) -> String {
+        if let restriction, !restriction.isEmpty { return restriction }
+        switch state {
+        case .content:
+            return fallback
+        case .empty:
+            return "小红书接口返回了「成功」但首页是 0 条（服务端没给内容，可能与风控或登录态不完整有关）。点「重试」；持续这样就去网页版完成验证再回来"
+        case .rejected(let code):
+            if let detail, !detail.isEmpty {
+                return "小红书返回 code \(code)：\(detail)"
+            }
+            return "小红书返回 code \(code)，稍后点「重试」"
+        }
+    }
+}
