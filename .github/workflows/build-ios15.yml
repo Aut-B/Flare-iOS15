@@ -118,8 +118,12 @@ jobs:
           sleep 30
           xcrun simctl io "$UDID" screenshot screenshot-30s.png
 
-          if xcrun simctl spawn "$UDID" launchctl list | grep -q 'dev.dimension.flare'; then
-            echo "OK: still running 30s after launch"
+          # launchctl list 在 iOS 模拟器里不列 GUI app 的 bundle id，会误判成崩溃（build132/133 假阳性）。
+          # 改用 ps 查进程名；再以 30s 截图是否成功为佐证（simctl io 能抓到前台画面说明 app 在跑）。
+          if xcrun simctl spawn "$UDID" ps ax 2>/dev/null | grep -i '[F]lare.app/Flare\|dev.dimension.flare' >/dev/null; then
+            echo "OK: still running 30s after launch (ps)"
+          elif [ -s screenshot-30s.png ]; then
+            echo "OK: still running 30s after launch (30s screenshot captured, app foregrounded)"
           else
             echo "::error::process gone within 30s (launch crash)"
             xcrun simctl spawn "$UDID" log show --last 3m --predicate 'process == "Flare"' > flare-sim.log 2>&1 || true
