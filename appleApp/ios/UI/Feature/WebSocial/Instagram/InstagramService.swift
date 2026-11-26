@@ -1,6 +1,17 @@
 import Foundation
 import os
 
+/// 服务端要求先在网页里完成一次安全验证（`checkpoint_required`）。
+///
+/// 它不是「登录失效」：本地 cookie 还在，重新走原生登录反而会先清空网页
+/// 会话，把验证要用的那一步删掉。单独成一个类型，`homeFeed` 的 GET 兜底
+/// 也不会再为它多发一次请求。
+struct IGVerificationRequired: LocalizedError {
+    var errorDescription: String? {
+        "Instagram 要求先完成一次安全验证（checkpoint_required）。请点「网页版」完成验证后回来刷新；这不是密码错误，重新登录会清掉当前网页会话。"
+    }
+}
+
 /// Instagram 网页版 v1 接口。
 ///
 /// 登录态只需要 cookie 加上固定的 `X-IG-App-ID`，没有别的签名 —— 这也是
@@ -364,13 +375,31 @@ final class InstagramService {
             urlRequest.setValue(safeCSRF, forHTTPHeaderField: "X-CSRFToken")
         }
 
-        let (data, response) = try await session.data(for: urlRequest)
+        // `REQ` 以前从不写，真机看到 `REQ 0` 分不清是没发还是发了没回。
+        // 这里只在真正发请求前记一条，不含 cookie 明文。
+        let shortURL = url.split(separator: "?").first.map(String.init) ?? url
+        FlareDiagnostics.shared.record(
+            .instagram, "REQ",
+            "\(method) \(shortURL) · interaction=\(interaction) · cookie=\(cookie.isEmpty ? "空" : "\(cookie.count)字符")"
+        )
+        let result: (Data, URLResponse)
+        do {
+            result = try await session.data(for: urlRequest)
+        } catch {
+            // 网络层直接抛错（断网 / 超时 / TLS / 被系统拦）时以前一条诊断都
+            // 不留，看起来和「根本没发请求」一样。记一条再原样抛出，不改行为。
+            FlareDiagnostics.shared.record(
+                .instagram, "ERR",
+                "\(method) \(shortURL) → 未拿到响应 · \(error.localizedDescription)"
+            )
+            throw error
+        }
+        let (data, response) = result
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         let text = String(data: data, encoding: .utf8) ?? ""
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let looksLikeHTML = trimmed.hasPrefix("<")
 
-        let shortURL = url.split(separator: "?").first.map(String.init) ?? url
         let head = String(text.prefix(200)).replacingOccurrences(of: "\n", with: " ")
         FlareDiagnostics.shared.record(
             .instagram,
@@ -391,8 +420,13 @@ final class InstagramService {
         // Instagram 出错时也给 JSON，先把 message 捞出来再判断。
         let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         let message = IGJSON.string(json["message"]) ?? ""
-        if message == "login_required" || message == "checkpoint_required" {
+        // 只有 `login_required` 是真的掉登录；`checkpoint_required` 是要求
+        // 在网页里过验证，本地会话仍在，不能把用户推去「重新登录」。
+        if message == "login_required" {
             throw interaction ? IGError.interactionDenied : IGError.notLoggedIn
+        }
+        if message == "checkpoint_required" {
+            throw IGVerificationRequired()
         }
         // 风控最常见的是 HTTP 200 + `feedback_required`。以前这里当成成功
         // 直接返回，用户看到的就是「点了赞没反应，也不报错」。
@@ -408,8 +442,11 @@ final class InstagramService {
             // 只有真的是登录 / 验证码页才算掉登录；其它 HTML 多半是风控页，
             // 不要把用户踢回登录界面。
             let lower = trimmed.lowercased()
-            if lower.contains("/accounts/login") || lower.contains("loginform") || lower.contains("checkpoint") {
+            if lower.contains("/accounts/login") || lower.contains("loginform") {
                 throw interaction ? IGError.interactionDenied : IGError.notLoggedIn
+            }
+            if lower.contains("checkpoint") {
+                throw IGVerificationRequired()
             }
             throw IGError(
                 message: "Instagram 返回了网页而不是数据（HTTP \(status)），可能被风控拦截，请稍后再试或切换网络",

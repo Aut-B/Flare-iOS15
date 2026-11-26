@@ -1,7 +1,89 @@
+import Foundation
 import SQLite3
 import XCTest
 
 final class InstagramStateIsolatorTests: XCTestCase {
+    // MARK: - 登录态判据
+
+    func testUsableSessionRequiresRealSessionID() {
+        XCTAssertTrue(IGSession.hasUsableSession("csrftoken=abc; sessionid=live-session"))
+        XCTAssertFalse(IGSession.hasUsableSession(""))
+        // 只有 `ds_user_id` / csrf 不算登录：服务端只认 `sessionid`。
+        XCTAssertFalse(IGSession.hasUsableSession("csrftoken=abc; ds_user_id=42"))
+        XCTAssertFalse(IGSession.hasUsableSession("sessionid="))
+        XCTAssertFalse(IGSession.hasUsableSession("sessionid=   "))
+    }
+
+    func testDirtyCookieHeaderKeepsSessionIDAfterCleaning() {
+        let dirty = "sessionid=live-session\nds_user_id=42\r\ncsrftoken=token"
+        let header = IGSession.normalizeCookieHeader(dirty)
+        XCTAssertFalse(header.contains("\n"))
+        XCTAssertFalse(header.contains("\r"))
+        XCTAssertTrue(header.unicodeScalars.allSatisfy { $0.isASCII })
+        XCTAssertEqual(IGSession.value(inHeader: header, named: "sessionid"), "live-session")
+        XCTAssertEqual(IGSession.value(inHeader: header, named: "csrftoken"), "token")
+        XCTAssertTrue(IGSession.hasUsableSession(header))
+    }
+
+    func testSanitizeHeaderDropsControlCharactersButKeepsSession() {
+        let safe = IGSession.sanitizeHeader("sessionid=live\u{7F}session\nfoo=bar")
+        XCTAssertFalse(safe.contains("\n"))
+        XCTAssertFalse(safe.contains("\u{7F}"))
+        XCTAssertTrue(IGSession.hasUsableSession(safe))
+    }
+
+    func testHeaderFromCookiesKeepsOnlyFreshInstagramCookies() throws {
+        let live = try XCTUnwrap(
+            HTTPCookie(properties: [
+                .domain: ".instagram.com",
+                .path: "/",
+                .name: "sessionid",
+                .value: "live-session",
+            ])
+        )
+        let expired = try XCTUnwrap(
+            HTTPCookie(properties: [
+                .domain: ".instagram.com",
+                .path: "/",
+                .name: "stale_sessionid",
+                .value: "stale",
+                .expires: Date(timeIntervalSinceNow: -3600),
+            ])
+        )
+        let foreign = try XCTUnwrap(
+            HTTPCookie(properties: [
+                .domain: ".xiaohongshu.com",
+                .path: "/",
+                .name: "sessionid",
+                .value: "xhs-session",
+            ])
+        )
+
+        let header = IGSession.header(
+            from: [live, expired, foreign],
+            domainSuffix: "instagram.com"
+        )
+        XCTAssertEqual(IGSession.value(inHeader: header, named: "sessionid"), "live-session")
+        XCTAssertNil(IGSession.value(inHeader: header, named: "stale_sessionid"))
+        XCTAssertFalse(header.contains("xhs-session"))
+        XCTAssertTrue(IGSession.hasUsableSession(header))
+    }
+
+    // MARK: - 提示判据
+
+    func testLoginExpiryAndWindControlMessagesStayDistinct() {
+        let expired = IGError.notLoggedIn
+        XCTAssertTrue(expired.needLogin)
+        XCTAssertTrue(expired.message.contains("重新登录"))
+
+        // 首页还能刷时的点赞 / 评论被拒是风控，不能把用户踢回登录页。
+        let denied = IGError.interactionDenied
+        XCTAssertFalse(denied.needLogin)
+        XCTAssertTrue(denied.message.contains("风控"))
+        XCTAssertFalse(denied.message.contains("重新登录"))
+        XCTAssertNotEqual(expired.message, denied.message)
+    }
+
     func testQuarantineDecisionStateMachine() {
         XCTAssertTrue(
             InstagramStateIsolator.shouldQuarantine(epoch: 0, force: false)

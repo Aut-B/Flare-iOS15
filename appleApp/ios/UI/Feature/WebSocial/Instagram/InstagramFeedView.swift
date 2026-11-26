@@ -82,8 +82,9 @@ struct InstagramFeedView: View {
                 cookieDomainSuffix: "instagram.com",
                 clearCookies: true
             ) { cookies in
+                // `adopt` 换了新会话时会自己补一次首屏；这里不再叠加刷新，
+                // 否则登录完成瞬间会排两次 `refresh()`。
                 store.adopt(cookies: cookies)
-                Task { await store.refresh() }
             }
         }
         .sheet(isPresented: $showSearch) {
@@ -144,10 +145,7 @@ struct InstagramFeedView: View {
                         Divider()
                     }
                     if store.feed.isEmpty {
-                        Text("时间线是空的")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 60)
+                        emptyFeedState
                     }
                     loadMoreFooter
                 }
@@ -178,6 +176,38 @@ struct InstagramFeedView: View {
         .background(Color.orange.opacity(0.08))
     }
 
+    /// 0 条必须说清楚是「服务端确实空了」还是「这次压根没拉」。
+    private var emptyFeedState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "tray")
+                .font(.system(size: 24))
+                .foregroundStyle(.tertiary)
+            Text(emptyFeedMessage)
+                .font(.footnote)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 32)
+            if !store.hasLoadedFeed {
+                Button("现在加载") {
+                    Task { await store.refresh() }
+                }
+                .buttonStyle(.bordered)
+                .font(.system(size: 13, weight: .semibold))
+            }
+        }
+        .padding(.top, 60)
+    }
+
+    private var emptyFeedMessage: String {
+        if store.autoRefreshSuppressed {
+            return "安全模式下本次没有自动拉取时间线，所以这里还是空的。点「现在加载」或下拉刷新即可。"
+        }
+        if store.hasLoadedFeed {
+            return "服务端这次返回了 0 条。不是没登录，也不是没发请求。"
+        }
+        return "还没有拉取时间线。"
+    }
+
     private func openProfile(_ userName: String) {
         let target = IGProfileTarget(name: userName)
         guard !target.name.isEmpty else {
@@ -204,7 +234,11 @@ struct InstagramFeedView: View {
 
     private func errorState(_ message: String) -> some View {
         VStack(spacing: 14) {
-            Image(systemName: "exclamationmark.circle")
+            Image(
+                systemName: store.errorNeedsLogin
+                    ? "person.crop.circle.badge.exclamationmark"
+                    : "exclamationmark.circle"
+            )
                 .font(.system(size: 30))
                 .foregroundStyle(.secondary)
             Text(message)
@@ -213,18 +247,30 @@ struct InstagramFeedView: View {
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 32)
             HStack(spacing: 12) {
-                Button("重试") {
-                    Task { await store.refresh() }
+                if store.errorNeedsLogin {
+                    Button("重新登录") {
+                        showLogin = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Button("重试") {
+                        Task { await store.refresh() }
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
-                .buttonStyle(.borderedProminent)
                 Button("用网页版") {
                     showWeb = true
                 }
                 .buttonStyle(.bordered)
             }
-            Text("原生接口被风控拦的时候，网页版还能正常刷。")
+            Text(
+                store.errorNeedsLogin
+                    ? "只有服务端明确返回登录失效才会提示重新登录；风控和网络失败不会清掉当前会话。"
+                    : "风控 / 网络失败不会让你掉登录；需要安全验证时，去网页版完成后回来刷新。"
+            )
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
         }
         .padding(32)
         .frame(maxWidth: .infinity)
@@ -242,6 +288,13 @@ struct InstagramFeedView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
+            if let notice = store.sessionRecoveryNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
             Button {
                 showLogin = true
             } label: {
@@ -251,6 +304,17 @@ struct InstagramFeedView: View {
                     .padding(.vertical, 12)
             }
             .buttonStyle(.borderedProminent)
+            // 网页兜底里已经登好、但原生 Store 还没拿到时，只读系统 cookie
+            // 仓库恢复，不新开 WebView、不发探测请求。
+            Button("使用网页登录态") {
+                store.recoverSessionFromWebKit()
+            }
+            .buttonStyle(.bordered)
+            Text("「网页登录」会先清掉当前网页会话再进登录页；如果本机「网页版」已经登好，点上面一项直接恢复。")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemGroupedBackground))

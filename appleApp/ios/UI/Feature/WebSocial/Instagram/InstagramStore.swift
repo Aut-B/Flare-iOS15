@@ -27,6 +27,17 @@ final class InstagramStore: ObservableObject {
     /// 当前显示值，时间线和详情都从这里读；乐观更新与失败回滚只动这一处。
     @Published private(set) var likeOverrides: [String: IGLikeState] = [:]
     @Published var errorMessage: String?
+    /// 最近一次失败是不是「登录失效」。界面据此把「重新登录」与
+    /// 「风控 / 网络失败」分开：风控不能提示成掉登录，掉登录也不能
+    /// 提示成风控。
+    @Published private(set) var errorNeedsLogin = false
+    /// 时间线是否至少成功拉取过一次。用来区分「还没发请求」与
+    /// 「服务端确实返回 0 条」，两种情况不能共用「时间线是空的」。
+    @Published private(set) var hasLoadedFeed = false
+    /// 自动刷新被安全模式挡掉时置 true。只影响空态文案，不触发任何请求。
+    @Published private(set) var autoRefreshSuppressed = false
+    /// 手动从网页会话恢复时的结果提示（登录页显示）。
+    @Published private(set) var sessionRecoveryNotice: String?
 
     private let defaults = UserDefaults.standard
     private let cookieKey = "instagram.cookie"
@@ -115,7 +126,12 @@ final class InstagramStore: ObservableObject {
     }
 
     func adopt(cookies: [HTTPCookie]) {
-        guard !InstagramStateIsolator.suppressAdoptionThisLaunch else { return }
+        guard !InstagramStateIsolator.suppressAdoptionThisLaunch else {
+            DispatchQueue.main.async {
+                self.sessionRecoveryNotice = "Instagram 登录正处于隔离恢复中，本次登录没有写入，请稍后再试一次。"
+            }
+            return
+        }
         let header = IGSession.header(from: cookies, domainSuffix: "instagram.com")
         guard adopt(cookieHeader: header) else { return }
         // 顺手把 cookie 灌进 URLSession 共享仓库，网页兜底页也能直接用。
@@ -125,16 +141,34 @@ final class InstagramStore: ObservableObject {
     /// 直接吃一段原始 cookie 串（Kotlin 登录成功后通过 `InstagramBridge` 同步过来）。
     @discardableResult
     func adopt(cookieHeader raw: String) -> Bool {
-        guard !InstagramStateIsolator.suppressAdoptionThisLaunch else { return false }
+        guard !InstagramStateIsolator.suppressAdoptionThisLaunch else {
+            DispatchQueue.main.async {
+                self.sessionRecoveryNotice = "Instagram 登录正处于隔离恢复中，本次登录没有写入，请稍后再试一次。"
+            }
+            return false
+        }
         let normalized = IGSession.normalizeCookieHeader(raw)
         // 只留可见 ASCII：cookie 里混进换行 / 中文时，`URLRequest.setValue`
         // 会抛 ObjC 异常直接闪退（Kotlin 也接不住）。
         let header = IGSession.sanitizeHeader(normalized)
-        guard IGSession.hasUsableSession(header) else { return false }
+        guard IGSession.hasUsableSession(header) else {
+            DispatchQueue.main.async {
+                self.sessionRecoveryNotice = "网页登录没有带回有效的 sessionid，请重新登录一次。"
+            }
+            return false
+        }
         // Kotlin 每次取数都会把同一份 cookie 同步过来。内容没变就直接返回，
         // 否则会把用户名清空、反复请求 currentUser，时间线看起来一直在闪。
+        // 走到下面说明确实是「换了会话」；只有这一种情况才补首屏，同内容
+        // 的重复同步上面已经提前返回，不会每次都多发请求。
         if isLoggedIn, cookie == header { return true }
         bumpSessionGeneration()
+        let hasCSRF = IGSession.value(inHeader: header, named: "csrftoken")?.isEmpty == false
+        let hasUserID = IGSession.value(inHeader: header, named: "ds_user_id")?.isEmpty == false
+        FlareDiagnostics.shared.record(
+            .instagram, "STATE",
+            "会话落库 · cookie=\(header.count)字符 · csrf=\(hasCSRF ? "有" : "无") · ds_user_id=\(hasUserID ? "有" : "无")"
+        )
         defaults.set(header, forKey: cookieKey)
         // 有新的有效会话，撤销「已主动退出」标记。
         defaults.set(false, forKey: loggedOutKey)
@@ -146,10 +180,16 @@ final class InstagramStore: ObservableObject {
             self.userName = ""
             self.isLoggedIn = true
             self.errorMessage = nil
+            self.errorNeedsLogin = false
             self.loaded = false
+            self.hasLoadedFeed = false
             self.likeOverrides = [:]
+            self.sessionRecoveryNotice = nil
         }
         refreshUserName()
+        // KMP 登录成功后只把 cookie 同步过来；以前这里不补首屏，
+        // 原生页会一直停在「已登录但没拉过」的状态，直到用户手动刷新。
+        refreshAfterRecovery()
         return true
     }
 
@@ -184,6 +224,10 @@ final class InstagramStore: ObservableObject {
             self.feed = []
             self.nextCursor = nil
             self.loaded = false
+            self.hasLoadedFeed = false
+            self.errorNeedsLogin = false
+            self.autoRefreshSuppressed = false
+            self.sessionRecoveryNotice = nil
             self.likeOverrides = [:]
         }
     }
@@ -214,29 +258,78 @@ final class InstagramStore: ObservableObject {
         guard !defaults.bool(forKey: loggedOutKey) else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.isLoggedIn else { return }
-            guard !self.defaults.bool(forKey: self.loggedOutKey),
-                !InstagramStateIsolator.suppressAdoptionThisLaunch
-            else { return }
-            // 等主队列的这一拍里 Bridge 可能已经同步了 cookie；别再用
-            // 启动时的旧结论去 WK 里捞，更不能用旧快照覆盖新会话。
-            if self.hasStoredSession {
-                self.useStoredSession()
-                return
-            }
-            let generation = self.sessionGenerationToken()
-            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+            self.performWebKitSessionRecovery(manual: false)
+        }
+    }
+
+    /// 手动「用网页版登录态恢复」：网页兜底里已经登录成功，但原生 Store
+    /// 还不知道。只读 `WKWebsiteDataStore.default()` 里的真实 cookie，
+    /// 不创建 WebView、不伪造登录态、也不额外发探测请求。
+    func recoverSessionFromWebKit() {
+        performWebKitSessionRecovery(manual: true)
+    }
+
+    private func performWebKitSessionRecovery(manual: Bool) {
+        if manual {
+            DispatchQueue.main.async { self.sessionRecoveryNotice = nil }
+        }
+        guard !defaults.bool(forKey: loggedOutKey) else {
+            if manual {
                 DispatchQueue.main.async {
-                    guard !self.defaults.bool(forKey: self.loggedOutKey) else { return }
-                    guard !InstagramStateIsolator.suppressAdoptionThisLaunch else { return }
-                    // 回调期间用户可能已经登录 / Bridge 已经 adopt / 主动退出。
-                    // 旧快照只在登录态没有变化时才允许落盘。
-                    guard generation == self.sessionGenerationToken() else { return }
-                    if self.hasStoredSession {
-                        self.useStoredSession()
-                        return
+                    self.sessionRecoveryNotice = "已经主动退出 Instagram，本次不会从网页仓库恢复"
+                }
+            }
+            return
+        }
+        guard !InstagramStateIsolator.suppressAdoptionThisLaunch else {
+            // 以前这里是静默 return：登录页看起来像「什么都没发生」。
+            // 隔离恢复期间就明确告诉用户，别再让人误以为是 cookie 坏了。
+            DispatchQueue.main.async {
+                self.sessionRecoveryNotice = "Instagram 登录正处于隔离恢复中，本次先不读取网页登录态；稍后再试一次。"
+            }
+            return
+        }
+        // 等主队列的这一拍里 Bridge 可能已经同步了 cookie；别再用
+        // 启动时的旧结论去 WK 里捞，更不能用旧快照覆盖新会话。
+        if hasStoredSession {
+            useStoredSession()
+            return
+        }
+        let generation = sessionGenerationToken()
+        WKWebsiteDataStore.default().httpCookieStore.getAllCookies { [weak self] cookies in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard !self.defaults.bool(forKey: self.loggedOutKey) else { return }
+                guard !InstagramStateIsolator.suppressAdoptionThisLaunch else { return }
+                // 回调期间用户可能已经登录 / Bridge 已经 adopt / 主动退出。
+                // 旧快照只在登录态没有变化时才允许落盘。
+                guard generation == self.sessionGenerationToken() else { return }
+                if self.hasStoredSession {
+                    self.useStoredSession()
+                    if manual {
+                        self.sessionRecoveryNotice = nil
                     }
+                    return
+                }
+                let found = IGSession.hasUsableSession(
+                    IGSession.header(from: cookies, domainSuffix: "instagram.com")
+                )
+                // `adopt` 自己会在「换了新 cookie」时补一次首屏刷新；
+                // 这里不再叠加，避免同一拍里排两次刷新。
+                if found {
                     self.adopt(cookies: cookies)
-                    self.refreshAfterRecovery()
+                }
+                FlareDiagnostics.shared.record(
+                    .instagram, "STATE",
+                    "网页会话恢复 · 手动=\(manual ? "是" : "否") · 找到登录态=\(found ? "是" : "否")"
+                )
+                if manual {
+                    if found {
+                        self.sessionRecoveryNotice = nil
+                    } else {
+                        self.sessionRecoveryNotice =
+                            "没有在系统网页仓库里找到 Instagram 登录态。请先打开「网页版」登录，或点「网页登录」重新登录。"
+                    }
                 }
             }
         }
@@ -258,7 +351,9 @@ final class InstagramStore: ObservableObject {
             if !self.isLoggedIn {
                 self.isLoggedIn = true
                 self.errorMessage = nil
+                self.errorNeedsLogin = false
                 self.loaded = false
+                self.hasLoadedFeed = false
                 self.refreshUserName()
             }
             self.refreshAfterRecovery()
@@ -281,12 +376,16 @@ final class InstagramStore: ObservableObject {
             // 之后冷启动再也不会从系统仓库恢复，只能重新扫码。
             // 保留登录态，只提示重试；真正退出由用户主动触发。
             DispatchQueue.main.async {
+                self.errorNeedsLogin = true
                 self.errorMessage = error.message
             }
             return
         }
         let message = error.localizedDescription
-        DispatchQueue.main.async { self.errorMessage = message }
+        DispatchQueue.main.async {
+            self.errorNeedsLogin = false
+            self.errorMessage = message
+        }
     }
 
     // MARK: - 点赞
@@ -358,12 +457,37 @@ final class InstagramStore: ObservableObject {
     // MARK: - 时间线
 
     func refreshIfNeeded() async {
-        guard isLoggedIn, !loaded else { return }
+        guard isLoggedIn else {
+            recordRefreshSkip("未登录")
+            return
+        }
+        guard !loaded else {
+            recordRefreshSkip("已加载")
+            return
+        }
         // 安全模式（上次启动没走完看门狗）下不要一进 App 就自动拉时间线：
         // 少一个开机就发请求、开机就解一大坨 JSON 的崩溃机会。
         // 用户手动点刷新不受影响。
-        guard !LaunchGuard.safeMode else { return }
+        guard !LaunchGuard.safeMode else {
+            recordRefreshSkip("安全模式")
+            DispatchQueue.main.async { self.autoRefreshSuppressed = true }
+            return
+        }
+        guard !refreshing else {
+            recordRefreshSkip("刷新中")
+            return
+        }
+        DispatchQueue.main.async { self.autoRefreshSuppressed = false }
         await refresh()
+    }
+
+    /// 把「为什么没发请求」写进诊断。以前这里静默 return，真机上只能看到
+    /// `feed 0 条`，分不清是没触发还是被门禁挡住。
+    private func recordRefreshSkip(_ reason: String) {
+        FlareDiagnostics.shared.record(
+            .instagram, "STATE",
+            "自动刷新跳过 · 原因=\(reason) · 登录=\(isLoggedIn ? "是" : "否") · loaded=\(loaded ? "是" : "否") · refreshing=\(refreshing ? "是" : "否") · safeMode=\(LaunchGuard.safeMode ? "是" : "否")"
+        )
     }
 
     func refresh() async {
@@ -373,6 +497,8 @@ final class InstagramStore: ObservableObject {
         DispatchQueue.main.async {
             self.isLoading = true
             self.errorMessage = nil
+            self.errorNeedsLogin = false
+            self.autoRefreshSuppressed = false
         }
         defer {
             refreshing = false
@@ -384,6 +510,8 @@ final class InstagramStore: ObservableObject {
                 self.feed = result.items
                 self.nextCursor = result.next
                 self.loaded = true
+                self.hasLoadedFeed = true
+                self.errorNeedsLogin = false
                 self.errorMessage = nil
                 self.lastLoadMoreCursor = nil
                 // 刷新拿到的是服务端权威状态，清掉上一轮的本地覆盖。
