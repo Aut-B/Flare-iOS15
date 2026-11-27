@@ -3749,6 +3749,12 @@ enum WereadReaderHTML {
             overflow-wrap: break-word;
             word-break: break-word;
         }
+        /* 暗色浅字的兜底：正文整棵子树继承前景色（body 的 --wr-fg），
+           避免服务端内联深色字盖掉它。划线 mark.wr-hl 同样是 inherit，
+           前景自动跟随主题、黄底由 --wr-hl-bg 保留，两者都不受影响。 */
+        #wr-content, #wr-content * {
+            color: inherit !important;
+        }
         /* 官方译文随章节正文返回，节点带 class="wr-translation"。
            默认隐藏；只有翻译开关打开时才用 CSS 显示，不复制、不落本地。 */
         #wr-content .wr-translation {
@@ -4068,6 +4074,12 @@ enum WereadReaderHTML {
             // 章节 HTML 会在元素上内联写 user-select:none / touch-callout:none，
             // 且可能带 !important。样式表里的 !important 压不过内联 !important，
             // 所以加载后直接把正文树上的这些内联属性删掉。
+            //
+            // 同时清掉服务端正文元素上写死的内联 color / background-color：
+            // 暗色下这些内联深色字会盖掉 wrap 的 --wr-fg（浅字），变成黑字黑底
+            // 看不见（只有黄底划线那几行能读）。这是独立于 B10「整页空白」的
+            // 另一条渲染路径。划线 mark.wr-hl 的黄底是用户可读的关键，必须保留：
+            // 高亮节点只清 color（让它继承），绝不清它的 background-color。
             function stripSelectionLocks(root) {
                 if (!root) return;
                 var nodes = [root];
@@ -4083,6 +4095,21 @@ enum WereadReaderHTML {
                         el.style.removeProperty('-webkit-user-select');
                         el.style.removeProperty('user-select');
                         el.style.removeProperty('-webkit-touch-callout');
+                        // 划线节点保留黄底，只让前景继承主题色。要同时认两类：
+                        // ① App 注入的 <mark class="wr-hl" data-note>；
+                        // ② 服务端自带的 class=wr_highlight*/reader_note/reader_review
+                        //    （和 annotationKind 的识别口径一致），别把它们的黄底清掉。
+                        var cls = String(el.getAttribute('class') || '');
+                        var isHighlight =
+                            (el.tagName === 'MARK' && el.classList.contains('wr-hl'))
+                            || /(^|\s)(wr_highlight\w*|reader_note|reader_review)(\s|$)/i.test(cls)
+                            || el.getAttribute('data-note') !== null
+                            || el.getAttribute('data-note-id') !== null;
+                        el.style.removeProperty('color');
+                        if (!isHighlight) {
+                            el.style.removeProperty('background-color');
+                            el.style.removeProperty('background');
+                        }
                     } catch (e) {}
                 }
             }
