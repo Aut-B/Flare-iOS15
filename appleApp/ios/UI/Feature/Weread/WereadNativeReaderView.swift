@@ -1682,8 +1682,17 @@ struct WereadNativeReaderView: View {
                 await load(force: true, restore: result)
             }
         } catch {
+            // 官方 /web/trans/pdfepub 对不支持在线切换的书直接回 404。这是
+            // "官方没给这本提供可切换格式"的正常结果，不是 App 故障：别把原始
+            // HTTP 404 甩给用户，按官方能力给一句干净提示。
+            let detail: String
+            if case WereadError.http(let code) = error, code == 404 {
+                detail = "这本书官方暂不支持在线切换"
+            } else {
+                detail = error.localizedDescription
+            }
             formatMessage =
-                "切换失败：\(error.localizedDescription)\n" +
+                "切换失败：\(detail)\n" +
                 "只有官方已提供另一种格式且有阅读权益的书才能切换；" +
                 "纯 PDF 不会在本机生成文本层。"
         }

@@ -2865,7 +2865,16 @@ final class WereadService: @unchecked Sendable {
     /// 首开时要用 `WereadStore.recoverSessionOnEntry` 等恢复完成再调。
     func bookFormat(bookId: String, cookie: String) async -> WereadBookFormatInfo? {
         guard !bookId.isEmpty else { return nil }
-        if let cached = cachedBookFormat(for: bookId) { return cached }
+        if let cached = cachedBookFormat(for: bookId) {
+            // 诊断：缓存命中也记一条格式判定依据，便于坐实书是 PDF 还是 EPUB。
+            Self.screenDiag(
+                "book/info book=\(bookId) 格式来自缓存 " +
+                "current=\(cached.current.rawValue) " +
+                "alternate=\(cached.alternate?.rawValue ?? "nil") " +
+                "other=\(cached.hasOtherType)"
+            )
+            return cached
+        }
         guard !cookie.isEmpty else { return nil }
 
         var components = URLComponents(string: "\(base)/web/book/info")
@@ -2881,9 +2890,25 @@ final class WereadService: @unchecked Sendable {
             let payload = json["data"] as? [String: Any] ?? json
             guard let info = bookFormatInfo(from: payload) else { return nil }
             storeBookFormat(info, for: bookId)
+            // 诊断：把服务端原始 format / type / otherType 原文记下来，
+            // 用来坐实这本书到底是 PDF 还是 EPUB（不再靠 UI 表象猜）。
+            let rawFormat = stringValue(payload["format"])
+            let rawType = stringValue(payload["type"])
+            let rawOtherType: String
+            if let list = payload["otherType"] as? [[String: Any]] {
+                rawOtherType = list.map { item in
+                    "{\(stringValue(item["type"])):\(stringValue(item["showType"]))}"
+                }.joined(separator: ",")
+            } else if let single = payload["otherType"] as? [String: Any] {
+                rawOtherType = "{\(stringValue(single["type"])):\(stringValue(single["showType"]))}"
+            } else {
+                rawOtherType = stringValue(payload["otherType"])
+            }
             Self.screenDiag(
-                "book/info book=\(bookId) format=\(info.current.rawValue) " +
-                "other=\(info.hasOtherType)"
+                "book/info book=\(bookId) 原文 format=\(rawFormat.isEmpty ? "nil" : rawFormat) " +
+                "type=\(rawType.isEmpty ? "nil" : rawType) " +
+                "otherType=\(rawOtherType.isEmpty ? "nil" : rawOtherType) " +
+                "判定=\(info.current.rawValue)/other=\(info.hasOtherType)"
             )
             return info
         } catch {
