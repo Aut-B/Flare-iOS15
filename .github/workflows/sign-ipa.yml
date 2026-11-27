@@ -1,0 +1,55 @@
+name: Sign Flare IPA with ldid (sideload fallback)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Build run id whose IPA artifact should be pseudo-signed'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sign:
+    runs-on: macos-26
+    steps:
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Download source artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.run_id }}" --repo "${{ github.repository }}" -D artifacts
+          find artifacts -maxdepth 3 -type f -name '*.ipa' -print
+
+      - name: Pseudo-sign every Mach-O and repack
+        run: |
+          set -euo pipefail
+          IPA=$(find artifacts -type f -name '*.ipa' | head -n 1)
+          test -n "$IPA"
+          rm -rf work signed.ipa
+          mkdir -p work
+          cd work
+          unzip -q "$IPA"
+          while IFS= read -r -d '' f; do
+            if file "$f" | grep -q 'Mach-O'; then
+              echo "ldid -S $f"
+              ldid -S "$f"
+            fi
+          done < <(find Payload -type f -print0)
+          plutil -extract CFBundleVersion raw -o - Payload/Flare.app/Info.plist
+          zip -q -r -y -X ../signed.ipa Payload
+          cd ..
+          ls -l signed.ipa
+
+      - name: Upload signed IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Flare-iOS15-signed-ipa
+          path: signed.ipa
+          if-no-files-found: error
