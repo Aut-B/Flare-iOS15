@@ -4340,7 +4340,7 @@ enum WereadReaderHTML {
                         var cls = String(el.getAttribute('class') || '');
                         var isHighlight =
                             (el.tagName === 'MARK' && el.classList.contains('wr-hl'))
-                            || /(^|\s)(wr_highlight\w*|reader_note|reader_review)(\s|$)/i.test(cls)
+                            || /(^|\\s)(wr_highlight\\w*|reader_note|reader_review)(\\s|$)/i.test(cls)
                             || el.getAttribute('data-note') !== null
                             || el.getAttribute('data-note-id') !== null;
                         el.style.removeProperty('color');
