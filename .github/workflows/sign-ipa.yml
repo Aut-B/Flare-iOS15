@@ -32,6 +32,7 @@ jobs:
           set -euo pipefail
           IPA=$(find artifacts -type f -name '*.ipa' | head -n 1)
           test -n "$IPA"
+          IPA=$(cd "$(dirname "$IPA")" && pwd)/$(basename "$IPA")
           rm -rf work signed.ipa
           mkdir -p work
           cd work
