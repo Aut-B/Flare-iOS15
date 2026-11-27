@@ -76,6 +76,8 @@ struct WereadNativeReaderView: View {
     @State private var notesLoading = false
     @State private var notesError: String?
     @State private var showNotes = false
+    /// 笔记面板里的搜索词。纯本地过滤 cloudNoteEntries，不碰云端请求。
+    @State private var noteSearchText = ""
     @State private var scrollFraction: Double = 0
     /// 当前滚动位置对应的章内字符偏移（和微读 `chapterOffset` 同一口径）。
     /// 比比例更耐排版变化，上报和续读都用它。
@@ -472,6 +474,7 @@ struct WereadNativeReaderView: View {
             chapterList
         }
         .sheet(isPresented: $showNotes, onDismiss: {
+            noteSearchText = ""
             // 笔记面板里的条目在面板上层拿不到主视图的编辑浮层，先收面板再编辑；
             // 同时跳到该笔记在书里的位置，并记住原位置供返回。
             guard let entry = pendingEdit else { return }
@@ -1125,6 +1128,18 @@ struct WereadNativeReaderView: View {
         }
     }
 
+    /// 笔记面板搜索结果：本地按划线原文、想法内容、章节标题过滤，
+    /// 不新增任何云端请求，6S 上只在内存里过滤已加载的笔记。
+    private var filteredCloudNoteEntries: [WereadCloudNote] {
+        let query = noteSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return cloudNoteEntries }
+        return cloudNoteEntries.filter { item in
+            item.text.localizedCaseInsensitiveContains(query)
+                || item.note.localizedCaseInsensitiveContains(query)
+                || item.chapterTitle.localizedCaseInsensitiveContains(query)
+        }
+    }
+
     private var notesSheet: some View {
         NavigationView {
             Group {
@@ -1170,7 +1185,22 @@ struct WereadNativeReaderView: View {
                 } else {
                     List {
                         Section {
-                            ForEach(cloudNoteEntries) { item in
+                            if filteredCloudNoteEntries.isEmpty {
+                                VStack(spacing: 8) {
+                                    Image(systemName: "magnifyingglass")
+                                        .font(.system(size: 26))
+                                        .foregroundStyle(.secondary)
+                                    Text("没有匹配的笔记")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                    Text("试试划线原文、想法里的词，或章节名")
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 20)
+                            }
+                            ForEach(filteredCloudNoteEntries) { item in
                                 Button {
                                     // 面板还开着时主视图的编辑浮层会被盖住，先收起面板。
                                     guard deletingNoteID == nil else { return }
@@ -1198,8 +1228,9 @@ struct WereadNativeReaderView: View {
                         } footer: {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(
-                                    "全书 \(cloudNoteEntries.count) 条，来自微信读书云端。" +
-                                        "点一条编辑或补想法，左滑 / 长按删除。"
+                                    noteSearchText.isEmpty
+                                        ? "全书 \(cloudNoteEntries.count) 条，来自微信读书云端。点一条编辑或补想法，左滑 / 长按删除。"
+                                        : "找到 \(filteredCloudNoteEntries.count) / \(cloudNoteEntries.count) 条。点一条编辑或补想法。"
                                 )
                                 if !ownReviewsLoaded, !store.cookie.isEmpty {
                                     Text("想法索引未同步，编辑/删除可能暂不可用；点左上角刷新或稍后重试。")
@@ -1210,6 +1241,7 @@ struct WereadNativeReaderView: View {
                         }
                     }
                     .listStyle(.plain)
+                    .searchable(text: $noteSearchText, prompt: "搜索划线、想法、章节名")
                 }
             }
             .navigationTitle("笔记")
