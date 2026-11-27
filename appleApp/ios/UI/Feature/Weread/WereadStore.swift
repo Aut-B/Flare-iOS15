@@ -27,6 +27,9 @@ final class WereadStore: ObservableObject {
     @Published private(set) var nickname: String
     @Published private(set) var books: [WereadBook] = []
     @Published private(set) var isLoading = false
+    /// 书架加载失败（网络/续期暂时失败），和登录失效的 errorMessage 分开：
+    /// 这个只触发「加载失败 + 重试」，绝不弹「重新登录」，也避免空书架无提示白屏。
+    @Published private(set) var shelfLoadError: String?
     /// 进页自动恢复的状态；视图用它决定是否遮挡书架，避免恢复期间先闪
     /// 一帧「登录微信读书」。
     @Published private(set) var entryRecoveryState: WereadEntryRecoveryState = .idle
@@ -73,6 +76,8 @@ final class WereadStore: ObservableObject {
     private var entryProbeInFlight = false
     private var lastEntryProbeAt: TimeInterval = 0
     private let entryProbeCooldown: TimeInterval = 30
+    /// 失败态 / 书架空时切 tab 自救的短退避：远小于 30s 长冷却，别让冷却把重试吃掉。
+    private let entryRetryBackoff: TimeInterval = 1.5
     /// 同一会话下的书架刷新只跑一份：进页时标签页、书架视图、cookie 补刷
     /// 可能同时调 `refreshShelf`，合并后只打一次 `shelf/sync`。
     private let refreshLock = NSLock()
@@ -724,7 +729,10 @@ final class WereadStore: ObservableObject {
         if !isLoggedIn {
             setEntryRecoveryState(.recovering)
         }
-        DispatchQueue.main.async { self.isLoading = true }
+        DispatchQueue.main.async {
+            self.isLoading = true
+            self.shelfLoadError = nil // 重新加载时先清旧失败态，让 loading 接管
+        }
         // 书架还是空的时候优先抢首屏：只拉第一页把书铺出来，剩余分页等
         // 书架已经可见后再补。已有书单的主动刷新照旧拉全量，且只在完整
         // 列表返回后整体替换，不能用逐页 partial 截断已有书单。
@@ -758,8 +766,12 @@ final class WereadStore: ObservableObject {
             case .transient:
                 // 网络/续期暂时失败不是登录失效：保留 cookie 与登录态，
                 // 更不能写 errorMessage，否则空书架会误显示「重新登录」。
+                // 但书架空时必须给可见的失败+重试态，绝不白屏无提示。
                 DispatchQueue.main.async {
                     self.errorMessage = nil
+                    if self.books.isEmpty {
+                        self.shelfLoadError = "书架暂时加载失败，点「重试书架」再试一次。"
+                    }
                     if !self.isLoggedIn {
                         self.entryRecoveryState = .unreachable
                     }
@@ -767,7 +779,12 @@ final class WereadStore: ObservableObject {
             }
         } catch {
             reportEntryRecoveryUnreachable()
-            DispatchQueue.main.async { self.errorMessage = nil }
+            DispatchQueue.main.async {
+                self.errorMessage = nil
+                if self.books.isEmpty {
+                    self.shelfLoadError = "书架暂时加载失败，点「重试书架」再试一次。"
+                }
+            }
         }
         DispatchQueue.main.async { self.isLoading = false }
         if accepted, needsFastFirstPage, loadedCount > 0 {
@@ -813,27 +830,52 @@ final class WereadStore: ObservableObject {
         return true
     }
 
-    /// 进入微读页时自动恢复登录态。未登录时先探活；30 秒冷却防止在 tab
-    /// 之间来回切时反复打接口。`force` 只给「重试」按钮用，不受冷却限制。
+    /// 进入微读页时自动恢复登录态。未登录时先探活并有限重试，不让用户手切 tab。
+    /// 失败态 / 书架空 / force（切 tab 或点重试）都绕过 30s 长冷却；成功后频繁进出才吃冷却。
     @MainActor
     func recoverSessionOnEntry(force: Bool = false) async {
         guard !defaults.bool(forKey: userLoggedOutKey) else {
-            entryRecoveryState = .needsLogin
+            setEntryRecoveryState(.needsLogin)
             return
         }
         guard !isLoggedIn else { return }
-        guard beginEntryProbe(force: force) else { return }
-        entryRecoveryState = .recovering
+        guard beginEntryProbe(force: force) else {
+            NSLog("[weread-entry] probe skipped (cooldown/inflight) state=%@ books=%d", String(describing: entryRecoveryState), books.count)
+            return
+        }
+        setEntryRecoveryState(.recovering)
         defer { endEntryProbe() }
-        await refreshShelf()
+        // 有限自动重试：首屏失败通常只是 6S 上单次请求慢/超时，不让用户手切 tab 2-3 次。
+        // 最多重试 2 次（共 3 次尝试），短退避；只针对"还没进书架"的场景，成功即停。
+        NSLog("[weread-entry] start recover force=%d state=%@", force ? 1 : 0, String(describing: entryRecoveryState))
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                try? await Task.sleep(nanoseconds: 600_000_000) // 0.6s 短退避，守 6S
+            }
+            await refreshShelf()
+            NSLog("[weread-entry] attempt=%d loggedIn=%d books=%d state=%@", attempt + 1, isLoggedIn ? 1 : 0, books.count, String(describing: entryRecoveryState))
+            if isLoggedIn { break } // 成功进书架就停，不无限打接口
+            // 明确判失效 / 用户主动退出：停，交给书架显示重新登录。
+            if defaults.bool(forKey: userLoggedOutKey) { break }
+            if entryRecoveryState == .needsLogin { break }
+        }
+        // 仍未登录且书架为空：留一个可见的失败态，绝不白屏无提示。
+        if !isLoggedIn, books.isEmpty, entryRecoveryState != .needsLogin {
+            NSLog("[weread-entry] all attempts failed -> unreachable")
+            setEntryRecoveryState(.unreachable)
+        }
     }
 
     private func beginEntryProbe(force: Bool = false) -> Bool {
         sessionLock.lock()
         defer { sessionLock.unlock() }
         let now = Date().timeIntervalSince1970
+        // 失败态 / 书架空 / 明确 force（切 tab 或点重试）一律绕过 30s 冷却，
+        // 改用短退避；只有已成功恢复过、用户频繁进出才吃长冷却省 CPU。
+        let needsRetry = entryRecoveryState != .restored || books.isEmpty
+        let cooldown = needsRetry ? entryRetryBackoff : entryProbeCooldown
         guard !entryProbeInFlight,
-              force || now - lastEntryProbeAt >= entryProbeCooldown
+              force || now - lastEntryProbeAt >= cooldown
         else {
             return false
         }

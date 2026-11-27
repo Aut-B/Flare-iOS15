@@ -98,6 +98,23 @@ struct WereadShelfView: View {
                 ProgressView()
                     .frame(maxWidth: .infinity)
                     .padding(.top, 80)
+            } else if let message = store.shelfLoadError, store.books.isEmpty {
+                // 暂时失败（网络/超时）：保留登录态，只给重试，不弹「重新登录」，
+                // 也绝不白屏 —— 这是用户「第二次进去什么都没有」的那条路径。
+                VStack(spacing: 14) {
+                    Image(systemName: "wifi.exclamationmark")
+                        .font(.system(size: 30))
+                        .foregroundStyle(.secondary)
+                    Text(message)
+                        .font(.footnote)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                    Button("重试书架") {
+                        Task { await store.refreshShelf() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(32)
             } else if let message = store.errorMessage, store.books.isEmpty {
                 VStack(spacing: 14) {
                     Image(systemName: "exclamationmark.circle")
@@ -109,6 +126,20 @@ struct WereadShelfView: View {
                         .foregroundStyle(.secondary)
                     Button("重新登录") { showLogin = true }
                         .buttonStyle(.borderedProminent)
+                }
+                .padding(32)
+            } else if store.books.isEmpty {
+                // 兜底：已登录、书架空、又没有任何状态提示时不许留白屏。
+                // 显示加载态并给重试入口，.task 会尝试拉取，用户也能手动点。
+                VStack(spacing: 14) {
+                    ProgressView()
+                    Text("正在加载书架…")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("重试书架") {
+                        Task { await store.refreshShelf() }
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
                 .padding(32)
             } else {
