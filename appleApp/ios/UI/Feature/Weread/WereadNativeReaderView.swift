@@ -127,6 +127,15 @@ struct WereadNativeReaderView: View {
     @State private var pendingDelete: WereadCloudNote?
     @State private var deletingNoteID: String?
     @State private var deleteError: String?
+    /// 点了正文里的划线：弹「删除划线 / 改想法」。带 id/text/note/range，
+    /// 用 id 对回云端条目，确保删的是用户点的那一条。
+    @State private var tappedHighlight: WereadNoteRequest?
+    /// 从笔记面板点一条时的「返回原位置」栈：先存当前章 + 章内偏移，
+    /// 跳到笔记所在段落后，返回按钮据此恢复，像微信读书一样不丢位置。
+    @State private var noteReturnStack: [WereadReadingPosition] = []
+    /// 轻量书签：会话内记住一个位置（章 + 章内偏移），供「标记/回到」。
+    /// 不落盘、不做多书签列表，避免 6S 上引入本机存储与同步复杂度。
+    @State private var lightBookmark: WereadReadingPosition?
     /// 回传给 JS 的想法内容；`text == nil` 表示取消。
     @State private var noteReply: WereadNoteReply?
     @State private var noteReplyToken = 0
@@ -411,6 +420,32 @@ struct WereadNativeReaderView: View {
                 noteEditor(request)
             }
         }
+        // 点正文里已有划线：弹「删除划线 / 改想法 / 取消」。
+        .confirmationDialog(
+            "这条划线",
+            isPresented: Binding(
+                get: { tappedHighlight != nil },
+                set: { if !$0 { tappedHighlight = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let tapped = tappedHighlight {
+                Button("改想法") {
+                    let entry = tapped
+                    tappedHighlight = nil
+                    editTappedHighlight(entry)
+                }
+                Button("删除划线", role: .destructive) {
+                    let entry = tapped
+                    tappedHighlight = nil
+                    Task { await deleteTappedHighlight(entry) }
+                }
+            }
+            Button("取消", role: .cancel) { tappedHighlight = nil }
+        } message: {
+            Text(tappedHighlight?.text ?? "")
+                .lineLimit(3)
+        }
         .overlay(alignment: .top) {
             if translationBusy || formatBusy {
                 HStack(spacing: 6) {
@@ -437,10 +472,12 @@ struct WereadNativeReaderView: View {
             chapterList
         }
         .sheet(isPresented: $showNotes, onDismiss: {
-            // 笔记面板里的条目在面板上层拿不到主视图的编辑浮层，先收面板再编辑。
+            // 笔记面板里的条目在面板上层拿不到主视图的编辑浮层，先收面板再编辑；
+            // 同时跳到该笔记在书里的位置，并记住原位置供返回。
             guard let entry = pendingEdit else { return }
             pendingEdit = nil
             beginEditing(entry)
+            Task { await jumpToNote(entry) }
         }) {
             notesSheet
                 .task { await loadOwnReviews() }
@@ -631,6 +668,24 @@ struct WereadNativeReaderView: View {
                     await refreshNotes()
                 }
             },
+            onHighlightTap: { id, text, note, range in
+                guard token == self.loadToken else { return }
+                // 用 id / 原文对回云端条目，带上章信息，删除时才知道删哪条。
+                let entry = WereadHighlight(
+                    id: id,
+                    text: text,
+                    note: note,
+                    range: range.isEmpty ? nil : range
+                )
+                tappedHighlight = WereadNoteRequest(
+                    text: text,
+                    entry: entry,
+                    reviewId: nil,
+                    chapterUid: chapterUid,
+                    chapterIdx: current?.index ?? 0,
+                    isEditing: true
+                )
+            },
             onScroll: { value, offset in
                 // 旧页面的 pagehide / 迟到的滚动消息不能覆盖新章节的位置。
                 guard token == self.loadToken else { return }
@@ -744,6 +799,20 @@ struct WereadNativeReaderView: View {
             } else {
                 fontSizeControls
 
+                // 从笔记跳到文段后，给用户一条回原阅读位置的路径（微信读书行为）。
+                if !noteReturnStack.isEmpty {
+                    Button {
+                        Task { await returnFromNote() }
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward.circle")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(width: 36, height: 36)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("返回原阅读位置")
+                }
+
                 Button {
                     showChapters = true
                 } label: {
@@ -781,6 +850,21 @@ struct WereadNativeReaderView: View {
                         showNotes = true
                     } label: {
                         Label("笔记（\(cloudNoteEntries.count)）", systemImage: "text.quote")
+                    }
+                    // 轻量书签：会话内记住/回到一个位置，解决「没书签不知道看到哪」。
+                    Button {
+                        if let uid = current?.uid, uid > 0 {
+                            lightBookmark = WereadReadingPosition(chapterUid: uid, offset: scrollOffset)
+                        }
+                    } label: {
+                        Label("标记当前位置", systemImage: "bookmark")
+                    }
+                    if let bookmark = lightBookmark {
+                        Button {
+                            Task { await jumpToBookmark(bookmark) }
+                        } label: {
+                            Label("回到标记位置", systemImage: "bookmark.fill")
+                        }
                     }
                     Divider()
                     Button {
@@ -1578,6 +1662,43 @@ struct WereadNativeReaderView: View {
         }
     }
 
+    /// 把点中的划线对回笔记面板里的云端条目。
+    /// mark 的 id 是 JS 生成的（`h时间戳`）或服务端 item.id，不足以可靠定位，
+    /// 所以用「章 + 规范化原文」匹配，range 作次要参考。
+    private func cloudNote(for tapped: WereadNoteRequest) -> WereadCloudNote? {
+        let text = normalizedText(tapped.text)
+        let candidates = cloudNoteEntries.filter { $0.chapterUid == tapped.chapterUid }
+        if let exact = candidates.first(where: {
+            normalizedText($0.text) == text && $0.range == (tapped.entry?.range ?? "")
+        }) {
+            return exact
+        }
+        if let byText = candidates.first(where: { normalizedText($0.text) == text }) {
+            return byText
+        }
+        return nil
+    }
+
+    /// 点正文划线 →「改想法」：对回云端条目后复用现有编辑器。
+    private func editTappedHighlight(_ tapped: WereadNoteRequest) {
+        guard let note = cloudNote(for: tapped) else {
+            deleteError = "这条划线还没同步到云端笔记列表，请先下拉刷新笔记再操作"
+            return
+        }
+        beginEditing(note)
+    }
+
+    /// 点正文划线 →「删除划线」：对回云端条目，走已有删除链路（含想法）。
+    @MainActor
+    private func deleteTappedHighlight(_ tapped: WereadNoteRequest) async {
+        guard let note = cloudNote(for: tapped) else {
+            deleteError = "这条划线还没同步到云端笔记列表，请先下拉刷新笔记再操作"
+            return
+        }
+        // 有想法就连划线一起删；纯划线只删 bookmark。
+        await deleteCloudNote(note, removeHighlight: true)
+    }
+
     /// 只清理内存里的划线镜像，不写本机。
     /// 删除想法时只清 note，删除整条时把内存镜像一起移除；真正的删除
     /// 结果以随后 `refreshNotes()` 拉到的云端数据为准。
@@ -2120,6 +2241,79 @@ struct WereadNativeReaderView: View {
         restoreFraction = 0
         loadToken += 1
         await loadChapter(at: position, token: loadToken)
+    }
+
+    /// 从笔记面板点一条：跳到该笔记在书里的位置。
+    ///
+    /// 先把「当前章 + 章内偏移」压进返回栈，切章时不能丢；到目标章后按
+    /// note.range 的起点（章内字符偏移）滚到那段。目标就是当前章时只滚动、
+    /// 不重新加载。
+    @MainActor
+    private func jumpToNote(_ item: WereadCloudNote) async {
+        // 存返回位置：即便当前章还没就绪也用已知 offset，别存 0 之外的值冒充。
+        let fromUid = current?.uid ?? 0
+        if fromUid > 0 {
+            noteReturnStack.append(WereadReadingPosition(chapterUid: fromUid, offset: scrollOffset))
+        }
+        showNotes = false
+        let targetOffset = Self.rangeStart(item.range)
+        guard let targetIndex = chapters.firstIndex(where: { $0.uid == item.chapterUid }) else {
+            // 目录里找不到这章（书换了版本）时不乱跳，提示用户。
+            deleteError = "找不到这条笔记所在的章节，可能书本版本已更新"
+            return
+        }
+        if targetIndex == index {
+            // 同一章：直接滚到文段，不走网络。
+            restoreOffset = targetOffset
+            restoreFraction = 0
+            scrollRequest = WereadScrollTarget(offset: targetOffset, fraction: 0)
+            return
+        }
+        // 跨章：把目标偏移交给 loadChapter 之后的 restoreScrollIfNeeded。
+        restoreOffset = targetOffset
+        restoreFraction = 0
+        loadToken += 1
+        await loadChapter(at: targetIndex, token: loadToken)
+    }
+
+    /// 笔记定位后返回到原来的阅读位置（微信读书行为）。
+    @MainActor
+    private func returnFromNote() async {
+        guard let origin = noteReturnStack.popLast() else { return }
+        guard let targetIndex = chapters.firstIndex(where: { $0.uid == origin.chapterUid }) else {
+            return
+        }
+        restoreOffset = origin.offset
+        restoreFraction = 0
+        if targetIndex == index {
+            scrollRequest = WereadScrollTarget(offset: origin.offset, fraction: 0)
+            return
+        }
+        loadToken += 1
+        await loadChapter(at: targetIndex, token: loadToken)
+    }
+
+    /// 回到轻量书签标记的位置：同章直接滚，跨章带偏移切章恢复。
+    @MainActor
+    private func jumpToBookmark(_ bookmark: WereadReadingPosition) async {
+        guard let targetIndex = chapters.firstIndex(where: { $0.uid == bookmark.chapterUid }) else {
+            return
+        }
+        restoreOffset = bookmark.offset
+        restoreFraction = 0
+        if targetIndex == index {
+            scrollRequest = WereadScrollTarget(offset: bookmark.offset, fraction: 0)
+            return
+        }
+        loadToken += 1
+        await loadChapter(at: targetIndex, token: loadToken)
+    }
+
+    /// `range` 形如 `123-456`，取起点作为章内字符偏移。取不到返回 0（章首）。
+    private static func rangeStart(_ range: String) -> Int {
+        let parts = range.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let first = parts.first else { return 0 }
+        return Int(first) ?? 0
     }
 
     /// 把章节正文里的相对链接对回目录。
@@ -3004,6 +3198,13 @@ private struct WereadScrollTarget: Equatable {
     let fraction: Double
 }
 
+/// 笔记「跳过去看文段」之前的阅读位置，用于返回时恢复。
+/// 章用 chapterUid 定位（翻章不丢），章内位置优先用字符偏移。
+private struct WereadReadingPosition: Equatable {
+    let chapterUid: Int
+    let offset: Int
+}
+
 /// SwiftUI 回传给 JS 的结果；`text == nil` 表示取消。
 private struct WereadNoteReply: Equatable {
     let id: Int
@@ -3136,6 +3337,8 @@ private struct WereadChapterWebView: UIViewRepresentable {
     let translationVisible: Bool
     let highlights: [WereadHighlight]
     let onHighlight: (WereadHighlight) -> Void
+    /// 点正文里已有划线：id/text/note/range，Swift 侧弹「删除/改想法」。
+    let onHighlightTap: (String, String, String, String) -> Void
     let onScroll: (Double, Int) -> Void
     /// 章节内相对链接（epub/azw3 的 partNNNN.html#...）被点击。
     /// 参数是原始 href 和链接文字，由 Swift 侧对回目录再跳章。
@@ -3530,6 +3733,15 @@ private struct WereadChapterWebView: UIViewRepresentable {
                     self.parent.onHighlight(
                         WereadHighlight(id: id, text: text, note: note, range: range)
                     )
+                }
+            case "highlightTap":
+                let id = (body["id"] as? String) ?? ""
+                let text = (body["text"] as? String) ?? ""
+                let note = (body["note"] as? String) ?? ""
+                let range = (body["range"] as? String) ?? ""
+                guard !text.isEmpty else { return }
+                DispatchQueue.main.async {
+                    self.parent.onHighlightTap(id, text, note, range)
                 }
             case "noteRequest":
                 let text = (body["text"] as? String) ?? ""
@@ -4008,6 +4220,32 @@ enum WereadReaderHTML {
             }
 
             document.addEventListener('click', function (event) {
+                // 划线优先：点已有黄底划线要弹操作（删除/改想法），不能再
+                // 被当成「点正文空白」触发全屏，也不能当成链接换章。
+                // App 注入的 mark 带 class=wr-hl；服务端自带的划线是
+                // wr_highlight*/reader_note/reader_review，一并识别。
+                var hlMark = null;
+                try { hlMark = event.target.closest('mark.wr-hl, .wr_highlight_char'); } catch (e) {}
+                if (!hlMark) {
+                    try { hlMark = event.target.closest('[class*="wr_highlight"], [class*="reader_note"], [class*="reader_review"]'); } catch (e) {}
+                }
+                if (hlMark) {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    var sel = '';
+                    try { sel = String(window.getSelection() || '').trim(); } catch (e) {}
+                    // 用户正在重新选文字时不要抢点击；只有空选区才算「点划线」。
+                    if (!sel) {
+                        window.webkit.messageHandlers.weread.postMessage({
+                            type: 'highlightTap',
+                            id: hlMark.id || '',
+                            text: String(hlMark.getAttribute('data-hl-text') || hlMark.textContent || '').trim(),
+                            note: String(hlMark.getAttribute('data-hl-note') || ''),
+                            range: String(hlMark.getAttribute('data-hl-range') || '')
+                        });
+                        return;
+                    }
+                }
                 // 批注优先：蓝条可能同时带 `partNNNN.html` 和批注标记，
                 // 这种情况要进笔记面板，不能当成目录链接去换章。
                 var noteHit = annotationLinkTarget(event.target);
@@ -4206,6 +4444,10 @@ enum WereadReaderHTML {
                     start = end;
                     end = swap;
                 }
+                // 点划线删除/改想法时取回完整数据（新建的这条也要能点）。
+                mark.setAttribute('data-hl-text', text);
+                mark.setAttribute('data-hl-note', note || '');
+                mark.setAttribute('data-hl-range', start + '-' + end);
 
                 try {
                     range.surroundContents(mark);
@@ -4316,6 +4558,10 @@ enum WereadReaderHTML {
                         mark.id = item.id || ('h' + Date.now());
                         mark.setAttribute('data-note', item.note || '');
                         if (item.note) mark.title = item.note;
+                        // 点划线删除/改想法时要能取回这条的完整数据。
+                        mark.setAttribute('data-hl-text', full);
+                        mark.setAttribute('data-hl-note', item.note || '');
+                        mark.setAttribute('data-hl-range', item.range || '');
                         try { range.surroundContents(mark); } catch (error) {}
                         break;
                     }
