@@ -1,6 +1,9 @@
 import SwiftUI
 import WebKit
 import UIKit
+import CoreText
+import ImageIO
+import Photos
 import os
 import FlareAppleCore
 
@@ -140,6 +143,9 @@ struct WereadNativeReaderView: View {
     /// 点了正文里的划线：弹「删除划线 / 改想法」。带 id/text/note/range，
     /// 用 id 对回云端条目，确保删的是用户点的那一条。
     @State private var tappedHighlight: WereadNoteRequest?
+    /// 划线/想法存图：离屏渲染中的标记（防连点）与失败提示。
+    @State private var highlightImagePreparing = false
+    @State private var highlightImageError: String?
     /// 正文里已本地移除、等待云端确认的删除意图。只存定位与云端 ID，
     /// 不存想法正文；成功以随后刷新到的服务端结果为准。
     @State private var pendingHighlightDeletions: [WereadPendingDeletion] = []
@@ -480,6 +486,16 @@ struct WereadNativeReaderView: View {
                     tappedHighlight = nil
                     editTappedHighlight(entry)
                 }
+                Button("存为图片") {
+                    let entry = tapped
+                    tappedHighlight = nil
+                    saveTappedHighlightImage(entry, share: false)
+                }
+                Button("分享图片") {
+                    let entry = tapped
+                    tappedHighlight = nil
+                    saveTappedHighlightImage(entry, share: true)
+                }
                 Button("删除划线", role: .destructive) {
                     let entry = tapped
                     tappedHighlight = nil
@@ -493,6 +509,17 @@ struct WereadNativeReaderView: View {
         }
         .overlay(alignment: .top) {
             VStack(spacing: 6) {
+                if highlightImagePreparing {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                        Text("正在生成划线图片…")
+                    }
+                    .font(.caption2)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(Capsule())
+                }
                 if translationBusy || formatBusy {
                     HStack(spacing: 6) {
                         ProgressView()
@@ -654,6 +681,17 @@ struct WereadNativeReaderView: View {
             Button("好", role: .cancel) {}
         } message: {
             Text(highlightSyncMessage ?? "")
+        }
+        .alert(
+            "存图失败",
+            isPresented: Binding(
+                get: { highlightImageError != nil },
+                set: { if !$0 { highlightImageError = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(highlightImageError ?? "")
         }
     }
 
@@ -1305,6 +1343,24 @@ struct WereadNativeReaderView: View {
                                     }
                                 }
                                 .contextMenu {
+                                    Button {
+                                        saveHighlightAsImage(
+                                            text: item.text,
+                                            note: item.note,
+                                            chapterTitle: item.chapterTitle
+                                        )
+                                    } label: {
+                                        Label("存为图片", systemImage: "photo")
+                                    }
+                                    Button {
+                                        shareHighlightAsImage(
+                                            text: item.text,
+                                            note: item.note,
+                                            chapterTitle: item.chapterTitle
+                                        )
+                                    } label: {
+                                        Label("分享图片", systemImage: "square.and.arrow.up")
+                                    }
                                     Button(role: .destructive) {
                                         pendingDelete = item
                                     } label: {
@@ -1541,6 +1597,107 @@ struct WereadNativeReaderView: View {
         noteDraft = ""
         noteError = nil
         noteDraftFocused = false
+    }
+
+    // MARK: - 存为图片
+
+    /// 点正文划线 →「存为图片 / 分享图片」。
+    ///
+    /// 想法以点击时 JS 带上来的 mark 数据为准；同文异位的另一条划线即使
+    /// 有想法，也不会混进这条纯划线的图里。未带 entry 的调用才回落云端。
+    @MainActor
+    private func saveTappedHighlightImage(_ tapped: WereadNoteRequest, share: Bool) {
+        let cloudNote = cloudNote(for: tapped)
+        let tappedText = tapped.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = tappedText.isEmpty ? (cloudNote?.text ?? "") : tapped.text
+        let note = tapped.entry?.note ?? cloudNote?.note ?? ""
+        let chapterTitle = chapterTitle(forChapterUid: tapped.chapterUid)
+        if share {
+            shareHighlightAsImage(text: text, note: note, chapterTitle: chapterTitle)
+        } else {
+            saveHighlightAsImage(text: text, note: note, chapterTitle: chapterTitle)
+        }
+    }
+
+    @MainActor
+    private func saveHighlightAsImage(text: String, note: String, chapterTitle: String) {
+        Task { @MainActor in
+            guard await Self.requestPhotoAddAuthorization() else {
+                highlightImageError = "没有相册写入权限，请在系统设置中允许写入相册"
+                return
+            }
+            renderHighlightImage(text: text, note: note, chapterTitle: chapterTitle) { image in
+                MediaSaver.shared.saveImage(image)
+            }
+        }
+    }
+
+    /// `MediaSaver.saveImage(_:)` 只写相册、不申请 add-only 权限；首次保存
+    /// 时在这里补一次，避免用户还没保存过多图时第一张划线图直接失败。
+    private static func requestPhotoAddAuthorization() async -> Bool {
+        switch PHPhotoLibrary.authorizationStatus(for: .addOnly) {
+        case .authorized, .limited:
+            return true
+        case .notDetermined:
+            let status = await withCheckedContinuation {
+                (continuation: CheckedContinuation<PHAuthorizationStatus, Never>) in
+                PHPhotoLibrary.requestAuthorization(for: .addOnly) {
+                    continuation.resume(returning: $0)
+                }
+            }
+            return status == .authorized || status == .limited
+        default:
+            return false
+        }
+    }
+
+    @MainActor
+    private func shareHighlightAsImage(text: String, note: String, chapterTitle: String) {
+        renderHighlightImage(text: text, note: note, chapterTitle: chapterTitle) { image in
+            WereadImageSharePresenter.present(image)
+        }
+    }
+
+    /// 图片只在后台画一次；主线程只负责收结果、存相册或弹分享面板。
+    @MainActor
+    private func renderHighlightImage(
+        text: String,
+        note: String,
+        chapterTitle: String,
+        completion: @escaping @MainActor (UIImage) -> Void
+    ) {
+        guard !highlightImagePreparing else { return }
+        let bookTitle = target.book.title
+        let scale = min(UIScreen.main.scale, 3)
+        highlightImagePreparing = true
+        highlightImageError = nil
+        Task {
+            let data = await Task.detached(priority: .userInitiated) {
+                WereadHighlightImageRenderer.pngData(
+                    bookTitle: bookTitle,
+                    chapterTitle: chapterTitle,
+                    text: text,
+                    note: note,
+                    scale: scale
+                )
+            }.value
+            highlightImagePreparing = false
+            guard let data, let image = UIImage(data: data) else {
+                highlightImageError = "生成图片失败，请重试"
+                return
+            }
+            completion(image)
+        }
+    }
+
+    /// 正文划线点击时只带章 uid：当前章优先，其次用云端笔记里的章名。
+    private func chapterTitle(forChapterUid uid: Int) -> String {
+        if let current, current.uid == uid, !current.title.isEmpty {
+            return current.title
+        }
+        return cloudNoteEntries.first {
+            $0.chapterUid == uid && !$0.chapterTitle.isEmpty
+        }?.chapterTitle ?? ""
     }
 
     /// 从笔记面板点一条笔记进入编辑。
@@ -3670,6 +3827,299 @@ private struct PageTurnButtonStyle: ButtonStyle {
 }
 
 // MARK: - 划线 / 想法
+
+/// 直接把系统分享面板挂在当前最上层控制器上。
+///
+/// 不用 SwiftUI `.sheet`：笔记面板本身是一个 sheet，同一个视图同时弹两个
+/// sheet 时第二个会被系统丢掉；这里从 presenter 的 `presentedViewController`
+/// 往下找，从笔记面板上分享也能正常弹出。iOS 15 无 `ShareLink`，仍用
+/// `UIActivityViewController`，不引入额外依赖。
+private enum WereadImageSharePresenter {
+    @MainActor
+    static func present(_ image: UIImage) {
+        Task { @MainActor in
+            // 正文划线是从 confirmationDialog 里点的：动作返回时弹窗还在收，
+            // 直接 present 会挂在正在 dismiss 的 UIAlertController 上被吞掉。
+            // 先等最多 1s；6S 收弹窗慢时不再静默放弃，而是回退到它的
+            // presentingViewController 上弹分享面板。
+            for _ in 0..<20 {
+                guard let current = topViewController() else { return }
+                if !current.isBeingDismissed, !(current is UIAlertController) { break }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            var presenter = topViewController()
+            while let current = presenter, current.isBeingDismissed || current is UIAlertController {
+                presenter = current.presentingViewController
+            }
+            guard let presenter, presenter.view.window != nil else { return }
+            let controller = UIActivityViewController(
+                activityItems: [image],
+                applicationActivities: nil
+            )
+            if let popover = controller.popoverPresentationController {
+                popover.sourceView = presenter.view
+                popover.sourceRect = CGRect(
+                    x: presenter.view.bounds.midX,
+                    y: presenter.view.bounds.midY,
+                    width: 1,
+                    height: 1
+                )
+                popover.permittedArrowDirections = []
+            }
+            presenter.present(controller, animated: true)
+        }
+    }
+
+    @MainActor
+    private static func topViewController() -> UIViewController? {
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        var controller = scene?.windows.first { $0.isKeyWindow }?.rootViewController
+        while let presented = controller?.presentedViewController {
+            controller = presented
+        }
+        return controller
+    }
+}
+
+/// 把一条划线（可选带想法）排成白底卡片。
+///
+/// 版式按用户描述的最小语义复刻：正文 + 底部《书名》出处；有想法时在
+/// 正文下方加「想法」区。微信读书原版分享卡的 logo / 二维码 / 底纹会随
+/// 版本变化，本机没有原版截图可校准，所以不复刻这些装饰。
+/// 判据：纯白底、正文可读、书名出处可见；`note` 为空时图上不出现想法区。
+///
+/// 只用 CoreGraphics / CoreText / ImageIO 的 C API 离屏绘制：`pngData`
+/// 会被 `Task.detached` 直接放到后台线程，工程默认 `MainActor` 隔离下
+/// 在后台闭包里碰 UIKit 渲染类型容易触发隔离 / Sendable 诊断；这些 C
+/// API 没有 actor 隔离，6S 上也不会把排版挪回主线程。
+private nonisolated enum WereadHighlightImageRenderer {
+    /// 一段已排好的文本：framesetter 按宽度换行，height 是实际高度。
+    private typealias TextBlock = (framesetter: CTFramesetter, height: CGFloat)
+
+    nonisolated static func pngData(
+        bookTitle: String,
+        chapterTitle: String,
+        text: String,
+        note: String,
+        scale: CGFloat
+    ) -> Data? {
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let thought = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty || !thought.isEmpty else { return nil }
+
+        let cardWidth: CGFloat = 360
+        let padding: CGFloat = 24
+        let contentWidth = cardWidth - padding * 2
+        let noteIndent: CGFloat = 12
+        let noteWidth = contentWidth - noteIndent
+
+        guard
+            let bodyFont = CTFontCreateUIFontForLanguage(.system, 17, nil),
+            let noteFont = CTFontCreateUIFontForLanguage(.system, 15, nil),
+            let labelFont = CTFontCreateUIFontForLanguage(.system, 11, nil),
+            let footerFont = CTFontCreateUIFontForLanguage(.system, 12, nil)
+        else { return nil }
+
+        let source = footerText(bookTitle: bookTitle, chapterTitle: chapterTitle)
+        let bodyBlock = layout(
+            body,
+            font: bodyFont,
+            color: CGColor(red: 0.13, green: 0.13, blue: 0.13, alpha: 1),
+            lineSpacing: 7,
+            width: contentWidth,
+            maxHeight: 1_200
+        )
+        let labelBlock = thought.isEmpty ? nil : layout(
+            "想法",
+            font: labelFont,
+            color: CGColor(red: 0.55, green: 0.55, blue: 0.55, alpha: 1),
+            lineSpacing: 0,
+            width: noteWidth,
+            maxHeight: 40
+        )
+        let noteBlock = layout(
+            thought,
+            font: noteFont,
+            color: CGColor(red: 0.32, green: 0.32, blue: 0.32, alpha: 1),
+            lineSpacing: 5,
+            width: noteWidth,
+            maxHeight: 600
+        )
+        let footerBlock = layout(
+            source,
+            font: footerFont,
+            color: CGColor(red: 0.52, green: 0.52, blue: 0.52, alpha: 1),
+            lineSpacing: 0,
+            width: contentWidth,
+            maxHeight: 40
+        )
+
+        let bodyHeight = bodyBlock?.height ?? 0
+        let noteLabelHeight = labelBlock?.height ?? 0
+        let noteHeight = noteBlock?.height ?? 0
+        let footerHeight = footerBlock?.height ?? 0
+        let noteGap: CGFloat = thought.isEmpty ? 0 : 22
+        let noteLabelGap: CGFloat = thought.isEmpty ? 0 : 6
+        let sourceGap: CGFloat = source.isEmpty ? 0 : 26
+        let separatorGap: CGFloat = source.isEmpty ? 0 : 12
+        let totalHeight = ceil(
+            padding
+                + bodyHeight
+                + noteGap + noteLabelHeight + noteLabelGap + noteHeight
+                + sourceGap + (source.isEmpty ? 0 : 1) + separatorGap + footerHeight
+                + padding
+        )
+        guard totalHeight > 0 else { return nil }
+
+        let pixelScale = max(1, min(scale, 3))
+        let pixelWidth = Int(ceil(cardWidth * pixelScale))
+        let pixelHeight = Int(ceil(totalHeight * pixelScale))
+        guard
+            pixelWidth > 0,
+            pixelHeight > 0,
+            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+            let context = CGContext(
+                data: nil,
+                width: pixelWidth,
+                height: pixelHeight,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )
+        else { return nil }
+        // CoreGraphics 原点在左下角；下面的 `top` 都按白卡顶部往下记，
+        // 真正落笔时再换算成 bottom-left 的 y。
+        context.scaleBy(x: pixelScale, y: pixelScale)
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: cardWidth, height: totalHeight))
+
+        var top = padding
+        if let bodyBlock {
+            draw(bodyBlock, width: contentWidth, x: padding, top: top, totalHeight: totalHeight, in: context)
+            top += bodyBlock.height
+        }
+        if let noteBlock {
+            top += noteGap
+            let noteX = padding + noteIndent
+            if let labelBlock {
+                let barHeight = labelBlock.height + noteLabelGap + noteHeight
+                context.setFillColor(CGColor(red: 0.82, green: 0.82, blue: 0.82, alpha: 1))
+                context.fill(
+                    CGRect(
+                        x: padding,
+                        y: totalHeight - top - barHeight,
+                        width: 2.5,
+                        height: barHeight
+                    )
+                )
+                draw(labelBlock, width: noteWidth, x: noteX, top: top, totalHeight: totalHeight, in: context)
+                top += labelBlock.height + noteLabelGap
+            }
+            draw(noteBlock, width: noteWidth, x: noteX, top: top, totalHeight: totalHeight, in: context)
+            top += noteHeight
+        }
+        if let footerBlock, !source.isEmpty {
+            top += sourceGap
+            context.setFillColor(CGColor(red: 0.90, green: 0.90, blue: 0.90, alpha: 1))
+            context.fill(CGRect(x: padding, y: totalHeight - top - 1, width: contentWidth, height: 1))
+            top += 1 + separatorGap
+            draw(footerBlock, width: contentWidth, x: padding, top: top, totalHeight: totalHeight, in: context)
+        }
+
+        guard let image = context.makeImage() else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data,
+            "public.png" as CFString,
+            1,
+            nil
+        ) else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
+    }
+
+    /// CoreText 先按宽度排一次拿实际高度；超过上限就按上限截断绘制。
+    private nonisolated static func layout(
+        _ text: String,
+        font: CTFont,
+        color: CGColor,
+        lineSpacing: CGFloat,
+        width: CGFloat,
+        maxHeight: CGFloat
+    ) -> TextBlock? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, width > 0, maxHeight > 0 else { return nil }
+        let attributed = NSAttributedString(
+            string: trimmed,
+            attributes: [
+                NSAttributedString.Key(kCTFontAttributeName as String): font,
+                NSAttributedString.Key(kCTForegroundColorAttributeName as String): color,
+                NSAttributedString.Key(kCTParagraphStyleAttributeName as String): paragraphStyle(
+                    lineSpacing: lineSpacing
+                ),
+            ]
+        )
+        let framesetter = CTFramesetterCreateWithAttributedString(attributed as CFAttributedString)
+        let suggested = CTFramesetterSuggestFrameSizeWithConstraints(
+            framesetter,
+            CFRange(location: 0, length: 0),
+            nil,
+            CGSize(width: width, height: maxHeight),
+            nil
+        )
+        let height = min(ceil(suggested.height), maxHeight)
+        guard height > 0 else { return nil }
+        return (framesetter, height)
+    }
+
+    private nonisolated static func draw(
+        _ block: TextBlock,
+        width: CGFloat,
+        x: CGFloat,
+        top: CGFloat,
+        totalHeight: CGFloat,
+        in context: CGContext
+    ) {
+        let rect = CGRect(
+            x: x,
+            y: totalHeight - top - block.height,
+            width: width,
+            height: block.height
+        )
+        let frame = CTFramesetterCreateFrame(
+            block.framesetter,
+            CFRange(location: 0, length: 0),
+            CGPath(rect: rect, transform: nil),
+            nil
+        )
+        context.saveGState()
+        context.textMatrix = .identity
+        CTFrameDraw(frame, context)
+        context.restoreGState()
+    }
+
+    private nonisolated static func paragraphStyle(lineSpacing: CGFloat) -> CTParagraphStyle {
+        var spacing = max(0, lineSpacing)
+        var setting = CTParagraphStyleSetting(
+            spec: .lineSpacingAdjustment,
+            valueSize: MemoryLayout<CGFloat>.size,
+            value: &spacing
+        )
+        return CTParagraphStyleCreate(&setting, 1)
+    }
+
+    private nonisolated static func footerText(bookTitle: String, chapterTitle: String) -> String {
+        let book = bookTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chapter = chapterTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if book.isEmpty { return chapter }
+        let quoted = "《\(book)》"
+        return chapter.isEmpty ? quoted : "\(quoted) · \(chapter)"
+    }
+}
 
 struct WereadHighlight: Codable, Hashable, Identifiable {
     let id: String
