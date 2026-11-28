@@ -155,6 +155,12 @@ struct WereadNativeReaderView: View {
     /// 正在上传的划线（章 + 本次 session 的条目 id）。上传未落地前，
     /// 待删除意图不能因为一次「暂时没查到」就清掉。
     @State private var inFlightHighlightUploadIDs: Set<String> = []
+    /// 弱网/断网时没能上传成功的笔记。只存定位、原文和想法正文，
+    /// 不进长期笔记库；上传确认后立即从本机和队列里清掉。
+    @State private var pendingUploads: [WereadPendingUpload] = []
+    @State private var pendingUploadFlushInFlight = false
+    @State private var pendingUploadNotice: String?
+    @State private var pendingUploadNoticeToken = 0
     /// 从笔记面板点一条时的「返回原位置」栈：先存当前章 + 章内偏移，
     /// 跳到笔记所在段落后，返回按钮据此恢复，像微信读书一样不丢位置。
     @State private var noteReturnStack: [WereadReadingPosition] = []
@@ -240,6 +246,15 @@ struct WereadNativeReaderView: View {
         return count == 1
             ? "1 条划线删除待同步，联网后自动处理"
             : "\(count) 条划线删除待同步，联网后自动处理"
+    }
+
+    /// 顶栏/笔记面板都显示**全部书**的待上传总数，不只看当前书；
+    /// 实际重试也按 bookId 分组逐本拉新索引，避免书 A 的队列卡在书 B。
+    private var pendingUploadBanner: String {
+        let count = pendingUploads.count
+        return count == 1
+            ? "1 条笔记待同步，联网后自动上传"
+            : "\(count) 条笔记待同步，联网后自动上传"
     }
 
     /// 全书云端笔记 / 划线 / 想法。
@@ -559,12 +574,39 @@ struct WereadNativeReaderView: View {
                     .background(Color(.secondarySystemBackground))
                     .clipShape(Capsule())
                 }
+                if let pendingUploadNotice {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle")
+                        Text(pendingUploadNotice)
+                    }
+                    .font(.caption2)
+                    .lineLimit(2)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(Capsule())
+                } else if !pendingUploads.isEmpty {
+                    HStack(spacing: 6) {
+                        Image(systemName: "icloud.and.arrow.up")
+                        Text(pendingUploadBanner)
+                    }
+                    .font(.caption2)
+                    .lineLimit(2)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(Capsule())
+                }
             }
             .padding(.top, 8)
             .allowsHitTesting(false)
         }
         .statusBar(hidden: true)
-        .task { await load() }
+        .task {
+            pendingUploads = WereadPendingUploadStore.load()
+            await load()
+            await flushPendingUploads()
+        }
         // 待同步删除意图：前台停留时也周期重试。网络恢复后不需要用户
         // 手动下拉刷新，成功清空队列即可让顶部「待同步」提示消失。
         .task(id: pendingHighlightDeletions.count) {
@@ -574,6 +616,18 @@ struct WereadNativeReaderView: View {
                 try? await Task.sleep(nanoseconds: delay)
                 guard !Task.isCancelled, !pendingHighlightDeletions.isEmpty else { return }
                 await refreshNotes()
+                delay = min(delay * 2, 120_000_000_000)
+            }
+        }
+        // 待上传笔记同样在阅读页前台周期重试；一次 flush 会覆盖所有 bookId，
+        // 不只当前这本。失败只保留队列，不弹阻塞输入框的错误。
+        .task(id: pendingUploads.count) {
+            guard !pendingUploads.isEmpty, !store.cookie.isEmpty else { return }
+            var delay: UInt64 = 15_000_000_000
+            while !Task.isCancelled, !pendingUploads.isEmpty {
+                try? await Task.sleep(nanoseconds: delay)
+                guard !Task.isCancelled, !pendingUploads.isEmpty else { return }
+                await flushPendingUploads()
                 delay = min(delay * 2, 120_000_000_000)
             }
         }
@@ -590,7 +644,12 @@ struct WereadNativeReaderView: View {
             Task { await jumpToNote(entry) }
         }) {
             notesSheet
-                .task { await loadOwnReviews() }
+                .task {
+                    await loadOwnReviews()
+                    // 打开笔记面板本身也是「进入微读/刷新笔记」的重试时机，
+                    // flush 会按 bookId 处理全部待传项，不只当前书。
+                    await flushPendingUploads()
+                }
         }
         .fullScreenCover(isPresented: $showWeb) {
             if isPDF {
@@ -628,7 +687,8 @@ struct WereadNativeReaderView: View {
             if phase == .active {
                 // 只算前台时间：回前台重新起锚点，不补后台停留的秒数。
                 startReadingTimer()
-                if !pendingHighlightDeletions.isEmpty {
+                pendingUploads = WereadPendingUploadStore.load()
+                if !pendingHighlightDeletions.isEmpty || !pendingUploads.isEmpty {
                     Task { await refreshNotes() }
                 }
             } else {
@@ -786,13 +846,35 @@ struct WereadNativeReaderView: View {
                     )
                     inFlightHighlightUploadIDs.remove(uploadKey)
                     guard ok else {
-                        highlightSyncMessage =
-                            "划线/想法没有同步到微信读书云端。笔记只存云端，" +
-                            "重启后不会保留这条；请检查登录或网络后重新划线。"
+                        if enqueuePendingUpload(
+                            bookId: bookId,
+                            chapterUid: chapterUid,
+                            chapterIdx: chapterIdx,
+                            range: item.range ?? "",
+                            markText: item.text,
+                            note: item.note,
+                            reviewId: nil
+                        ) {
+                            highlightSyncMessage = nil
+                            showPendingUploadNotice("已暂存，联网后自动上传")
+                        } else {
+                            highlightSyncMessage =
+                                "划线/想法没有同步到微信读书云端。这条内容缺少" +
+                                "可重试的位置信息；请检查登录或网络后重新划线。"
+                        }
                         return
                     }
                     // 上传成功后重新拉云端索引，让笔记面板立刻以服务端为准。
                     guard token == loadToken else { return }
+                    removePendingUploadsMatching(
+                        bookId: bookId,
+                        chapterUid: chapterUid,
+                        reviewId: nil,
+                        text: item.text,
+                        range: item.range ?? "",
+                        note: item.note,
+                        matchAnyNote: true
+                    )
                     await refreshNotes()
                 }
             },
@@ -1265,9 +1347,39 @@ struct WereadNativeReaderView: View {
         }
     }
 
+    /// 笔记面板顶部常驻的待同步入口：加载中、加载失败、空列表都能看到，
+    /// 条数是所有书的总数，重试会先 flush 全部 bookId 再刷新当前书。
+    @ViewBuilder
+    private var pendingUploadsSheetBanner: some View {
+        if !pendingUploads.isEmpty {
+            HStack(spacing: 8) {
+                Image(systemName: "icloud.and.arrow.up")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(pendingUploadBanner)
+                        .font(.caption)
+                    Text("退出阅读器也不会丢；联网后自动重试")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Button("重试") {
+                    Task { await refreshNotes() }
+                }
+                .buttonStyle(.bordered)
+                .disabled(pendingUploadFlushInFlight || store.cookie.isEmpty)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color(.secondarySystemBackground))
+            .overlay(alignment: .bottom) { Divider() }
+        }
+    }
+
     private var notesSheet: some View {
         NavigationView {
-            Group {
+            VStack(spacing: 0) {
+                pendingUploadsSheetBanner
+                Group {
                 if notesLoading, cloudNoteEntries.isEmpty {
                     VStack(spacing: 12) {
                         ProgressView()
@@ -1379,6 +1491,10 @@ struct WereadNativeReaderView: View {
                                     Text("想法索引未同步，编辑/删除可能暂不可用；点左上角刷新或稍后重试。")
                                         .foregroundStyle(.orange)
                                 }
+                                if !pendingUploads.isEmpty {
+                                    Text("另有 \(pendingUploads.count) 条待同步，联网后自动上传。")
+                                        .foregroundStyle(.orange)
+                                }
                             }
                             .font(.caption2)
                         }
@@ -1386,6 +1502,7 @@ struct WereadNativeReaderView: View {
                     .listStyle(.plain)
                     .searchable(text: $noteSearchText, prompt: "搜索划线、想法、章节名")
                 }
+            }
             }
             .navigationTitle("笔记")
             .navigationBarTitleDisplayMode(.inline)
@@ -1837,9 +1954,38 @@ struct WereadNativeReaderView: View {
         }
         noteSaving = false
         guard ok else {
-            noteError = "同步到微信读书失败，内容还在输入框里，可以稍后重试"
+            if enqueuePendingUpload(
+                bookId: target.book.id,
+                chapterUid: chapterUid,
+                chapterIdx: chapterIdx,
+                range: entry.range ?? "",
+                markText: entry.text,
+                note: text,
+                reviewId: reviewId
+            ) {
+                // 已落临时队列，不再把用户困在输入框里；退出书也不会丢。
+                noteRequest = nil
+                noteDraft = ""
+                noteError = nil
+                noteDraftFocused = false
+                showPendingUploadNotice("已暂存，联网后自动上传")
+            } else if cookie.isEmpty {
+                noteError = "未登录微信读书，想法没有保存；登录后请重新编辑"
+            } else {
+                noteError = "同步到微信读书失败，内容还在输入框里，可以稍后重试"
+            }
             return
         }
+        // 本次保存已经落地：清掉同一条待传项，避免稍后重试再传一遍。
+        removePendingUploadsMatching(
+            bookId: target.book.id,
+            chapterUid: chapterUid,
+            reviewId: reviewId,
+            text: entry.text,
+            range: entry.range ?? "",
+            note: text,
+            matchAnyNote: true
+        )
         noteRequest = nil
         noteDraft = ""
         noteError = nil
@@ -1917,6 +2063,15 @@ struct WereadNativeReaderView: View {
             deleteError = "这条笔记没有可删除的云端内容"
             return
         }
+        // 已删除的云端条目不能再被待传重试复活；只清精确对上的那一条。
+        removePendingUploadsMatching(
+            bookId: target.book.id,
+            chapterUid: note.chapterUid,
+            reviewId: reviewId,
+            text: note.text,
+            range: note.range,
+            note: note.note
+        )
         clearLocalMirror(of: note, removeHighlight: deletedBookmark)
         await refreshNotes()
 
@@ -1983,6 +2138,18 @@ struct WereadNativeReaderView: View {
         let note = cloudNote(for: tapped)
         let deletion = pendingDeletion(from: tapped, cloudNote: note)
         enqueuePendingDeletion(deletion)
+        // 只清与本次删除精确对上的待传项（reviewId 或 range+原文+正文），
+        // 同一段上的其它待传想法保留，不能被「删除划线」连带清掉。
+        let tappedNote = normalizedText(tapped.entry?.note ?? "")
+        let cloudNoteText = normalizedText(note?.note ?? "")
+        removePendingUploadsMatching(
+            bookId: target.book.id,
+            chapterUid: tapped.chapterUid,
+            reviewId: note?.reviewId,
+            text: tapped.text,
+            range: tapped.entry?.range ?? "",
+            note: tappedNote.isEmpty ? cloudNoteText : tappedNote
+        )
         let removedLocally = removeLocalHighlight(tapped)
         let hasCloudTarget =
             deletion.bookmarkId != nil || deletion.reviewId != nil
@@ -2088,6 +2255,295 @@ struct WereadNativeReaderView: View {
             guard token == pendingDeleteNoticeToken else { return }
             pendingDeleteNotice = nil
         }
+    }
+
+    // MARK: - 待上传队列
+
+    /// 保存失败时把这条想法写进小体积临时队列。返回 false 表示没有可重试的
+    /// 定位信息（例如新建缺 range/原文），调用方仍应提示失败。
+    @MainActor
+    @discardableResult
+    private func enqueuePendingUpload(
+        bookId: String,
+        chapterUid: Int,
+        chapterIdx: Int,
+        range: String,
+        markText: String,
+        note: String,
+        reviewId: String?
+    ) -> Bool {
+        // 没有账号就不写队列：待传项只对当前登录用户有意义。
+        guard !store.cookie.isEmpty, !bookId.isEmpty else { return false }
+        let rangeKey = normalizedRange(range)
+        let textKey = normalizedText(markText)
+        let noteKey = normalizedText(note)
+        let reviewKey = normalizedText(reviewId ?? "")
+        // 编辑已有想法靠 reviewId 定位，不依赖原文/range（整章想法没有原文）；
+        // 新建必须同时有原文与 range，否则刷新后无法可靠定位。
+        if reviewKey.isEmpty, (rangeKey.isEmpty || textKey.isEmpty) {
+            return false
+        }
+
+        let now = Date().timeIntervalSince1970
+        let item = WereadPendingUpload(
+            bookId: bookId,
+            chapterUid: chapterUid,
+            chapterIdx: chapterIdx,
+            range: rangeKey,
+            markText: textKey,
+            note: noteKey,
+            reviewId: reviewKey.isEmpty ? nil : reviewKey,
+            createdAt: now
+        )
+        pendingUploads = WereadPendingUploadStore.insert(
+            item,
+            into: pendingUploads,
+            now: now
+        )
+        persistPendingUploads()
+        let line =
+            "待传笔记暂存 book=\(bookId) chapter=\(chapterUid) " +
+            "count=\(pendingUploads.count)"
+        WereadService.screenDiag(line)
+        FlareDiagnostics.shared.record(.weread, "WARN", line)
+        return true
+    }
+
+    @MainActor
+    private func persistPendingUploads() {
+        pendingUploads = WereadPendingUploadStore.normalized(pendingUploads)
+        WereadPendingUploadStore.save(pendingUploads)
+    }
+
+    /// 上传成功 / 用户删除某条内容后，按「reviewId 精确」或
+    /// 「章 + range + 原文 + 想法正文」精确移除队列项；绝不按同段原文批量清，
+    /// 避免把同一段上的另一条待传想法一起删掉。
+    @MainActor
+    private func removePendingUploadsMatching(
+        bookId: String,
+        chapterUid: Int,
+        reviewId: String?,
+        text: String,
+        range: String,
+        note: String,
+        matchAnyNote: Bool = false
+    ) {
+        let reviewKey = normalizedText(reviewId ?? "")
+        let textKey = normalizedText(text)
+        let rangeKey = normalizedRange(range)
+        let noteKey = normalizedText(note)
+        guard !reviewKey.isEmpty || (!textKey.isEmpty && !rangeKey.isEmpty) else {
+            return
+        }
+        let before = pendingUploads.count
+        pendingUploads.removeAll { item in
+            guard item.bookId == bookId, item.chapterUid == chapterUid else {
+                return false
+            }
+            if !reviewKey.isEmpty, normalizedText(item.reviewId ?? "") == reviewKey {
+                return true
+            }
+            // 本次保存/上传已经覆盖了同一段的新建项：即使草稿正文变过，
+            // 旧待传项也不能留着在稍后重试时再新建一条。
+            if matchAnyNote, item.reviewId == nil,
+               normalizedRange(item.range) == rangeKey,
+               normalizedText(item.markText) == textKey {
+                return true
+            }
+            return normalizedRange(item.range) == rangeKey
+                && normalizedText(item.markText) == textKey
+                && normalizedText(item.note) == noteKey
+        }
+        guard pendingUploads.count != before else { return }
+        persistPendingUploads()
+        if pendingUploads.isEmpty {
+            pendingUploadNoticeToken += 1
+            pendingUploadNotice = nil
+        }
+    }
+
+    private func showPendingUploadNotice(_ message: String) {
+        pendingUploadNoticeToken += 1
+        let token = pendingUploadNoticeToken
+        pendingUploadNotice = message
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard token == pendingUploadNoticeToken else { return }
+            pendingUploadNotice = nil
+        }
+    }
+
+    /// 逐本重试队列里的**全部** bookId，不只当前书。每本先拉新的划线与
+    /// 想法索引做去重，再逐条 editReview / uploadHighlight；成功即清。
+    /// 任何一本索引拉取失败时保留该本队列，等前台重试或下次刷新。
+    @MainActor
+    private func flushPendingUploads() async {
+        guard !pendingUploadFlushInFlight else { return }
+        guard !pendingUploads.isEmpty else { return }
+        let cookie = store.cookie
+        guard !cookie.isEmpty else { return }
+
+        pendingUploadFlushInFlight = true
+        defer { pendingUploadFlushInFlight = false }
+
+        let service = WereadService.shared
+        let snapshot = pendingUploads
+        let groups = Dictionary(grouping: snapshot, by: { $0.bookId })
+        var changed = false
+        var uploadedCount = 0
+
+        for bookId in groups.keys.sorted() {
+            guard let items = groups[bookId], !items.isEmpty else { continue }
+            guard !Task.isCancelled else { break }
+
+            let bookmarks: [WereadBookmark]
+            do {
+                bookmarks = try await service.bookmarks(
+                    bookId: bookId,
+                    cookie: cookie
+                )
+            } catch {
+                continue
+            }
+            // nil 表示想法索引拉取失败，不是「云端没有想法」；整本保留。
+            guard let reviews = await service.ownReviews(
+                bookId: bookId,
+                cookie: cookie
+            ) else {
+                continue
+            }
+
+            for item in items {
+                guard !Task.isCancelled else { break }
+                guard pendingUploads.contains(where: { $0 == item }) else {
+                    continue
+                }
+                let outcome = await flushPendingUpload(
+                    item,
+                    bookmarks: bookmarks,
+                    reviews: reviews,
+                    cookie: cookie
+                )
+                switch outcome {
+                case .kept:
+                    break
+                case .removed:
+                    pendingUploads.removeAll { $0 == item }
+                    changed = true
+                case .uploaded:
+                    pendingUploads.removeAll { $0 == item }
+                    changed = true
+                    uploadedCount += 1
+                }
+            }
+        }
+
+        guard changed else { return }
+        persistPendingUploads()
+        guard uploadedCount > 0 else {
+            if pendingUploads.isEmpty {
+                pendingUploadNoticeToken += 1
+                pendingUploadNotice = nil
+            }
+            return
+        }
+        // 全部上传成功后重新拉当前书的双索引，保持「笔记以服务端为准」。
+        await reloadNotesForSync()
+        showPendingUploadNotice(
+            pendingUploads.isEmpty
+                ? "暂存笔记已全部上传"
+                : "已上传 \(uploadedCount) 条暂存笔记"
+        )
+        let line =
+            "待传笔记上传 uploaded=\(uploadedCount) 剩余=\(pendingUploads.count)"
+        WereadService.screenDiag(line)
+        FlareDiagnostics.shared.record(
+            .weread,
+            pendingUploads.isEmpty ? "RES" : "WARN",
+            line
+        )
+    }
+
+    /// 单条重试：reviewId 走幂等编辑；新建先按 range + 原文/正文找服务端
+    /// 已有条目，命中就转为编辑或确认，找不到才真正新建。
+    @MainActor
+    private func flushPendingUpload(
+        _ item: WereadPendingUpload,
+        bookmarks: [WereadBookmark],
+        reviews: [WereadOwnReview],
+        cookie: String
+    ) async -> WereadPendingUploadOutcome {
+        let service = WereadService.shared
+        let reviewKey = normalizedText(item.reviewId ?? "")
+        let rangeKey = normalizedRange(item.range)
+        let textKey = normalizedText(item.markText)
+        let noteKey = normalizedText(item.note)
+        let chapterBookmarks = bookmarks.filter { $0.chapterUid == item.chapterUid }
+        let chapterReviews = reviews.filter { $0.chapterUid == item.chapterUid }
+
+        if !reviewKey.isEmpty {
+            if let existing = chapterReviews.first(where: {
+                $0.reviewId == reviewKey
+            }) {
+                if normalizedText(existing.content) == noteKey {
+                    return .removed
+                }
+            }
+            // 索引可能被截断或还没刷新；按 reviewId 编辑只命中那一条。
+            let ok = await service.editReview(
+                reviewId: reviewKey,
+                content: noteKey,
+                cookie: cookie
+            )
+            return ok ? .uploaded : .kept
+        }
+
+        guard !rangeKey.isEmpty, !textKey.isEmpty else { return .kept }
+
+        let exactReviews = chapterReviews.filter { review in
+            guard normalizedRange(review.range) == rangeKey else { return false }
+            if normalizedText(review.abstract) == textKey { return true }
+            // 服务端可能截断 abstract；同 range 且正文一致时仍视为同一条。
+            return !noteKey.isEmpty && normalizedText(review.content) == noteKey
+        }
+        let exactBookmarks = chapterBookmarks.filter { bookmark in
+            normalizedRange(bookmark.range) == rangeKey
+                && normalizedText(bookmark.markText) == textKey
+        }
+
+        // 同段多想法对不上具体一条时宁可不传，避免改错或重复新建。
+        guard exactReviews.count <= 1 else { return .kept }
+        if let review = exactReviews.first {
+            if noteKey.isEmpty { return .removed }
+            if normalizedText(review.content) == noteKey { return .removed }
+            let ok = await service.editReview(
+                reviewId: review.reviewId,
+                content: noteKey,
+                cookie: cookie
+            )
+            return ok ? .uploaded : .kept
+        }
+
+        if noteKey.isEmpty {
+            // 纯划线：range + 原文命中任意 bookmark 就说明云端已有这段线。
+            if !exactBookmarks.isEmpty { return .removed }
+        } else if exactBookmarks.contains(where: {
+            normalizedText($0.note) == noteKey
+        }) {
+            // bookmark 已带同一条想法（服务端把 review 关联进 note 的情况）。
+            return .removed
+        }
+
+        let ok = await service.uploadHighlight(
+            bookId: item.bookId,
+            chapterUid: item.chapterUid,
+            chapterIdx: item.chapterIdx,
+            range: rangeKey,
+            markText: textKey,
+            note: noteKey,
+            cookie: cookie
+        )
+        return ok ? .uploaded : .kept
     }
 
     /// 用户重新划了同一段：旧删除意图视为已被新操作覆盖，不能继续遮住新划线。
@@ -2744,6 +3200,8 @@ struct WereadNativeReaderView: View {
         // 刷新失败时索引仍是旧的，不能触发待删重试，否则会拿旧索引删云端。
         guard await reloadNotesForSync() else { return }
         await flushPendingDeletions(generation: notesRefreshGeneration)
+        // 双索引已成功刷新，待传项可以按「云端已有」去重后重试。
+        await flushPendingUploads()
     }
 
     /// 只刷新云端索引，不触发待删重试；避免删除确认流程递归刷新。
@@ -4232,6 +4690,130 @@ enum WereadLegacyHighlightStore {
         guard let data = try? JSONEncoder().encode(updated) else { return false }
         UserDefaults.standard.set(data, forKey: key(bookId: bookId, chapterUid: chapterUid))
         return true
+    }
+}
+
+/// 弱网/断网时保存失败的待传项。只存重新调用微读接口所需的定位与正文，
+/// 不存章节 HTML、图片等大对象；上传确认后立刻移除，不是长期本地笔记库。
+/// 新建按「书 + 章 + range + 原文」去重，编辑按 `reviewId` 去重。
+private struct WereadPendingUpload: Codable, Equatable, Identifiable, Sendable {
+    let bookId: String
+    let chapterUid: Int
+    let chapterIdx: Int
+    let range: String
+    let markText: String
+    let note: String
+    let reviewId: String?
+    let createdAt: TimeInterval
+
+    var id: String {
+        if let reviewId, !reviewId.isEmpty {
+            return "r:\(reviewId)"
+        }
+        return "h:\(bookId):\(chapterUid):\(range):\(markText)"
+    }
+}
+
+private enum WereadPendingUploadOutcome {
+    case kept
+    case removed
+    case uploaded
+}
+
+/// 待传队列的轻量落盘：单一 UserDefaults key，条数上限 50、7 天过期。
+/// 只有「上传失败待重试」这一种临时状态会写；成功即从队列移除。
+private enum WereadPendingUploadStore {
+    private static let key = "weread.pendingUploads.v1"
+    private static let maxCount = 50
+    private static let maxAge: TimeInterval = 7 * 24 * 60 * 60
+
+    private static func textKey(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func load(
+        now: TimeInterval = Date().timeIntervalSince1970
+    ) -> [WereadPendingUpload] {
+        guard
+            let data = UserDefaults.standard.data(forKey: key),
+            let list = try? JSONDecoder().decode([WereadPendingUpload].self, from: data)
+        else {
+            return []
+        }
+        let fresh = normalized(list, now: now)
+        if fresh != list {
+            save(fresh)
+        }
+        return fresh
+    }
+
+    static func save(_ items: [WereadPendingUpload]) {
+        guard !items.isEmpty else {
+            UserDefaults.standard.removeObject(forKey: key)
+            return
+        }
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+
+    static func insert(
+        _ item: WereadPendingUpload,
+        into items: [WereadPendingUpload],
+        now: TimeInterval = Date().timeIntervalSince1970
+    ) -> [WereadPendingUpload] {
+        var list = normalized(items, now: now)
+        let position = list.firstIndex { existing in
+            if let left = existing.reviewId, !left.isEmpty,
+               let right = item.reviewId, !right.isEmpty {
+                return left == right
+            }
+            return existing.bookId == item.bookId
+                && existing.chapterUid == item.chapterUid
+                && textKey(existing.range) == textKey(item.range)
+                && textKey(existing.markText) == textKey(item.markText)
+        }
+        if let position {
+            let existing = list[position]
+            // 同一条内容被再次编辑：换掉正文并刷新时间戳，避免 7 天过期
+            // 把刚改过的内容清掉。
+            list[position] = WereadPendingUpload(
+                bookId: existing.bookId,
+                chapterUid: existing.chapterUid,
+                chapterIdx: item.chapterIdx != 0
+                    ? item.chapterIdx
+                    : existing.chapterIdx,
+                range: textKey(item.range).isEmpty
+                    ? existing.range
+                    : textKey(item.range),
+                markText: textKey(item.markText).isEmpty
+                    ? existing.markText
+                    : textKey(item.markText),
+                note: textKey(item.note),
+                reviewId: (existing.reviewId?.isEmpty == false)
+                    ? existing.reviewId
+                    : item.reviewId,
+                createdAt: now
+            )
+        } else {
+            list.append(item)
+        }
+        return normalized(list, now: now)
+    }
+
+    static func normalized(
+        _ items: [WereadPendingUpload],
+        now: TimeInterval = Date().timeIntervalSince1970
+    ) -> [WereadPendingUpload] {
+        var seen = Set<String>()
+        var fresh: [WereadPendingUpload] = []
+        for item in items {
+            guard item.createdAt <= now + 60 else { continue }
+            guard now - item.createdAt <= maxAge else { continue }
+            guard seen.insert(item.id).inserted else { continue }
+            fresh.append(item)
+        }
+        guard fresh.count > maxCount else { return fresh }
+        return Array(fresh.sorted { $0.createdAt < $1.createdAt }.suffix(maxCount))
     }
 }
 
