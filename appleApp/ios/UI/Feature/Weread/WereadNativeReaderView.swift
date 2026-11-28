@@ -75,6 +75,14 @@ struct WereadNativeReaderView: View {
     @State private var notesToken = 0
     @State private var notesLoading = false
     @State private var notesError: String?
+    /// 最近一次「划线 + 想法索引」都成功刷新到的时间。只有晚于删除意图
+    /// 创建时间的刷新，才能证明云端确实没有这条内容，避免拿旧索引误清队列。
+    @State private var notesIndexUpdatedAt: TimeInterval = 0
+    /// 最近一次刷新是否「划线与想法索引都成功落地」。loadBookmarks 失败时
+    /// `serverNotesLoaded` 会停在上一次的 true，只凭它会把旧索引当新结果。
+    @State private var notesRefreshSucceeded = false
+    /// 每次双索引都成功刷新才 +1；待删重试只认这种刷新之后的索引。
+    @State private var notesRefreshGeneration = 0
     @State private var showNotes = false
     /// 笔记面板里的搜索词。纯本地过滤 cloudNoteEntries，不碰云端请求。
     @State private var noteSearchText = ""
@@ -132,6 +140,15 @@ struct WereadNativeReaderView: View {
     /// 点了正文里的划线：弹「删除划线 / 改想法」。带 id/text/note/range，
     /// 用 id 对回云端条目，确保删的是用户点的那一条。
     @State private var tappedHighlight: WereadNoteRequest?
+    /// 正文里已本地移除、等待云端确认的删除意图。只存定位与云端 ID，
+    /// 不存想法正文；成功以随后刷新到的服务端结果为准。
+    @State private var pendingHighlightDeletions: [WereadPendingDeletion] = []
+    @State private var pendingDeletionFlushInFlight = false
+    @State private var pendingDeleteNotice: String?
+    @State private var pendingDeleteNoticeToken = 0
+    /// 正在上传的划线（章 + 本次 session 的条目 id）。上传未落地前，
+    /// 待删除意图不能因为一次「暂时没查到」就清掉。
+    @State private var inFlightHighlightUploadIDs: Set<String> = []
     /// 从笔记面板点一条时的「返回原位置」栈：先存当前章 + 章内偏移，
     /// 跳到笔记所在段落后，返回按钮据此恢复，像微信读书一样不丢位置。
     @State private var noteReturnStack: [WereadReadingPosition] = []
@@ -202,7 +219,21 @@ struct WereadNativeReaderView: View {
                 )
             )
         }
-        return merged
+        return merged.filter { item in
+            !isPendingHighlightDeletion(
+                chapterUid: current.uid,
+                text: item.text,
+                range: item.range,
+                ids: [item.id]
+            )
+        }
+    }
+
+    private var pendingDeletionBanner: String {
+        let count = pendingHighlightDeletions.count
+        return count == 1
+            ? "1 条划线删除待同步，联网后自动处理"
+            : "\(count) 条划线删除待同步，联网后自动处理"
     }
 
     /// 全书云端笔记 / 划线 / 想法。
@@ -323,7 +354,15 @@ struct WereadNativeReaderView: View {
             }
         }
 
-        return rows.sorted { lhs, rhs in
+        let visibleRows = rows.filter { row in
+            !isPendingHighlightDeletion(
+                chapterUid: row.chapterUid,
+                text: row.text,
+                range: row.range,
+                ids: [row.bookmarkId, row.reviewId].compactMap { $0 }
+            )
+        }
+        return visibleRows.sorted { lhs, rhs in
             let left = chapterSortKey(for: lhs.chapterUid)
             let right = chapterSortKey(for: rhs.chapterUid)
             if left != right { return left < right }
@@ -351,6 +390,10 @@ struct WereadNativeReaderView: View {
 
     private func normalizedText(_ text: String) -> String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedRange(_ range: String) -> String {
+        range.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
@@ -449,27 +492,64 @@ struct WereadNativeReaderView: View {
                 .lineLimit(3)
         }
         .overlay(alignment: .top) {
-            if translationBusy || formatBusy {
-                HStack(spacing: 6) {
-                    ProgressView()
-                    Text(
-                        formatBusy
-                            ? "正在切换官方格式…"
-                            : (translationStatus ?? "正在请求官方翻译…")
-                    )
-                        .font(.caption2)
-                        .lineLimit(2)
+            VStack(spacing: 6) {
+                if translationBusy || formatBusy {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                        Text(
+                            formatBusy
+                                ? "正在切换官方格式…"
+                                : (translationStatus ?? "正在请求官方翻译…")
+                        )
+                            .font(.caption2)
+                            .lineLimit(2)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(Capsule())
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color(.secondarySystemBackground))
-                .clipShape(Capsule())
-                .padding(.top, 8)
-                .allowsHitTesting(false)
+                if let pendingDeleteNotice {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle")
+                        Text(pendingDeleteNotice)
+                    }
+                    .font(.caption2)
+                    .lineLimit(2)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(Capsule())
+                } else if !pendingHighlightDeletions.isEmpty {
+                    HStack(spacing: 6) {
+                        Image(systemName: "icloud.slash")
+                        Text(pendingDeletionBanner)
+                    }
+                    .font(.caption2)
+                    .lineLimit(2)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color(.secondarySystemBackground))
+                    .clipShape(Capsule())
+                }
             }
+            .padding(.top, 8)
+            .allowsHitTesting(false)
         }
         .statusBar(hidden: true)
         .task { await load() }
+        // 待同步删除意图：前台停留时也周期重试。网络恢复后不需要用户
+        // 手动下拉刷新，成功清空队列即可让顶部「待同步」提示消失。
+        .task(id: pendingHighlightDeletions.count) {
+            guard !pendingHighlightDeletions.isEmpty, !store.cookie.isEmpty else { return }
+            var delay: UInt64 = 15_000_000_000
+            while !Task.isCancelled, !pendingHighlightDeletions.isEmpty {
+                try? await Task.sleep(nanoseconds: delay)
+                guard !Task.isCancelled, !pendingHighlightDeletions.isEmpty else { return }
+                await refreshNotes()
+                delay = min(delay * 2, 120_000_000_000)
+            }
+        }
         .sheet(isPresented: $showChapters) {
             chapterList
         }
@@ -521,6 +601,9 @@ struct WereadNativeReaderView: View {
             if phase == .active {
                 // 只算前台时间：回前台重新起锚点，不补后台停留的秒数。
                 startReadingTimer()
+                if !pendingHighlightDeletions.isEmpty {
+                    Task { await refreshNotes() }
+                }
             } else {
                 stopReadingTimer()
                 persistLocalProgress()
@@ -623,6 +706,7 @@ struct WereadNativeReaderView: View {
             highlights: currentHighlights,
             onHighlight: { item in
                 guard let chapter = current else { return }
+                acknowledgeHighlightRecreated(item, chapterUid: chapter.uid)
                 var list = highlights[chapter.uid] ?? []
                 if let position = list.firstIndex(where: { $0.id == item.id }) {
                     list[position] = item
@@ -650,6 +734,8 @@ struct WereadNativeReaderView: View {
                     return
                 }
                 let token = loadToken
+                let uploadKey = "\(chapterUid):\(item.id)"
+                inFlightHighlightUploadIDs.insert(uploadKey)
                 Task { @MainActor in
                     let ok = await WereadService.shared.uploadHighlight(
                         bookId: bookId,
@@ -660,6 +746,7 @@ struct WereadNativeReaderView: View {
                         note: item.note,
                         cookie: cookie
                     )
+                    inFlightHighlightUploadIDs.remove(uploadKey)
                     guard ok else {
                         highlightSyncMessage =
                             "划线/想法没有同步到微信读书云端。笔记只存云端，" +
@@ -1440,7 +1527,8 @@ struct WereadNativeReaderView: View {
                 entry: entry,
                 reviewId: request.reviewId,
                 chapterUid: chapterUid,
-                chapterIdx: chapterIdx
+                chapterIdx: chapterIdx,
+                allowUnlocatedCreation: request.allowUnlocatedCreation
             )
         }
     }
@@ -1548,23 +1636,26 @@ struct WereadNativeReaderView: View {
         entry: WereadHighlight,
         reviewId: String?,
         chapterUid: Int,
-        chapterIdx: Int
+        chapterIdx: Int,
+        allowUnlocatedCreation: Bool
     ) async {
         let service = WereadService.shared
         let cookie = store.cookie
-        // 云端索引没拉到、或这条笔记本来就是服务端下发的，却仍没定位到
-        // `reviewId` 时，不要降级成新建 —— 硬建会多出一条重复笔记。
-        // 只有确实只存在于本机、还没上传过的想法才继续走新建。
+        // 从笔记面板 / 已定位的云端条目进来时，索引没拿到就别降级成新建，
+        // 硬建会多出一条重复笔记。唯独正文划线点「改想法」且云端匹配不到，
+        // `allowUnlocatedCreation` 允许按 tapped 的章节 / range 直接新建。
         if reviewId == nil,
            !entry.note.isEmpty,
-           (!ownReviewsLoaded || hasServerNote(entry, chapterUid: chapterUid)) {
+           (!ownReviewsLoaded || hasServerNote(entry, chapterUid: chapterUid)),
+           !allowUnlocatedCreation {
             noteSaving = false
             noteError = "没能从云端定位到这条想法，先不新建以免重复，请稍后重试"
             return
         }
-        // 纯划线也可能已经在云端带了想法，只是想法索引没拉到。此时新建
-        // 会多出一条重复想法，必须先让用户刷新索引。
-        if reviewId == nil, !ownReviewsLoaded, !cookie.isEmpty {
+        // 同样的防重复判断也适用于「给纯划线补想法」：除非本次是正文划线
+        // 的直接新建，否则先等想法索引，避免硬建出重复想法。
+        if reviewId == nil, !ownReviewsLoaded, !cookie.isEmpty,
+           !allowUnlocatedCreation {
             noteSaving = false
             noteError = "还没拉到云端想法索引，先刷新笔记列表再保存，避免重复新建"
             return
@@ -1711,24 +1802,456 @@ struct WereadNativeReaderView: View {
         return nil
     }
 
-    /// 点正文划线 →「改想法」：对回云端条目后复用现有编辑器。
+    /// 点正文划线 →「改想法」：能定位云端条目就编辑原想法；
+    /// 定位不到时仍用点击时的 text/range/chapterUid 直接打开编辑器，
+    /// 不再把「先刷新笔记」当成操作前置条件。
     private func editTappedHighlight(_ tapped: WereadNoteRequest) {
-        guard let note = cloudNote(for: tapped) else {
-            deleteError = "这条划线还没同步到云端笔记列表，请先下拉刷新笔记再操作"
+        if let note = cloudNote(for: tapped) {
+            beginEditing(note)
             return
         }
-        beginEditing(note)
+        noteError = nil
+        noteSaving = false
+        noteDraft = tapped.entry?.note ?? ""
+        var request = tapped
+        request.isEditing = !(tapped.entry?.note.isEmpty ?? true)
+        request.allowUnlocatedCreation = true
+        noteRequest = request
     }
 
-    /// 点正文划线 →「删除划线」：对回云端条目，走已有删除链路（含想法）。
+    /// 点正文划线 →「删除划线」：先让本书立刻看不到这条线，再记录删除意图。
+    /// 云端是否真删仍以刷新后的服务端结果为准；失败不再弹裸「删除失败」。
     @MainActor
     private func deleteTappedHighlight(_ tapped: WereadNoteRequest) async {
-        guard let note = cloudNote(for: tapped) else {
-            deleteError = "这条划线还没同步到云端笔记列表，请先下拉刷新笔记再操作"
+        let note = cloudNote(for: tapped)
+        let deletion = pendingDeletion(from: tapped, cloudNote: note)
+        enqueuePendingDeletion(deletion)
+        let removedLocally = removeLocalHighlight(tapped)
+        let hasCloudTarget =
+            deletion.bookmarkId != nil || deletion.reviewId != nil
+        if removedLocally || hasCloudTarget {
+            showPendingDeleteNotice("已从本书移除，云端同步中")
+        } else {
+            showPendingDeleteNotice("已记录删除意图，联网后自动同步")
+        }
+        if !store.cookie.isEmpty {
+            // 是否真删以「本次刷新后的服务端索引」为准；刷新失败就保留意图，
+            // 交给前台轮询 / 下次刷新重试，绝不在旧索引上动手。
+            await refreshNotes()
+        }
+    }
+
+    private func pendingDeletion(
+        from tapped: WereadNoteRequest,
+        cloudNote: WereadCloudNote?
+    ) -> WereadPendingDeletion {
+        let tappedRange = normalizedRange(tapped.entry?.range ?? "")
+        // cloudNote(for:) 在 range 对不上时会按「同章同原文」兜底；那种条目
+        // 可能是另一条同文不同位置的划线，绝不能把它的服务端 ID 记进意图，
+        // 否则刷新后按 ID 精确删除会误删。
+        let exactNote: WereadCloudNote? = {
+            guard let cloudNote else { return nil }
+            guard normalizedText(cloudNote.text) == normalizedText(tapped.text) else {
+                return nil
+            }
+            let noteRange = normalizedRange(cloudNote.range)
+            if tappedRange.isEmpty, noteRange.isEmpty {
+                // 两边都没有 range 时，光凭同章同原文分不清同文的另一条划线。
+                // 只有点击 id 与服务端条目 id 精确对上，才允许带走服务端 ID。
+                let tappedId = tapped.entry?.id ?? ""
+                let serverIds = [cloudNote.id, cloudNote.bookmarkId, cloudNote.reviewId]
+                    .compactMap { $0 }
+                guard !tappedId.isEmpty, serverIds.contains(tappedId) else {
+                    return nil
+                }
+                return cloudNote
+            }
+            return noteRange == tappedRange ? cloudNote : nil
+        }()
+        var bookmarkId = exactNote?.bookmarkId
+        let reviewId = exactNote?.reviewId
+        // 有想法但 review 索引还没到时只删 bookmark 会留下孤儿想法，
+        // 先不记 ID，等刷新后按章 + range/原文重新定位。
+        if exactNote?.note.isEmpty == false, reviewId == nil {
+            bookmarkId = nil
+        }
+        return WereadPendingDeletion(
+            id: UUID(),
+            chapterUid: tapped.chapterUid,
+            chapterIdx: tapped.chapterIdx,
+            text: tapped.text,
+            range: tapped.entry?.range ?? "",
+            entryId: tapped.entry?.id ?? "",
+            bookmarkId: bookmarkId,
+            reviewId: reviewId,
+            createdAt: Date().timeIntervalSince1970
+        )
+    }
+
+    private func enqueuePendingDeletion(_ deletion: WereadPendingDeletion) {
+        pendingHighlightDeletions.removeAll { existing in
+            if !deletion.entryId.isEmpty, existing.entryId == deletion.entryId,
+               existing.chapterUid == deletion.chapterUid {
+                return true
+            }
+            return samePendingDeletionTarget(existing, deletion)
+        }
+        pendingHighlightDeletions.append(deletion)
+        if pendingHighlightDeletions.count > 50 {
+            pendingHighlightDeletions.removeFirst(pendingHighlightDeletions.count - 50)
+        }
+    }
+
+    private func samePendingDeletionTarget(
+        _ lhs: WereadPendingDeletion,
+        _ rhs: WereadPendingDeletion
+    ) -> Bool {
+        if let left = lhs.bookmarkId, let right = rhs.bookmarkId, left == right {
+            return true
+        }
+        if let left = lhs.reviewId, let right = rhs.reviewId, left == right {
+            return true
+        }
+        guard lhs.chapterUid == rhs.chapterUid else { return false }
+        guard normalizedText(lhs.text) == normalizedText(rhs.text) else { return false }
+        let leftRange = normalizedRange(lhs.range)
+        let rightRange = normalizedRange(rhs.range)
+        if !leftRange.isEmpty || !rightRange.isEmpty {
+            return leftRange == rightRange
+        }
+        return true
+    }
+
+    private func showPendingDeleteNotice(_ message: String) {
+        pendingDeleteNoticeToken += 1
+        let token = pendingDeleteNoticeToken
+        pendingDeleteNotice = message
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard token == pendingDeleteNoticeToken else { return }
+            pendingDeleteNotice = nil
+        }
+    }
+
+    /// 用户重新划了同一段：旧删除意图视为已被新操作覆盖，不能继续遮住新划线。
+    private func acknowledgeHighlightRecreated(
+        _ item: WereadHighlight,
+        chapterUid: Int
+    ) {
+        let text = normalizedText(item.text)
+        let range = normalizedRange(item.range ?? "")
+        pendingHighlightDeletions.removeAll { deletion in
+            guard deletion.chapterUid == chapterUid else { return false }
+            if !item.id.isEmpty, deletion.entryId == item.id { return true }
+            guard normalizedText(deletion.text) == text else { return false }
+            let deletionRange = normalizedRange(deletion.range)
+            if !deletionRange.isEmpty || !range.isEmpty {
+                return deletionRange == range
+            }
+            return true
+        }
+        if pendingHighlightDeletions.isEmpty {
+            pendingDeleteNoticeToken += 1
+            pendingDeleteNotice = nil
+        }
+    }
+
+    @discardableResult
+    private func removeLocalHighlight(_ tapped: WereadNoteRequest) -> Bool {
+        let chapterUid = tapped.chapterUid
+        guard chapterUid > 0 else { return false }
+        let entryId = tapped.entry?.id ?? ""
+        let text = normalizedText(tapped.text)
+        let range = normalizedRange(tapped.entry?.range ?? "")
+        var list = highlights[chapterUid] ?? []
+        var removed = false
+        let position: Int?
+        if !entryId.isEmpty, let exact = list.firstIndex(where: { $0.id == entryId }) {
+            position = exact
+        } else {
+            let matches = list.indices.filter { offset in
+                guard normalizedText(list[offset].text) == text else { return false }
+                if !range.isEmpty {
+                    return normalizedRange(list[offset].range ?? "") == range
+                }
+                return true
+            }
+            position = matches.count == 1 ? matches.first : nil
+        }
+        if let position {
+            list.remove(at: position)
+            highlights[chapterUid] = list
+            removed = true
+        }
+        if WereadLegacyHighlightStore.removeMatching(
+            bookId: target.book.id,
+            chapterUid: chapterUid,
+            entryId: entryId,
+            text: tapped.text,
+            range: range
+        ) {
+            removed = true
+        }
+        return removed
+    }
+
+    private func isPendingHighlightDeletion(
+        chapterUid: Int,
+        text: String,
+        range: String?,
+        ids: [String]
+    ) -> Bool {
+        let textKey = normalizedText(text)
+        let rangeKey = normalizedRange(range ?? "")
+        return pendingHighlightDeletions.contains { deletion in
+            guard deletion.chapterUid == chapterUid else { return false }
+            if ids.contains(where: { id in
+                !id.isEmpty
+                    && (id == deletion.entryId
+                        || id == deletion.bookmarkId
+                        || id == deletion.reviewId)
+            }) {
+                return true
+            }
+            guard !textKey.isEmpty, normalizedText(deletion.text) == textKey else {
+                return false
+            }
+            let deletionRange = normalizedRange(deletion.range)
+            if !deletionRange.isEmpty {
+                return deletionRange == rangeKey
+            }
+            return true
+        }
+    }
+
+    private func matchingBookmarks(
+        for deletion: WereadPendingDeletion
+    ) -> [WereadBookmark] {
+        let bookmarks = serverNotes[deletion.chapterUid] ?? []
+        let text = normalizedText(deletion.text)
+        let range = normalizedRange(deletion.range)
+        if !range.isEmpty {
+            // range 存在时只认 range 精确命中，原文只做一致性校验。
+            // 查不到必须返回空：同章同原文可能落在别的位置，按原文兜底会误删。
+            return bookmarks.filter { bookmark in
+                guard normalizedRange(bookmark.range) == range else { return false }
+                return normalizedText(bookmark.markText) == text
+            }
+        }
+        // 没有 range 时不能只凭同文去删云端：旧本机镜像可能刚好和另一条
+        // 云端划线同文，但并不是同一条。只接受点击时带回来的服务端 id。
+        let id = !deletion.entryId.isEmpty
+            ? deletion.entryId
+            : (deletion.bookmarkId ?? "")
+        guard !id.isEmpty else { return [] }
+        return bookmarks.filter { $0.id == id }
+    }
+
+    private func matchingReviews(
+        for deletion: WereadPendingDeletion,
+        bookmark: WereadBookmark?
+    ) -> [WereadOwnReview] {
+        let reviews = ownReviews.filter { $0.chapterUid == deletion.chapterUid }
+        let text = normalizedText(deletion.text)
+        let bookmarkText = normalizedText(bookmark?.markText ?? "")
+        let range = normalizedRange(deletion.range)
+        if !range.isEmpty {
+            // 同上：range 存在就只认 range 精确命中，原文用于一致性校验。
+            // 查不到返回空，不能用「同章同 abstract」兜底误删别的想法。
+            return reviews.filter { review in
+                guard normalizedRange(review.range) == range else { return false }
+                let abstract = normalizedText(review.abstract)
+                if !text.isEmpty { return abstract == text }
+                if !bookmarkText.isEmpty { return abstract == bookmarkText }
+                return false
+            }
+        }
+        // 无 range 时只接受能精确对上的服务端想法 id。
+        let id = !deletion.entryId.isEmpty
+            ? deletion.entryId
+            : (deletion.reviewId ?? "")
+        guard !id.isEmpty else { return [] }
+        return reviews.filter { $0.reviewId == id }
+    }
+
+    private func pendingDeletionTarget(
+        for deletion: WereadPendingDeletion
+    ) -> WereadPendingDeletionTarget {
+        let bookmarks = serverNotes[deletion.chapterUid] ?? []
+        var bookmark: WereadBookmark?
+        if let bookmarkId = deletion.bookmarkId, !bookmarkId.isEmpty,
+           let exact = bookmarks.first(where: { $0.id == bookmarkId }) {
+            bookmark = exact
+        } else {
+            // 服务端 ID 失效（如删除后重新上传换了 ID）时，退回严格 range 匹配；
+            // 仍然绝不按同文兜底。
+            let matches = matchingBookmarks(for: deletion)
+            if matches.count > 1 {
+                return WereadPendingDeletionTarget(bookmark: nil, review: nil, ambiguous: true)
+            }
+            bookmark = matches.first
+        }
+
+        var review: WereadOwnReview?
+        if let reviewId = deletion.reviewId, !reviewId.isEmpty,
+           let exact = ownReviews.first(where: { $0.reviewId == reviewId }) {
+            review = exact
+        } else {
+            let matches = matchingReviews(for: deletion, bookmark: bookmark)
+            if matches.count > 1 {
+                return WereadPendingDeletionTarget(bookmark: bookmark, review: nil, ambiguous: true)
+            }
+            review = matches.first
+        }
+        return WereadPendingDeletionTarget(
+            bookmark: bookmark,
+            review: review,
+            ambiguous: false
+        )
+    }
+
+    /// 只有「晚于意图创建时间」且本次成功刷到的双索引才能证明云端已无此条；
+    /// 旧索引里找不到不能算删除成功，否则上传稍晚落地会把划线又带回来。
+    private func pendingDeletionIsGone(
+        _ deletion: WereadPendingDeletion,
+        generation: Int
+    ) -> Bool {
+        guard serverNotesLoaded, ownReviewsLoaded, notesRefreshSucceeded else {
+            return false
+        }
+        guard generation == notesRefreshGeneration else { return false }
+        guard notesIndexUpdatedAt >= deletion.createdAt else { return false }
+        if !deletion.entryId.isEmpty,
+           inFlightHighlightUploadIDs.contains("\(deletion.chapterUid):\(deletion.entryId)") {
+            return false
+        }
+        let hasLocator =
+            !normalizedText(deletion.text).isEmpty
+            || !normalizedRange(deletion.range).isEmpty
+            || !deletion.entryId.isEmpty
+            || !(deletion.bookmarkId ?? "").isEmpty
+            || !(deletion.reviewId ?? "").isEmpty
+        guard hasLocator else { return false }
+        let target = pendingDeletionTarget(for: deletion)
+        guard !target.ambiguous else { return false }
+        guard target.bookmark == nil, target.review == nil else { return false }
+
+        let range = normalizedRange(deletion.range)
+        if !range.isEmpty {
+            // 严格匹配下 range 查不到即可确认云端无此条；但同 range 若还有
+            // 别的条目（原文变了），说明定位不可靠，保留意图下次再核对。
+            let chapterBookmarks = serverNotes[deletion.chapterUid] ?? []
+            if chapterBookmarks.contains(where: { normalizedRange($0.range) == range }) {
+                return false
+            }
+            let chapterReviews = ownReviews.filter { $0.chapterUid == deletion.chapterUid }
+            if chapterReviews.contains(where: { normalizedRange($0.range) == range }) {
+                return false
+            }
+            return true
+        }
+        // 有服务端 ID 且无 range：本次索引里对不上这个 ID，说明云端确实已删。
+        if !(deletion.bookmarkId ?? "").isEmpty
+            || !(deletion.reviewId ?? "").isEmpty {
+            return true
+        }
+        // 既没有服务端 ID 也没有 range：只有本章完全不含这段原文，
+        // 才能确认云端确实没有；同文但定位不明时保留意图，绝不猜着删。
+        let text = normalizedText(deletion.text)
+        guard !text.isEmpty else { return false }
+        let chapterBookmarks = serverNotes[deletion.chapterUid] ?? []
+        if chapterBookmarks.contains(where: { normalizedText($0.markText) == text }) {
+            return false
+        }
+        let chapterReviews = ownReviews.filter { $0.chapterUid == deletion.chapterUid }
+        if chapterReviews.contains(where: { normalizedText($0.abstract) == text }) {
+            return false
+        }
+        return true
+    }
+
+    @MainActor
+    private func flushPendingDeletions(generation: Int) async {
+        guard !pendingDeletionFlushInFlight else { return }
+        guard !pendingHighlightDeletions.isEmpty else {
+            pendingDeleteNotice = nil
             return
         }
-        // 有想法就连划线一起删；纯划线只删 bookmark。
-        await deleteCloudNote(note, removeHighlight: true)
+        guard !store.cookie.isEmpty, deletingNoteID == nil else { return }
+        // 只在「划线与想法索引刚在本轮成功刷新」后动手。loadBookmarks 失败时
+        // serverNotesLoaded 还是上次的 true，光凭它会把旧索引当新结果误删。
+        guard notesRefreshSucceeded, generation == notesRefreshGeneration else {
+            return
+        }
+        guard serverNotesLoaded, ownReviewsLoaded else { return }
+
+        pendingDeletionFlushInFlight = true
+        defer { pendingDeletionFlushInFlight = false }
+        pendingHighlightDeletions.removeAll {
+            pendingDeletionIsGone($0, generation: generation)
+        }
+        guard !pendingHighlightDeletions.isEmpty else {
+            pendingDeleteNotice = nil
+            return
+        }
+
+        let service = WereadService.shared
+        let cookie = store.cookie
+        var acted = false
+        for deletion in pendingHighlightDeletions {
+            // flush 期间可能有新的 refresh 开始/失败，索引会变旧；每删一条前
+            // 重新确认仍是「本次成功刷新 + 同一 generation」。
+            guard notesRefreshSucceeded, generation == notesRefreshGeneration else {
+                return
+            }
+            let target = pendingDeletionTarget(for: deletion)
+            guard !target.ambiguous else { continue }
+            // 想法索引没拉到时不删任何可能带想法的条目；纯划线仍可先删
+            // bookmark，等索引恢复后再核对/清理，避免整个队列被卡住。
+            let needsReviewIndex =
+                !(deletion.reviewId ?? "").isEmpty
+                || target.bookmark?.note.isEmpty == false
+            if needsReviewIndex, !ownReviewsLoaded {
+                continue
+            }
+
+            var reviewDeleted = false
+            if let reviewId = target.review?.reviewId, !reviewId.isEmpty {
+                guard await service.deleteReview(reviewId: reviewId, cookie: cookie) else {
+                    continue
+                }
+                acted = true
+                reviewDeleted = true
+                guard notesRefreshSucceeded, generation == notesRefreshGeneration else {
+                    return
+                }
+            }
+
+            if let bookmark = target.bookmark,
+               let bookmarkId = serverBookmarkId(bookmark) {
+                let intentHadReview = !(deletion.reviewId ?? "").isEmpty
+                if !bookmark.note.isEmpty, target.review == nil,
+                   !intentHadReview, !reviewDeleted {
+                    // 只有内联想法、又没有可安全删除的 reviewId：
+                    // 不能只删划线留下孤儿想法。
+                    continue
+                }
+                guard await service.removeBookmark(bookmarkId: bookmarkId, cookie: cookie) else {
+                    continue
+                }
+                acted = true
+            }
+        }
+
+        guard acted else { return }
+        guard await reloadNotesForSync() else { return }
+        let confirmGeneration = notesRefreshGeneration
+        pendingHighlightDeletions.removeAll {
+            pendingDeletionIsGone($0, generation: confirmGeneration)
+        }
+        if pendingHighlightDeletions.isEmpty {
+            pendingDeleteNotice = nil
+        }
     }
 
     /// 只清理内存里的划线镜像，不写本机。
@@ -2061,11 +2584,33 @@ struct WereadNativeReaderView: View {
     /// 编辑 / 删除后重新拉全书划线和「我的想法」索引，供列表与核对使用。
     @MainActor
     private func refreshNotes() async {
+        // 刷新失败时索引仍是旧的，不能触发待删重试，否则会拿旧索引删云端。
+        guard await reloadNotesForSync() else { return }
+        await flushPendingDeletions(generation: notesRefreshGeneration)
+    }
+
+    /// 只刷新云端索引，不触发待删重试；避免删除确认流程递归刷新。
+    @MainActor
+    @discardableResult
+    private func reloadNotesForSync() async -> Bool {
+        let refreshStartedAt = Date().timeIntervalSince1970
         notesToken += 1
         let token = notesToken
         notesError = nil
+        notesRefreshSucceeded = false
         await loadBookmarks(bookId: target.book.id, token: token)
         await loadOwnReviews()
+        let succeeded =
+            token == notesToken
+            && serverNotesLoaded
+            && ownReviewsLoaded
+            && notesError == nil
+        if succeeded {
+            notesIndexUpdatedAt = max(notesIndexUpdatedAt, refreshStartedAt)
+            notesRefreshGeneration += 1
+        }
+        notesRefreshSucceeded = succeeded
+        return succeeded
     }
 
     /// 旧版本把划线和想法写在 UserDefaults。6S 存储硬约束下不再新增落盘，
@@ -2121,6 +2666,15 @@ struct WereadNativeReaderView: View {
         for entry in pending {
             var allSynced = true
             for item in entry.highlights {
+                if isPendingHighlightDeletion(
+                    chapterUid: entry.chapter.uid,
+                    text: item.text,
+                    range: item.range,
+                    ids: [item.id]
+                ) {
+                    // 用户已经删掉这条旧划线；不能迁移上传把它复活。
+                    continue
+                }
                 if legacyItemIsInServerNotes(item, chapterUid: entry.chapter.uid) {
                     continue
                 }
@@ -3163,7 +3717,8 @@ private struct WereadCloudNote: Identifiable, Hashable {
 }
 
 /// 旧版本把划线和想法写在 `UserDefaults`。6S 存储硬约束下不再新增落盘：
-/// 这里只保留「读一次旧数据 + 迁移成功后删除旧 key」的能力，**不再提供写回**。
+/// 这里只保留「读一次旧数据 + 迁移成功后删除旧 key」的能力；唯一的写回
+/// 是删除单条划线时清理该条，不新增正文笔记存储。
 /// 迁移失败的旧数据原样留在本机，下次打开这本书继续尝试，不静默丢弃。
 enum WereadLegacyHighlightStore {
     private static let prefix = "weread.highlights."
@@ -3182,10 +3737,74 @@ enum WereadLegacyHighlightStore {
         return list
     }
 
-    /// 迁移确认云端已有后清理旧 key。这是本类型唯一的写操作，且只删不写笔记。
+    /// 迁移确认云端已有后清理旧 key。
     static func remove(bookId: String, chapterUid: Int) {
         UserDefaults.standard.removeObject(forKey: key(bookId: bookId, chapterUid: chapterUid))
     }
+
+    /// 用户删掉旧镜像里的某一条划线时，只移除这一条；定位不唯一就不动，
+    /// 避免把同章其它旧划线一起删掉。有其它条目时仍写回旧 key，
+    /// 因为这属于清理既有数据，不新增正文笔记存储。
+    @discardableResult
+    static func removeMatching(
+        bookId: String,
+        chapterUid: Int,
+        entryId: String,
+        text: String,
+        range: String
+    ) -> Bool {
+        let list = load(bookId: bookId, chapterUid: chapterUid)
+        guard !list.isEmpty else { return false }
+        let textKey = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rangeKey = range.trimmingCharacters(in: .whitespacesAndNewlines)
+        let position: Int?
+        if !entryId.isEmpty, let exact = list.firstIndex(where: { $0.id == entryId }) {
+            position = exact
+        } else {
+            let matches = list.indices.filter { offset in
+                let item = list[offset]
+                let itemText = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let itemRange = (item.range ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !textKey.isEmpty, itemText != textKey { return false }
+                if !rangeKey.isEmpty { return itemRange == rangeKey }
+                return !textKey.isEmpty
+            }
+            position = matches.count == 1 ? matches.first : nil
+        }
+        guard let position else { return false }
+        var updated = list
+        updated.remove(at: position)
+        if updated.isEmpty {
+            remove(bookId: bookId, chapterUid: chapterUid)
+            return true
+        }
+        guard let data = try? JSONEncoder().encode(updated) else { return false }
+        UserDefaults.standard.set(data, forKey: key(bookId: bookId, chapterUid: chapterUid))
+        return true
+    }
+}
+
+/// 一条「已从本书移除、等待云端确认」的划线删除意图。
+///
+/// `entryId` 来自当前页面（可能是 JS 生成的临时 id），只在本次会话内
+/// 做精确匹配；跨刷新定位仍以章 + range/原文 + 服务端 ID 为准。
+private struct WereadPendingDeletion: Identifiable {
+    let id: UUID
+    let chapterUid: Int
+    let chapterIdx: Int
+    let text: String
+    let range: String
+    let entryId: String
+    let bookmarkId: String?
+    let reviewId: String?
+    let createdAt: TimeInterval
+}
+
+private struct WereadPendingDeletionTarget {
+    let bookmark: WereadBookmark?
+    let review: WereadOwnReview?
+    let ambiguous: Bool
 }
 
 /// 一次「写想法 / 编辑想法」请求。
@@ -3202,6 +3821,8 @@ private struct WereadNoteRequest: Identifiable {
     var chapterIdx: Int = 0
     /// 编辑已有想法；否则是给划线补想法（或新建）。
     var isEditing: Bool = false
+    /// 正文划线尚未进入云端索引时，允许按点击时的 tapped 直接新建想法。
+    var allowUnlocatedCreation: Bool = false
 }
 
 /// 上报进度用的位置快照。退出/翻章后视图状态会变，异步任务不能回头再读。
@@ -4565,9 +5186,35 @@ enum WereadReaderHTML {
             };
 
             window.__wrRestore = function (list) {
-                if (!list || !list.length) return;
+                list = list || [];
                 var root = document.getElementById('wr-content');
                 if (!root) return;
+                // 先把本轮列表里已不存在的 App 划线拆掉。删除划线后本地镜像
+                // 已移除，正文也要立即恢复成普通文字；服务端自己的划线
+                // （wr_highlight_char 等）不在这里处理。
+                var keep = {};
+                list.forEach(function (item) {
+                    if (item.id) keep['id:' + item.id] = true;
+                    var text = String(item.text || '');
+                    if (text) keep['text:' + text] = true;
+                });
+                var stale = root.querySelectorAll('mark.wr-hl');
+                for (var staleIndex = stale.length - 1; staleIndex >= 0; staleIndex--) {
+                    var staleMark = stale[staleIndex];
+                    var markId = staleMark.id || '';
+                    var markText = String(
+                        staleMark.getAttribute('data-hl-text') || staleMark.textContent || ''
+                    );
+                    if (keep['id:' + markId] || keep['text:' + markText]) continue;
+                    var staleParent = staleMark.parentNode;
+                    if (!staleParent) continue;
+                    while (staleMark.firstChild) {
+                        staleParent.insertBefore(staleMark.firstChild, staleMark);
+                    }
+                    staleParent.removeChild(staleMark);
+                    staleParent.normalize();
+                }
+                if (!list.length) return;
                 list.forEach(function (item) {
                     if (item.id && document.getElementById(item.id)) return;
                     var full = String(item.text || '');
