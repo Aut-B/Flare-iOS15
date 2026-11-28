@@ -5000,6 +5000,8 @@ enum WereadReaderHTML {
             --wr-bg: #ffffff;
             --wr-fg: #1c1c1e;
             --wr-hl-bg: #ffe58a;
+            /* 有想法的划线在黄底外再加一条细下划线；纯划线只保留黄底。 */
+            --wr-note-line: #d98a00;
             /* 正文字号只改这个变量，由浏览器重排；不缩放整页。 */
             --wr-font-size: \(Int(WereadFontSize.initial))px;
         }
@@ -5008,6 +5010,7 @@ enum WereadReaderHTML {
             --wr-bg: #000000;
             --wr-fg: #e5e5e7;
             --wr-hl-bg: #6b5a00;
+            --wr-note-line: #ffc45c;
         }
         html {
             font-size: var(--wr-font-size);
@@ -5114,7 +5117,7 @@ enum WereadReaderHTML {
             -webkit-box-decoration-break: clone;
         }
         mark.wr-hl[data-note]:not([data-note=""]) {
-            border-bottom: 2px solid #f0a020;
+            border-bottom: 2px solid var(--wr-note-line);
         }
         #wr-tools {
             position: fixed;
@@ -5835,15 +5838,6 @@ enum WereadReaderHTML {
                 return mark.getAttribute('data-hl-id') || mark.id || '';
             }
 
-            function markGroupExists(root, id) {
-                if (!id) return false;
-                var marks = root.querySelectorAll('mark.wr-hl');
-                for (var i = 0; i < marks.length; i++) {
-                    if (highlightGroupKey(marks[i]) === id) return true;
-                }
-                return false;
-            }
-
             function parseHighlightRange(value) {
                 var match = /^\\s*(\\d+)\\s*-\\s*(\\d+)\\s*$/.exec(String(value || ''));
                 if (!match) return null;
@@ -5872,6 +5866,54 @@ enum WereadReaderHTML {
                     );
                 }
 
+                // 想法/笔记挂在已经存在的划线上时，只更新整组的 note 属性，
+                // 不重新包 mark：同一 id 的 mark 早已在正文里，旧逻辑直接
+                // return，导致 CSS 的 [data-note] 下划线永远不出现。
+                function applyGroupNote(group, note, rangeText) {
+                    var value = String(note || '');
+                    for (var i = 0; i < group.marks.length; i++) {
+                        var mark = group.marks[i];
+                        mark.setAttribute('data-note', value);
+                        mark.setAttribute('data-hl-note', value);
+                        if (value) mark.title = value;
+                        else mark.removeAttribute('title');
+                        if (rangeText) mark.setAttribute('data-hl-range', rangeText);
+                    }
+                }
+
+                // 组内所有行内片段合起来才是整条画线的区间；按需计算并缓存，
+                // 避免每次 apply 都对每个 mark 做整章 Range.toString。
+                function groupSpan(group) {
+                    if (group.span !== undefined) return group.span;
+                    var start = Infinity;
+                    var end = -1;
+                    for (var i = 0; i < group.marks.length; i++) {
+                        var span = highlightSpan(root, group.marks[i]);
+                        if (!span) continue;
+                        if (span.start < start) start = span.start;
+                        if (span.end > end) end = span.end;
+                    }
+                    group.span = end > start ? { start: start, end: end } : null;
+                    return group.span;
+                }
+
+                function groupHasNote(group) {
+                    for (var i = 0; i < group.marks.length; i++) {
+                        if (group.marks[i].getAttribute('data-note')) return true;
+                    }
+                    return false;
+                }
+
+                // 整章文本只取一次；range 校验和唯一原文兜底共用。
+                var chapterTextCache = null;
+                function chapterText() {
+                    if (chapterTextCache !== null) return chapterTextCache;
+                    var probe = document.createRange();
+                    probe.selectNodeContents(root);
+                    chapterTextCache = String(probe.toString() || '');
+                    return chapterTextCache;
+                }
+
                 var keepIds = Object.create(null);
                 var textQuota = Object.create(null);
                 list.forEach(function (item) {
@@ -5890,7 +5932,12 @@ enum WereadReaderHTML {
                     if (!key) key = 'anon-' + index;
                     var group = groupByKey[key];
                     if (!group) {
-                        group = { key: key, text: markTextOf(mark), marks: [] };
+                        group = {
+                            key: key,
+                            text: markTextOf(mark),
+                            marks: [],
+                            span: undefined
+                        };
                         groupByKey[key] = group;
                         groups.push(group);
                     }
@@ -5926,21 +5973,66 @@ enum WereadReaderHTML {
                     }
                 });
                 if (!list.length) return;
+
+                // 已保留组按文本建索引，供「id 变了但原文相同且唯一」时补想法。
+                var keptByText = Object.create(null);
+                groups.forEach(function (group) {
+                    if (!group.keep || !group.text) return;
+                    if (!keptByText[group.text]) keptByText[group.text] = [];
+                    keptByText[group.text].push(group);
+                });
+
+                var desiredNotes = Object.create(null);
                 list.forEach(function (item) {
                     var groupId = item.id || ('h' + Date.now());
-                    if (markGroupExists(root, groupId)) return;
                     var full = String(item.text || '');
                     var note = String(item.note || '');
                     var rangeText = String(item.range || '');
+                    var target = groupId ? groupByKey[groupId] : null;
+                    if (target && !target.keep) target = null;
+                    // 云端想法索引与本机镜像可能是不同 id：range 完全相等就是
+                    // 同一段正文，直接把 note 补到已保留的组上。
+                    if (!target && note) {
+                        var known = parseHighlightRange(rangeText);
+                        if (known) {
+                            for (var g = 0; g < groups.length; g++) {
+                                var candidate = groups[g];
+                                if (!candidate.keep) continue;
+                                var candidateSpan = groupSpan(candidate);
+                                if (!candidateSpan) continue;
+                                if (candidateSpan.start === known.start
+                                    && candidateSpan.end === known.end) {
+                                    target = candidate;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    // range 对不上时，只有原文在正文里唯一对应一条已保留划线
+                    // 才补 note；同文多条不猜，避免把想法挂到另一处。
+                    if (!target && note && full) {
+                        var sameText = keptByText[full] || [];
+                        if (sameText.length === 1) target = sameText[0];
+                    }
+                    if (target) {
+                        if (note) {
+                            desiredNotes[target.key] = desiredNotes[target.key]
+                                ? desiredNotes[target.key] + '；' + note
+                                : note;
+                        } else if (!desiredNotes[target.key]) {
+                            // 空 note 只用来清掉旧下划线；已有非空 note 优先，
+                            // 防止同一轮里纯划线条目后到把想法冲掉。
+                            desiredNotes[target.key] = '';
+                        }
+                        return;
+                    }
                     var wrapped = [];
                     // 优先按 range 还原：range 是章内文本偏移，包 mark 只拆
                     // 文本节点、不增减文字，偏移仍然准确；跨多个文本节点
                     // 也能逐段行内包裹，不会把块节点塞进 mark。
                     var span = parseHighlightRange(rangeText);
                     if (span) {
-                        var probe = document.createRange();
-                        probe.selectNodeContents(root);
-                        var allText = String(probe.toString() || '');
+                        var allText = chapterText();
                         if (normalizedSlice(allText.slice(span.start, span.end))
                             === normalizedSlice(full)) {
                             wrapped = wrapTextSegments(
@@ -5953,29 +6045,74 @@ enum WereadReaderHTML {
                         }
                     }
                     if (wrapped.length) return;
-                    // range 对不上（旧镜像/空白差异）再退回原文查找。只在
-                    // 单个文本节点内包，绝不把块节点塞进行内 mark。
+                    // range 对不上（旧镜像/空白差异）时，先在整章文本里找
+                    // 完整原文；必须只出现一次才补，重复出现不硬编。
+                    if (full.length >= 4) {
+                        var whole = chapterText();
+                        var at = whole.indexOf(full);
+                        if (at >= 0 && whole.indexOf(full, at + full.length) < 0) {
+                            wrapped = wrapTextSegments(
+                                textNodeSegments(root, at, at + full.length),
+                                groupId,
+                                full,
+                                note,
+                                rangeText
+                            );
+                        }
+                    }
+                    if (wrapped.length) return;
+                    // 最后退回单文本节点前缀兜底；至少 4 字，避免短词满章误划。
+                    if (full.length < 4) return;
                     var needle = full.slice(0, 40);
-                    if (!needle) return;
                     var walker = document.createTreeWalker(root, 4, null);
                     var node = null;
+                    var matchNode = null;
+                    var matchAt = -1;
+                    var matches = 0;
                     while ((node = walker.nextNode())) {
                         if (!node.nodeValue) continue;
                         if (node.parentElement && node.parentElement.closest('mark.wr-hl')) continue;
-                        var at = node.nodeValue.indexOf(needle);
-                        if (at < 0) continue;
-                        wrapped = wrapTextSegments(
-                            [{
-                                node: node,
-                                start: at,
-                                end: Math.min(at + full.length, node.nodeValue.length)
-                            }],
-                            groupId,
-                            full,
-                            note,
-                            rangeText
-                        );
-                        break;
+                        var from = 0;
+                        while (true) {
+                            var found = node.nodeValue.indexOf(needle, from);
+                            if (found < 0) break;
+                            matches += 1;
+                            if (matches === 1) {
+                                matchNode = node;
+                                matchAt = found;
+                            } else {
+                                break;
+                            }
+                            from = found + needle.length;
+                        }
+                        if (matches > 1) break;
+                    }
+                    // 同一段原文在正文里出现多次时不猜位置，宁可不下划线。
+                    if (matches !== 1 || !matchNode) return;
+                    wrapped = wrapTextSegments(
+                        [{
+                            node: matchNode,
+                            start: matchAt,
+                            end: Math.min(
+                                matchAt + full.length,
+                                matchNode.nodeValue.length
+                            )
+                        }],
+                        groupId,
+                        full,
+                        note,
+                        rangeText
+                    );
+                });
+
+                // 本轮列表里已经没有想法的旧组要清掉 data-note，黄底保留；
+                // 这样删除想法后下划线消失，不会继续冒充「有想法」。
+                groups.forEach(function (group) {
+                    if (!group.keep) return;
+                    if (Object.prototype.hasOwnProperty.call(desiredNotes, group.key)) {
+                        applyGroupNote(group, desiredNotes[group.key], '');
+                    } else if (groupHasNote(group)) {
+                        applyGroupNote(group, '', '');
                     }
                 });
             };
