@@ -4650,10 +4650,18 @@ enum WereadReaderHTML {
         p { margin: 0 0 1em; }
         h1, h2, h3, h4 { line-height: 1.4; margin: 1.2em 0 0.6em; }
         mark.wr-hl {
+            /* 只做行内包裹：任何块级 display / 纵向 margin 都会把正文段距
+               撑开；跨段选择时也绝不把 <p> 等块节点搬进 mark。 */
+            display: inline !important;
+            margin: 0 !important;
+            padding: 0 1px !important;
             background: var(--wr-hl-bg);
             color: inherit;
             border-radius: 2px;
-            padding: 0 1px;
+            line-height: inherit;
+            vertical-align: baseline;
+            box-decoration-break: clone;
+            -webkit-box-decoration-break: clone;
         }
         mark.wr-hl[data-note]:not([data-note=""]) {
             border-bottom: 2px solid #f0a020;
@@ -4891,7 +4899,9 @@ enum WereadReaderHTML {
                     if (!sel) {
                         window.webkit.messageHandlers.weread.postMessage({
                             type: 'highlightTap',
-                            id: hlMark.id || '',
+                            // 一条划线可能被拆成多段行内 mark；点任意一段都
+                            // 报整条划线的逻辑 id，避免 Swift 侧按段 id 对不上。
+                            id: hlMark.getAttribute('data-hl-id') || hlMark.id || '',
                             text: String(hlMark.getAttribute('data-hl-text') || hlMark.textContent || '').trim(),
                             note: String(hlMark.getAttribute('data-hl-note') || ''),
                             range: String(hlMark.getAttribute('data-hl-range') || '')
@@ -5076,6 +5086,149 @@ enum WereadReaderHTML {
                 }, 120);
             });
 
+            // —— 划线注入：只包文本节点，绝不把 <p>/<div> 等块节点搬进
+            // <mark>。surroundContents 只要范围跨到一个非文本节点就会抛错，
+            // 旧代码回退 extractContents() 后把整段块结构塞进行内 mark，
+            // 浏览器用匿名块排版，段距被撑开；再划一次继续嵌套，空隙叠加。
+            // 这里按章内文本偏移切成单文本节点片段，逐段用行内 mark 包。
+            function textNodeSegments(root, start, end) {
+                var segments = [];
+                if (!root || end <= start) return segments;
+                var cursor = 0;
+                var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+                var node = null;
+                while ((node = walker.nextNode())) {
+                    var value = node.nodeValue || '';
+                    var nodeStart = cursor;
+                    var nodeEnd = nodeStart + value.length;
+                    cursor = nodeEnd;
+                    if (!value.length) continue;
+                    // 已经在本 App 的 mark 里就不再包：多次划线/恢复时选区
+                    // 可能部分重叠，跳过已覆盖部分才能避免 mark 嵌套。
+                    if (node.parentElement
+                        && node.parentElement.closest('mark.wr-hl')) continue;
+                    var from = start > nodeStart ? start : nodeStart;
+                    var to = end < nodeEnd ? end : nodeEnd;
+                    if (to <= from) continue;
+                    // 纯空白片段（常见于 <p> 之间的格式化缩进）不包 mark：
+                    // 行内 mark 带 padding 后不再算「可忽略空白」，可能凭空
+                    // 多出一个行盒，反而制造新的段间距。
+                    var slice = value.slice(from - nodeStart, to - nodeStart);
+                    if (!/\\S/.test(slice)) continue;
+                    segments.push({
+                        node: node,
+                        start: from - nodeStart,
+                        end: to - nodeStart
+                    });
+                }
+                return segments;
+            }
+
+            function highlightSpan(root, mark) {
+                try {
+                    var range = document.createRange();
+                    range.selectNodeContents(mark);
+                    var start = textOffset(root, range.startContainer, range.startOffset);
+                    var end = textOffset(root, range.endContainer, range.endOffset);
+                    if (end < start) {
+                        var swap = start;
+                        start = end;
+                        end = swap;
+                    }
+                    return { start: start, end: end };
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            // 选区里已经存在的划线区间。再次点「划线」时用它判断幂等，
+            // 避免同一段文字生成嵌套 mark / 重复上传。
+            function coveredHighlightSpans(root, start, end) {
+                var spans = [];
+                var marks = root ? root.querySelectorAll('mark.wr-hl') : [];
+                for (var i = 0; i < marks.length; i++) {
+                    var span = highlightSpan(root, marks[i]);
+                    if (!span || span.end <= start || span.start >= end) continue;
+                    spans.push(span);
+                }
+                spans.sort(function (a, b) { return a.start - b.start; });
+                return spans;
+            }
+
+            // 选区减去已经划过的区间，只给新文字包 mark，避免嵌套。
+            function uncoveredRanges(start, end, spans) {
+                var ranges = [];
+                var cursor = start;
+                for (var i = 0; i < spans.length; i++) {
+                    var span = spans[i];
+                    if (span.end <= cursor) continue;
+                    if (span.start >= end) break;
+                    if (span.start > cursor) {
+                        ranges.push({
+                            start: cursor,
+                            end: span.start < end ? span.start : end
+                        });
+                    }
+                    if (span.end > cursor) cursor = span.end;
+                    if (cursor >= end) break;
+                }
+                if (cursor < end) ranges.push({ start: cursor, end: end });
+                var open = [];
+                for (var j = 0; j < ranges.length; j++) {
+                    if (ranges[j].end > ranges[j].start) open.push(ranges[j]);
+                }
+                return open;
+            }
+
+            function makeHighlightMark(groupId, index, text, note, rangeText) {
+                var mark = document.createElement('mark');
+                mark.className = 'wr-hl';
+                mark.id = index === 0 ? groupId : (groupId + '-' + index);
+                mark.setAttribute('data-hl-id', groupId);
+                mark.setAttribute('data-note', note || '');
+                if (note) mark.title = note;
+                // 点划线删除/改想法时要取回整条划线的完整数据：每一段都带
+                // 同一份，点到任意一段都能对回同一条云端条目。
+                mark.setAttribute('data-hl-text', text);
+                mark.setAttribute('data-hl-note', note || '');
+                mark.setAttribute('data-hl-range', rangeText);
+                return mark;
+            }
+
+            // 每个片段都在单个文本节点内，surroundContents 不需要处理块节点；
+            // 失败也不能回退 extractContents，否则又会把块结构塞进行内 mark。
+            function wrapTextSegments(segments, groupId, text, note, rangeText, indexOffset) {
+                var created = [];
+                var base = indexOffset || 0;
+                for (var i = 0; i < segments.length; i++) {
+                    var segment = segments[i];
+                    try {
+                        var range = document.createRange();
+                        range.setStart(segment.node, segment.start);
+                        range.setEnd(segment.node, segment.end);
+                        var mark = makeHighlightMark(
+                            groupId,
+                            base + created.length,
+                            text,
+                            note,
+                            rangeText
+                        );
+                        range.surroundContents(mark);
+                        created.push(mark);
+                    } catch (e) {
+                        // 文本节点在包裹过程中被替换：跳过这一段，绝不搬块节点。
+                    }
+                }
+                return created;
+            }
+
+            function clearSelectionAndTools() {
+                var selection = window.getSelection();
+                if (selection) selection.removeAllRanges();
+                hideTools();
+                savedRange = null;
+            }
+
             function wrapSelection(note, rangeOverride) {
                 var current = rangeOverride ? null : selectedText();
                 var range = rangeOverride || (current ? current.range : savedRange);
@@ -5083,13 +5236,8 @@ enum WereadReaderHTML {
                 var text = String(range.toString() || '').trim();
                 if (!text) return;
 
-                var mark = document.createElement('mark');
-                mark.className = 'wr-hl';
-                mark.id = 'h' + Date.now();
-                mark.setAttribute('data-note', note || '');
-                if (note) mark.title = note;
-
                 var root = document.getElementById('wr-content');
+                if (!root) return;
                 var start = textOffset(root, range.startContainer, range.startOffset);
                 var end = textOffset(root, range.endContainer, range.endOffset);
                 if (end < start) {
@@ -5097,30 +5245,78 @@ enum WereadReaderHTML {
                     start = end;
                     end = swap;
                 }
-                // 点划线删除/改想法时取回完整数据（新建的这条也要能点）。
-                mark.setAttribute('data-hl-text', text);
-                mark.setAttribute('data-hl-note', note || '');
-                mark.setAttribute('data-hl-range', start + '-' + end);
+                if (end <= start) {
+                    clearSelectionAndTools();
+                    return;
+                }
 
-                try {
-                    range.surroundContents(mark);
-                } catch (error) {
-                    var fragment = range.extractContents();
-                    mark.appendChild(fragment);
-                    range.insertNode(mark);
+                // 同一段文字再点一次「划线」：已有 mark 完全覆盖就什么都不做，
+                // 不重复注入、不重复上传；部分覆盖只包没划过的文字，绝不嵌套。
+                var covered = coveredHighlightSpans(root, start, end);
+                var open = uncoveredRanges(start, end, covered);
+                if (!open.length) {
+                    // 已经划过的文字再点「想法」：把想法挂到已有划线上，
+                    // 不重新包 mark、不新增云端划线；只在整段被同一条划线
+                    // 覆盖时才这么做，避免把想法挂错位置。
+                    if (note) {
+                        var existing = null;
+                        var allMarks = root.querySelectorAll('mark.wr-hl');
+                        for (var e = 0; e < allMarks.length; e++) {
+                            var span = highlightSpan(root, allMarks[e]);
+                            if (!span || span.start > start || span.end < end) continue;
+                            existing = allMarks[e];
+                            break;
+                        }
+                        if (existing) {
+                            var groupId = existing.getAttribute('data-hl-id') || existing.id || '';
+                            var groupText = existing.getAttribute('data-hl-text') || text;
+                            var groupRange = existing.getAttribute('data-hl-range') || '';
+                            for (var n = 0; n < allMarks.length; n++) {
+                                if (highlightGroupKey(allMarks[n]) !== groupId) continue;
+                                allMarks[n].setAttribute('data-note', note);
+                                allMarks[n].setAttribute('data-hl-note', note);
+                                allMarks[n].title = note;
+                            }
+                            window.webkit.messageHandlers.weread.postMessage({
+                                type: 'highlight',
+                                id: groupId,
+                                text: groupText,
+                                note: note || '',
+                                range: groupRange
+                            });
+                        }
+                    }
+                    clearSelectionAndTools();
+                    return;
+                }
+
+                var groupId = 'h' + Date.now();
+                var rangeText = start + '-' + end;
+                var created = [];
+                for (var i = 0; i < open.length; i++) {
+                    var part = wrapTextSegments(
+                        textNodeSegments(root, open[i].start, open[i].end),
+                        groupId,
+                        text,
+                        note || '',
+                        rangeText,
+                        created.length
+                    );
+                    for (var j = 0; j < part.length; j++) created.push(part[j]);
+                }
+                if (!created.length) {
+                    clearSelectionAndTools();
+                    return;
                 }
 
                 window.webkit.messageHandlers.weread.postMessage({
                     type: 'highlight',
-                    id: mark.id,
+                    id: groupId,
                     text: text,
                     note: note || '',
-                    range: start + '-' + end
+                    range: rangeText
                 });
-                var selection = window.getSelection();
-                if (selection) selection.removeAllRanges();
-                hideTools();
-                savedRange = null;
+                clearSelectionAndTools();
             }
 
             function keepSelection(event) {
@@ -5185,6 +5381,32 @@ enum WereadReaderHTML {
                 wrapSelection(String(note), range);
             };
 
+            function highlightGroupKey(mark) {
+                return mark.getAttribute('data-hl-id') || mark.id || '';
+            }
+
+            function markGroupExists(root, id) {
+                if (!id) return false;
+                var marks = root.querySelectorAll('mark.wr-hl');
+                for (var i = 0; i < marks.length; i++) {
+                    if (highlightGroupKey(marks[i]) === id) return true;
+                }
+                return false;
+            }
+
+            function parseHighlightRange(value) {
+                var match = /^\\s*(\\d+)\\s*-\\s*(\\d+)\\s*$/.exec(String(value || ''));
+                if (!match) return null;
+                var start = parseInt(match[1], 10);
+                var end = parseInt(match[2], 10);
+                if (!(end > start)) return null;
+                return { start: start, end: end };
+            }
+
+            function normalizedSlice(value) {
+                return String(value || '').replace(/\\s+/g, '');
+            }
+
             window.__wrRestore = function (list) {
                 list = list || [];
                 var root = document.getElementById('wr-content');
@@ -5192,36 +5414,99 @@ enum WereadReaderHTML {
                 // 先把本轮列表里已不存在的 App 划线拆掉。删除划线后本地镜像
                 // 已移除，正文也要立即恢复成普通文字；服务端自己的划线
                 // （wr_highlight_char 等）不在这里处理。
-                var keep = {};
-                list.forEach(function (item) {
-                    if (item.id) keep['id:' + item.id] = true;
-                    var text = String(item.text || '');
-                    if (text) keep['text:' + text] = true;
-                });
-                var stale = root.querySelectorAll('mark.wr-hl');
-                for (var staleIndex = stale.length - 1; staleIndex >= 0; staleIndex--) {
-                    var staleMark = stale[staleIndex];
-                    var markId = staleMark.id || '';
-                    var markText = String(
-                        staleMark.getAttribute('data-hl-text') || staleMark.textContent || ''
+                // 同一条划线可能被拆成多个行内 mark（跨文本节点），按
+                // data-hl-id 分组：整组保留或整组拆掉，不能只拆其中一段。
+                function markTextOf(mark) {
+                    return String(
+                        mark.getAttribute('data-hl-text') || mark.textContent || ''
                     );
-                    if (keep['id:' + markId] || keep['text:' + markText]) continue;
-                    var staleParent = staleMark.parentNode;
-                    if (!staleParent) continue;
-                    while (staleMark.firstChild) {
-                        staleParent.insertBefore(staleMark.firstChild, staleMark);
-                    }
-                    staleParent.removeChild(staleMark);
-                    staleParent.normalize();
                 }
+
+                var keepIds = Object.create(null);
+                var textQuota = Object.create(null);
+                list.forEach(function (item) {
+                    if (item.id) keepIds[item.id] = true;
+                    var text = String(item.text || '');
+                    if (!text) return;
+                    textQuota[text] = (textQuota[text] || 0) + 1;
+                });
+
+                var groups = [];
+                var groupByKey = Object.create(null);
+                var marks = root.querySelectorAll('mark.wr-hl');
+                for (var index = 0; index < marks.length; index++) {
+                    var mark = marks[index];
+                    var key = highlightGroupKey(mark);
+                    if (!key) key = 'anon-' + index;
+                    var group = groupByKey[key];
+                    if (!group) {
+                        group = { key: key, text: markTextOf(mark), marks: [] };
+                        groupByKey[key] = group;
+                        groups.push(group);
+                    }
+                    group.marks.push(mark);
+                }
+
+                // id 已命中的组先占用对应文本的名额（一条划线只占一个名额，
+                // 哪怕它被拆成多个行内片段）。文本只按「本轮列表里该文本的
+                // 名额」保留，避免同文两条划线删掉一条后旧 mark 继续赖着。
+                groups.forEach(function (group) {
+                    if (!keepIds[group.key]) return;
+                    group.keep = true;
+                    if (group.text && textQuota[group.text] > 0) {
+                        textQuota[group.text] -= 1;
+                    }
+                });
+                groups.forEach(function (group) {
+                    if (group.keep) return;
+                    var text = group.text || '';
+                    if (text && textQuota[text] > 0) {
+                        textQuota[text] -= 1;
+                        group.keep = true;
+                        return;
+                    }
+                    for (var part = 0; part < group.marks.length; part++) {
+                        var staleMark = group.marks[part];
+                        var staleParent = staleMark.parentNode;
+                        if (!staleParent) continue;
+                        while (staleMark.firstChild) {
+                            staleParent.insertBefore(staleMark.firstChild, staleMark);
+                        }
+                        staleParent.removeChild(staleMark);
+                    }
+                });
                 if (!list.length) return;
                 list.forEach(function (item) {
-                    if (item.id && document.getElementById(item.id)) return;
+                    var groupId = item.id || ('h' + Date.now());
+                    if (markGroupExists(root, groupId)) return;
                     var full = String(item.text || '');
+                    var note = String(item.note || '');
+                    var rangeText = String(item.range || '');
+                    var wrapped = [];
+                    // 优先按 range 还原：range 是章内文本偏移，包 mark 只拆
+                    // 文本节点、不增减文字，偏移仍然准确；跨多个文本节点
+                    // 也能逐段行内包裹，不会把块节点塞进 mark。
+                    var span = parseHighlightRange(rangeText);
+                    if (span) {
+                        var probe = document.createRange();
+                        probe.selectNodeContents(root);
+                        var allText = String(probe.toString() || '');
+                        if (normalizedSlice(allText.slice(span.start, span.end))
+                            === normalizedSlice(full)) {
+                            wrapped = wrapTextSegments(
+                                textNodeSegments(root, span.start, span.end),
+                                groupId,
+                                full,
+                                note,
+                                rangeText
+                            );
+                        }
+                    }
+                    if (wrapped.length) return;
+                    // range 对不上（旧镜像/空白差异）再退回原文查找。只在
+                    // 单个文本节点内包，绝不把块节点塞进行内 mark。
                     var needle = full.slice(0, 40);
                     if (!needle) return;
-                    // 每一条都新建 walker：上一次 surroundContents 会把文本节点
-                    // 拆开，复用旧 walker 会让第二条之后的划线找不到文本。
                     var walker = document.createTreeWalker(root, 4, null);
                     var node = null;
                     while ((node = walker.nextNode())) {
@@ -5229,19 +5514,17 @@ enum WereadReaderHTML {
                         if (node.parentElement && node.parentElement.closest('mark.wr-hl')) continue;
                         var at = node.nodeValue.indexOf(needle);
                         if (at < 0) continue;
-                        var range = document.createRange();
-                        range.setStart(node, at);
-                        range.setEnd(node, Math.min(at + full.length, node.nodeValue.length));
-                        var mark = document.createElement('mark');
-                        mark.className = 'wr-hl';
-                        mark.id = item.id || ('h' + Date.now());
-                        mark.setAttribute('data-note', item.note || '');
-                        if (item.note) mark.title = item.note;
-                        // 点划线删除/改想法时要能取回这条的完整数据。
-                        mark.setAttribute('data-hl-text', full);
-                        mark.setAttribute('data-hl-note', item.note || '');
-                        mark.setAttribute('data-hl-range', item.range || '');
-                        try { range.surroundContents(mark); } catch (error) {}
+                        wrapped = wrapTextSegments(
+                            [{
+                                node: node,
+                                start: at,
+                                end: Math.min(at + full.length, node.nodeValue.length)
+                            }],
+                            groupId,
+                            full,
+                            note,
+                            rangeText
+                        );
                         break;
                     }
                 });
